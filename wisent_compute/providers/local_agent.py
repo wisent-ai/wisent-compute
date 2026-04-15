@@ -47,17 +47,29 @@ def _vast_has_renter() -> bool:
         return False
 
 
-def _gpu_type_from_nvidia_smi() -> str:
-    """Detect GPU type from nvidia-smi."""
+def _detect_gpu_type() -> str:
+    """Detect GPU type from nvidia-smi or Apple Silicon."""
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True,
         )
-        name = r.stdout.strip().split("\n")[0]
-        return name.lower().replace(" ", "-").replace("geforce-", "nvidia-")
+        if r.returncode == 0:
+            name = r.stdout.strip().split("\n")[0]
+            return name.lower().replace(" ", "-").replace("geforce-", "nvidia-")
+    except FileNotFoundError:
+        pass
+    # Check for Apple Silicon MPS
+    try:
+        r = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True,
+        )
+        if "Apple" in r.stdout:
+            return "apple-mps"
     except Exception:
-        return ""
+        pass
+    return "cpu"
 
 
 def _write_heartbeat(store: JobStorage, job_id: str):
@@ -89,7 +101,7 @@ def _upload_output(store: JobStorage, job_id: str, output_dir: str):
 def run_agent(gpu_type: str = ""):
     """Main agent loop. Polls queue, runs jobs when Vast.ai is idle."""
     if not gpu_type:
-        gpu_type = _gpu_type_from_nvidia_smi()
+        gpu_type = _detect_gpu_type()
     _log(f"Agent started. GPU: {gpu_type}")
 
     store = JobStorage(BUCKET)
@@ -156,7 +168,13 @@ def run_agent(gpu_type: str = ""):
         queued.sort(key=lambda j: j.created_at)
         picked = None
         for job in queued:
-            if job.gpu_type == gpu_type or not job.gpu_type:
+            # Local agent picks up: matching GPU, CPU jobs, or any job if MPS
+            matches = (
+                job.gpu_type == gpu_type
+                or not job.gpu_type
+                or (gpu_type == "apple-mps" and job.provider == "local")
+            )
+            if matches:
                 picked = job
                 break
 
