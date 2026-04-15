@@ -62,7 +62,7 @@ gcloud functions deploy "$FUNCTION" \
     --trigger-http --no-allow-unauthenticated \
     --service-account="$SA_EMAIL" \
     --memory=512Mi --cpu=1 \
-    --set-env-vars="GCP_PROJECT=${PROJECT},WC_BUCKET=${BUCKET},WC_ALERTS_TOPIC=projects/${PROJECT}/topics/${TOPIC}" \
+    --set-env-vars="GCP_PROJECT=${PROJECT},WC_BUCKET=${BUCKET},WC_ALERTS_TOPIC=projects/${PROJECT}/topics/${TOPIC},WC_SLACK_WEBHOOK=${WC_SLACK_WEBHOOK:-},WC_TELEGRAM_BOT_TOKEN=${WC_TELEGRAM_BOT_TOKEN:-},WC_TELEGRAM_CHAT_ID=${WC_TELEGRAM_CHAT_ID:-},WC_SENDGRID_API_KEY=${WC_SENDGRID_API_KEY:-},WC_EMAIL_TO=${WC_EMAIL_TO:-},WC_EMAIL_FROM=${WC_EMAIL_FROM:-compute@wisent.ai}" \
     --project="$PROJECT" --quiet
 rm -rf "$STAGING"
 echo "Cloud Function deployed"
