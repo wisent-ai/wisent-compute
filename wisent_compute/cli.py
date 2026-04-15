@@ -44,7 +44,7 @@ def status(filter_id):
 
     click.echo(f"{'JOB ID':<12} {'STATE':<12} {'GPU':<20} {'RESTARTS':<10} {'COMMAND'}")
     click.echo("-" * 90)
-    for state in ("running", "queued", "completed", "failed"):
+    for state in ("running", "queue", "completed", "failed"):
         for job in all_jobs[state]:
             if filter_id and filter_id not in (job.job_id, job.batch_id):
                 continue
@@ -52,7 +52,7 @@ def status(filter_id):
             click.echo(f"{job.job_id:<12} {state:<12} {job.gpu_type or 'cpu':<20} {job.restarts:<10} {cmd}")
 
     counts = {k: len(v) for k, v in all_jobs.items()}
-    click.echo(f"\n{counts['running']} running, {counts['queued']} queued, "
+    click.echo(f"\n{counts['running']} running, {counts['queue']} queued, "
                f"{counts['completed']} completed, {counts['failed']} failed")
 
 
