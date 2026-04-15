@@ -88,3 +88,11 @@ def cancel(job_id):
         click.echo(f"Cancelled {job_id}, instance terminated")
         return
     click.echo(f"Job {job_id} not found in queue or running")
+
+
+@main.command()
+@click.option("--gpu-type", default="", help="GPU type (auto-detected if empty)")
+def agent(gpu_type):
+    """Run local GPU agent. Polls queue, respects Vast.ai renters."""
+    from .providers.local_agent import run_agent
+    run_agent(gpu_type=gpu_type)
