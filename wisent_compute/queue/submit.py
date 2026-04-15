@@ -1,16 +1,19 @@
-"""Job submission: build job JSON, render startup script, upload to GCS."""
+"""Job submission: via compute.wisent.com API or direct GCS."""
 from __future__ import annotations
 
+import json
 import os
 import re
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 from ..models import Job, JobState
 from ..config import estimate_gpu_memory, lookup_instance_type, BUCKET
-from .storage import JobStorage
 
 
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
+COMPUTE_API = os.environ.get("COMPUTE_API_URL", "https://compute.wisent.com")
 
 
 def _generate_job_id() -> str:
@@ -31,7 +34,59 @@ def submit_job(
     batch_id: str = "",
     bucket: str = "",
 ) -> Job:
-    """Submit a job to the queue. Returns the Job object with ID."""
+    """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
+    api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
+    if api_key:
+        return _submit_via_api(command, api_key, provider)
+    return _submit_via_gcs(command, provider, batch_id, bucket)
+
+
+def _submit_via_api(command: str, api_key: str, provider: str) -> Job:
+    """Submit through compute.wisent.com API."""
+    gpu_mem = estimate_gpu_memory(command)
+    env_vars = {}
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if hf_token:
+        env_vars["HF_TOKEN"] = hf_token
+        env_vars["HUGGING_FACE_HUB_TOKEN"] = hf_token
+
+    payload = json.dumps({
+        "docker_image": "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
+        "docker_cmd": command,
+        "docker_env": env_vars,
+        "disk_gb": 50,
+        "ssh_public_key": "",
+        "label": f"wc-{_generate_job_id()}",
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{COMPUTE_API}/api/v1/instances",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req)
+        data = json.loads(resp.read())
+        return Job(
+            job_id=data.get("id", _generate_job_id()),
+            command=command,
+            gpu_mem_gb=gpu_mem,
+            provider=provider,
+            state="running",
+            instance_ref=data.get("id", ""),
+        )
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        raise RuntimeError(f"API error {e.code}: {body}")
+
+
+def _submit_via_gcs(command: str, provider: str, batch_id: str, bucket: str) -> Job:
+    """Submit directly to GCS queue (no API server needed)."""
+    from .storage import JobStorage
     bucket = bucket or BUCKET
     job_id = _generate_job_id()
     gpu_mem = estimate_gpu_memory(command)
@@ -68,5 +123,4 @@ def submit_job(
     store = JobStorage(bucket)
     store.upload_script(job_id, script)
     store.write_job("queue", job)
-
     return job

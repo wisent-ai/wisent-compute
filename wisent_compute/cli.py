@@ -1,13 +1,30 @@
-"""CLI entry point: wc submit, wc status, wc results, wc cancel."""
+"""CLI entry point: wc submit, wc status, wc results, wc cancel, wc agent."""
 from __future__ import annotations
 
+import json
 import os
 import time
+import urllib.request
+import urllib.error
+
 import click
 
 from .config import BUCKET
-from .queue.submit import submit_job
+from .queue.submit import submit_job, COMPUTE_API
 from .queue.storage import JobStorage
+
+
+def _api_key():
+    return os.environ.get("COMPUTE_API_KEY", "").strip()
+
+
+def _api_get(path):
+    req = urllib.request.Request(
+        f"{COMPUTE_API}{path}",
+        headers={"X-API-Key": _api_key()},
+    )
+    resp = urllib.request.urlopen(req)
+    return json.loads(resp.read())
 
 
 @click.group()
@@ -18,7 +35,7 @@ def main():
 @main.command()
 @click.argument("command")
 @click.option("--provider", default="gcp")
-@click.option("--batch", "batch_file", default=None, help="File with one command per line")
+@click.option("--batch", "batch_file", default=None, help="File with commands")
 def submit(command, provider, batch_file):
     """Submit a job (or batch) to the queue."""
     commands = []
@@ -32,16 +49,38 @@ def submit(command, provider, batch_file):
     for cmd in commands:
         job = submit_job(cmd, provider=provider, batch_id=batch_id, bucket=BUCKET)
         click.echo(f"  {job.job_id}  {job.gpu_type or 'cpu':>20s}  {cmd[:60]}")
-    click.echo(f"\nSubmitted {len(commands)} job(s). Batch: {batch_id}")
+    mode = "API" if _api_key() else "GCS"
+    click.echo(f"\nSubmitted {len(commands)} job(s) via {mode}. Batch: {batch_id}")
 
 
 @main.command()
 @click.argument("filter_id", required=False)
 def status(filter_id):
-    """Show job status across all states."""
+    """Show job status."""
+    if _api_key():
+        _status_api(filter_id)
+    else:
+        _status_gcs(filter_id)
+
+
+def _status_api(filter_id):
+    instances = _api_get("/api/v1/instances")
+    click.echo(f"{'ID':<38} {'STATUS':<12} {'IMAGE':<30} {'COST'}")
+    click.echo("-" * 95)
+    for inst in instances:
+        iid = inst.get("id", "")[:36]
+        st = inst.get("status", "")
+        img = inst.get("docker_image", "")[:28]
+        cost = inst.get("total_cost_cents", 0) / 100
+        if filter_id and filter_id not in iid:
+            continue
+        click.echo(f"{iid:<38} {st:<12} {img:<30} ${cost:.2f}")
+    click.echo(f"\n{len(instances)} instance(s)")
+
+
+def _status_gcs(filter_id):
     store = JobStorage(BUCKET)
     all_jobs = store.list_all_jobs()
-
     click.echo(f"{'JOB ID':<12} {'STATE':<12} {'GPU':<20} {'RESTARTS':<10} {'COMMAND'}")
     click.echo("-" * 90)
     for state in ("running", "queue", "completed", "failed"):
@@ -50,7 +89,6 @@ def status(filter_id):
                 continue
             cmd = job.command[:50] + "..." if len(job.command) > 50 else job.command
             click.echo(f"{job.job_id:<12} {state:<12} {job.gpu_type or 'cpu':<20} {job.restarts:<10} {cmd}")
-
     counts = {k: len(v) for k, v in all_jobs.items()}
     click.echo(f"\n{counts['running']} running, {counts['queue']} queued, "
                f"{counts['completed']} completed, {counts['failed']} failed")
@@ -60,10 +98,9 @@ def status(filter_id):
 @click.argument("job_id")
 @click.argument("output_dir")
 def results(job_id, output_dir):
-    """Download job results from GCS."""
+    """Download job results."""
     os.makedirs(output_dir, exist_ok=True)
-    bucket = BUCKET
-    os.system(f"gsutil -m cp -r 'gs://{bucket}/status/{job_id}/output/*' '{output_dir}/'")
+    os.system(f"gsutil -m cp -r 'gs://{BUCKET}/status/{job_id}/output/*' '{output_dir}/'")
     click.echo(f"Results downloaded to {output_dir}")
 
 
@@ -71,6 +108,19 @@ def results(job_id, output_dir):
 @click.argument("job_id")
 def cancel(job_id):
     """Cancel a queued or running job."""
+    if _api_key():
+        req = urllib.request.Request(
+            f"{COMPUTE_API}/api/v1/instances/{job_id}",
+            headers={"X-API-Key": _api_key()},
+            method="DELETE",
+        )
+        try:
+            urllib.request.urlopen(req)
+            click.echo(f"Cancelled {job_id}")
+        except urllib.error.HTTPError as e:
+            click.echo(f"Failed: {e.code}")
+        return
+
     store = JobStorage(BUCKET)
     job = store.read_job("queue", job_id)
     if job:
@@ -87,11 +137,11 @@ def cancel(job_id):
         store.move_job(job, "running", "failed")
         click.echo(f"Cancelled {job_id}, instance terminated")
         return
-    click.echo(f"Job {job_id} not found in queue or running")
+    click.echo(f"Job {job_id} not found")
 
 
 @main.command()
-@click.option("--gpu-type", default="", help="GPU type (auto-detected if empty)")
+@click.option("--gpu-type", default="", help="GPU type (auto-detected)")
 def agent(gpu_type):
     """Run local GPU agent. Polls queue, respects Vast.ai renters."""
     from .providers.local_agent import run_agent
