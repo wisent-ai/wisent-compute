@@ -168,11 +168,11 @@ def run_agent(gpu_type: str = ""):
         queued.sort(key=lambda j: j.created_at)
         picked = None
         for job in queued:
-            # Local agent picks up: matching GPU, CPU jobs, or any job if MPS
+            # Local agent picks up: provider=local, CPU jobs, or matching GPU
             matches = (
-                job.gpu_type == gpu_type
+                job.provider == "local"
                 or not job.gpu_type
-                or (gpu_type == "apple-mps" and job.provider == "local")
+                or job.gpu_type == gpu_type
             )
             if matches:
                 picked = job

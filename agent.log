@@ -1,3 +1,4 @@
 [12:18:37] [agent] Agent started. GPU: apple-mps
 [12:18:43] [agent] Starting job 85f7fdeb: echo 'Hello from local agent' && uname -a && date
 [12:18:54] [agent] Job 85f7fdeb completed
+[12:27:06] [agent] Starting job 3e39466a: nvidia-smi && echo 'RTX 6000 agent test' && hostname && date
