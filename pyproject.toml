@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wisent-compute"
+version = "0.1.0"
+description = "Job queue and compute management for Wisent GPU workloads"
+requires-python = ">=3.10"
+dependencies = [
+    "google-cloud-storage>=2.18.0",
+    "google-cloud-compute>=1.19.0",
+    "google-cloud-pubsub>=2.21.0",
+    "google-cloud-secret-manager>=2.20.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+aws = ["boto3>=1.34.0"]
+dev = ["functions-framework>=3.0.0"]
+
+[project.scripts]
+wc = "wisent_compute.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["wisent_compute*"]
+
+[tool.setuptools.package-data]
+wisent_compute = ["templates/*.sh"]
