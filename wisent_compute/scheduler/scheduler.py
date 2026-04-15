@@ -39,6 +39,10 @@ def schedule_queued_jobs(
             _log(f"Hit per-tick cap ({MAX_SCHEDULE_PER_TICK})")
             break
 
+        # Skip local-only jobs — those are handled by the local agent
+        if job.provider == "local":
+            continue
+
         accel = job.gpu_type
         if not accel:
             accel = ""
