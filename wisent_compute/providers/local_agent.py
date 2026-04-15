@@ -24,6 +24,20 @@ HEARTBEAT_INTERVAL = 300
 VAST_API = "https://console.vast.ai/api/v0"
 
 
+def _gsutil_bin() -> str:
+    import shutil
+    found = shutil.which("gsutil")
+    if found:
+        return found
+    for p in [
+        os.path.expanduser("~/google-cloud-sdk/bin/gsutil"),
+        "/opt/google-cloud-sdk/bin/gsutil",
+    ]:
+        if os.path.isfile(p):
+            return p
+    return "gsutil"
+
+
 def _log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     sys.stderr.write(f"[{ts}] [agent] {msg}\n")
@@ -77,7 +91,7 @@ def _write_heartbeat(store: JobStorage, job_id: str):
     with open("/tmp/wc_heartbeat.txt", "w") as f:
         f.write(f"RUNNING {ts}")
     subprocess.run(
-        ["gsutil", "cp", "/tmp/wc_heartbeat.txt", f"gs://{store.bucket_name}/status/{job_id}/heartbeat"],
+        [_gsutil_bin(), "cp", "/tmp/wc_heartbeat.txt", f"gs://{store.bucket_name}/status/{job_id}/heartbeat"],
         capture_output=True,
     )
 
@@ -86,14 +100,14 @@ def _write_status(store: JobStorage, job_id: str, status: str):
     with open("/tmp/wc_status.txt", "w") as f:
         f.write(status)
     subprocess.run(
-        ["gsutil", "cp", "/tmp/wc_status.txt", f"gs://{store.bucket_name}/status/{job_id}/status"],
+        [_gsutil_bin(), "cp", "/tmp/wc_status.txt", f"gs://{store.bucket_name}/status/{job_id}/status"],
         capture_output=True,
     )
 
 
 def _upload_output(store: JobStorage, job_id: str, output_dir: str):
     subprocess.run(
-        ["gsutil", "-m", "cp", "-r", f"{output_dir}/*", f"gs://{store.bucket_name}/status/{job_id}/output/"],
+        [_gsutil_bin(), "-m", "cp", "-r", f"{output_dir}/*", f"gs://{store.bucket_name}/status/{job_id}/output/"],
         capture_output=True,
     )
 

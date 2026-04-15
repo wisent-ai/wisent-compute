@@ -4,3 +4,4 @@
 [12:27:06] [agent] Starting job 3e39466a: nvidia-smi && echo 'RTX 6000 agent test' && hostname && date
 [12:27:16] [agent] Job 3e39466a failed
 [12:30:23] [agent] Starting job 31737e9e: nvidia-smi && echo 'RTX 6000 test OK' && hostname && date
+[12:30:34] [agent] Job 31737e9e failed

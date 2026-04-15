@@ -29,22 +29,42 @@ def _has_adc() -> bool:
     return _USE_SDK
 
 
+def _find_gsutil() -> str:
+    """Find gsutil binary, checking common install locations."""
+    import shutil
+    found = shutil.which("gsutil")
+    if found:
+        return found
+    for path in [
+        os.path.expanduser("~/google-cloud-sdk/bin/gsutil"),
+        "/opt/google-cloud-sdk/bin/gsutil",
+        "/usr/lib/google-cloud-sdk/bin/gsutil",
+        "/snap/google-cloud-cli/current/bin/gsutil",
+    ]:
+        if os.path.isfile(path):
+            return path
+    return "gsutil"
+
+
+_GSUTIL = _find_gsutil()
+
+
 def _gsutil_cp(src: str, dst: str):
-    subprocess.run(["gsutil", "cp", src, dst], capture_output=True)
+    subprocess.run([_GSUTIL, "cp", src, dst], capture_output=True)
 
 
 def _gsutil_cat(path: str) -> str | None:
-    r = subprocess.run(["gsutil", "cat", path], capture_output=True, text=True)
+    r = subprocess.run([_GSUTIL, "cat", path], capture_output=True, text=True)
     return r.stdout if r.returncode == 0 else None
 
 
 def _gsutil_ls(prefix: str) -> list[str]:
-    r = subprocess.run(["gsutil", "ls", prefix], capture_output=True, text=True)
+    r = subprocess.run([_GSUTIL, "ls", prefix], capture_output=True, text=True)
     return [l.strip() for l in r.stdout.splitlines() if l.strip()] if r.returncode == 0 else []
 
 
 def _gsutil_rm(path: str):
-    subprocess.run(["gsutil", "rm", path], capture_output=True)
+    subprocess.run([_GSUTIL, "rm", path], capture_output=True)
 
 
 class JobStorage:
