@@ -32,7 +32,7 @@ def _log(msg):
 
 def _vast_has_renter() -> bool:
     """Check if any Vast.ai instance is currently rented on this machine."""
-    api_key = os.environ.get("VAST_API_KEY")
+    api_key = os.environ.get("VAST_API_KEY", "").strip()
     if not api_key:
         return False
     try:
