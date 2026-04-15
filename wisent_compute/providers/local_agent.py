@@ -174,11 +174,14 @@ def run_agent(gpu_type: str = ""):
 
         # No job running — check if we can pick one up
         if _vast_has_renter():
+            _log("Vast renter active, waiting...")
             time.sleep(POLL_INTERVAL)
             continue
 
         # Look for a queued job matching our GPU
+        _log("Polling queue...")
         queued = store.list_jobs("queue")
+        _log(f"Found {len(queued)} queued job(s)")
         queued.sort(key=lambda j: j.created_at)
         picked = None
         for job in queued:
