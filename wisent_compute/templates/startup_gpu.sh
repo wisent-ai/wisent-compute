@@ -57,5 +57,10 @@ else
 fi
 gsutil cp /tmp/wisent_job_status "gs://${STATUS_BUCKET}/status/${JOB_ID}/status" || true
 gsutil -m cp -r /home/ubuntu/output/* "gs://${STATUS_BUCKET}/status/${JOB_ID}/output/" || true
+# Also surface the GPU profile PNG/CSV/phases that wisent-tools writes to its
+# tempfile work_dir, so reviewers can find them at the same status path.
+if [ -d /tmp/wisent_activations_work ]; then
+    gsutil -m cp -r /tmp/wisent_activations_work/* "gs://${STATUS_BUCKET}/status/${JOB_ID}/output/" || true
+fi
 
 echo "Job finished with exit code $EXIT_CODE at $(date)"
