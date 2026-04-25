@@ -13,14 +13,17 @@ apt-get install -y python3-venv python3-pip git ca-certificates curl gnupg
 
 WORK=/opt/wisent-run
 rm -rf $WORK
-git clone https://${GH_TOKEN}@github.com/wisent-ai/wisent.git $WORK
+mkdir -p $WORK
 cd $WORK
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -e . lm-eval optuna matplotlib word2number evaluate
+# Install from PyPI to avoid editable-install + namespace-package interaction
+# bugs (see commit history: editable finder doesn't map deeply-nested
+# subpackages so wisent.core.utils etc. won't resolve under -e installs).
+pip install --upgrade wisent wisent-extractors wisent-evaluators wisent-tools \
+    lm-eval optuna matplotlib word2number evaluate
 pip uninstall -y hf-xet || true
-ln -sf registry/hf_task_extractors wisent/extractors/hf/hf_task_extractors || true
 
 export HF_TOKEN="${HF_TOKEN}"
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
