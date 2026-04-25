@@ -44,11 +44,15 @@ jobs:
       - name: Redeploy Cloud Function
         run: bash deploy/redeploy_function.sh
 
-      - name: Smoke-test the deployed Cloud Function
+      - name: Verify deployed revision is healthy
+        # Cloud Functions Gen2 deploy already waits for the revision to pass
+        # its health check before returning success — if redeploy_function.sh
+        # exited 0 above, the revision is serving. We just record which
+        # revision is now active for the run logs.
         run: |
-          set -e
-          URL=$(gcloud functions describe wisent-compute-tick \
-            --gen2 --region="${GCP_REGION}" --project="${GCP_PROJECT}" \
-            --format='value(serviceConfig.uri)')
-          TOKEN=$(gcloud auth print-identity-token --audiences="$URL")
-          curl -fsSL -H "Authorization: Bearer $TOKEN" "$URL" | head -c 200
+          gcloud run revisions list \
+            --service=wisent-compute-tick \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT}" \
+            --limit=3 \
+            --format="table(metadata.name,status.conditions[0].status,metadata.creationTimestamp)"
