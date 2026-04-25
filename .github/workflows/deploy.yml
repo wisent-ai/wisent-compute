@@ -41,8 +41,8 @@ jobs:
       - name: Show identity
         run: gcloud auth list && gcloud config list
 
-      - name: Run deploy script
-        run: bash deploy/gcp_setup.sh
+      - name: Redeploy Cloud Function
+        run: bash deploy/redeploy_function.sh
 
       - name: Smoke-test the deployed Cloud Function
         run: |
