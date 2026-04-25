@@ -75,6 +75,11 @@ class Job:
     preempt_count: int = 0                 # # times this job was preempted on Spot
     max_preempts_before_ondemand: int = 3  # after N preempts, fall back to on-demand
     priority: int = 0                      # higher = scheduled first within FIFO bucket
+    # Tracks failed create_instance calls so a job that can't currently be
+    # dispatched (zone exhausted, quota error, etc.) backs off instead of
+    # being retried on every tick. Resets on successful dispatch.
+    dispatch_attempts: int = 0
+    last_dispatch_attempt: str | None = None
 
     def __post_init__(self):
         if not self.created_at:

@@ -7,17 +7,30 @@ Routing rules:
   can claim. The Cloud Function (this file) skips a job ONLY if its capacity
   cannot satisfy the job (no quota, or cost cap exceeds available SKU rate);
   the local agent then has a chance.
+
+Dispatch backoff:
+A job whose create_instance call failed gets dispatch_attempts++ and a
+last_dispatch_attempt timestamp. It is then skipped for a backoff window
+that grows with attempt count. This prevents a wedged job (e.g. quota
+exhausted in every zone) from slamming the API on every 3-min tick AND
+gives the local agent a clean shot at the same job in the meantime.
 """
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from ..config import MAX_SCHEDULE_PER_TICK, INSTANCE_PREFIX
 from ..models import Job, JobState, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 from .quota import get_available_slots
+
+
+# Backoff schedule by attempt count; index = attempt count.
+# Each entry is the minimum minutes since last_dispatch_attempt before we retry.
+DISPATCH_BACKOFF_MINUTES = [0, 1, 5, 15, 30, 60, 120]
+MAX_DISPATCH_BACKOFF_MINUTES = 240
 
 
 def _log(msg):
@@ -31,6 +44,23 @@ def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
     if not preemptible:
         return base
     return base * SPOT_DISCOUNT.get(accel_type, 0.5)
+
+
+def _backoff_due(job: Job, now_utc: datetime) -> bool:
+    """True if this job is past its dispatch-backoff window."""
+    attempts = getattr(job, "dispatch_attempts", 0)
+    if attempts <= 0:
+        return True
+    idx = min(attempts, len(DISPATCH_BACKOFF_MINUTES) - 1)
+    wait_minutes = min(DISPATCH_BACKOFF_MINUTES[idx], MAX_DISPATCH_BACKOFF_MINUTES)
+    last = getattr(job, "last_dispatch_attempt", None)
+    if not last:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return now_utc - last_dt >= timedelta(minutes=wait_minutes)
 
 
 def _dynamic_per_tick_cap(queue_depth: int) -> int:
@@ -63,6 +93,7 @@ def schedule_queued_jobs(
     queued = store.list_jobs("queue")
     queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
 
+    now_utc = datetime.now(timezone.utc)
     per_tick_cap = _dynamic_per_tick_cap(len(queued))
     if per_tick_cap != MAX_SCHEDULE_PER_TICK:
         _log(f"Autoscale per-tick cap: {MAX_SCHEDULE_PER_TICK} -> {per_tick_cap} (queue={len(queued)})")
@@ -75,6 +106,9 @@ def schedule_queued_jobs(
 
         pinned = getattr(job, "pin_to_provider", False)
         if pinned and job.provider != provider_name:
+            continue
+
+        if not _backoff_due(job, now_utc):
             continue
 
         accel = job.gpu_type or ""
@@ -121,12 +155,20 @@ def schedule_queued_jobs(
         )
 
         if ref is None:
-            _log(f"Failed to create instance for {job.job_id}")
+            job.dispatch_attempts = getattr(job, "dispatch_attempts", 0) + 1
+            job.last_dispatch_attempt = now_utc.isoformat()
+            store.write_job("queue", job)
+            wait_idx = min(job.dispatch_attempts, len(DISPATCH_BACKOFF_MINUTES) - 1)
+            wait = DISPATCH_BACKOFF_MINUTES[wait_idx]
+            _log(f"Failed to create instance for {job.job_id} (attempt {job.dispatch_attempts}); backing off {wait}m")
             continue
 
+        # Successful dispatch — reset attempt counter.
+        job.dispatch_attempts = 0
+        job.last_dispatch_attempt = None
         job.instance_ref = ref
         job.state = JobState.RUNNING.value
-        job.started_at = datetime.now(timezone.utc).isoformat()
+        job.started_at = now_utc.isoformat()
         store.move_job(job, "queue", "running")
 
         if accel:
