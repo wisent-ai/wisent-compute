@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 
 from ..config import MAX_SCHEDULE_PER_TICK, INSTANCE_PREFIX
 from ..models import Job, JobState, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
+from ..queue.capacity import read_consumer_capacity, total_free_by_accel
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 from .quota import get_available_slots
@@ -95,6 +96,16 @@ def schedule_queued_jobs(
 
     now_utc = datetime.now(timezone.utc)
     per_tick_cap = _dynamic_per_tick_cap(len(queued))
+
+    # Read live consumer capacity. Any local agent reporting a free slot for
+    # an accelerator is a free-hardware peer we should yield to before paying
+    # for a fresh GCE VM. We track yields by accel so a job we yielded in
+    # this tick doesn't burn the local agent's capacity in our internal book
+    # before it actually claims.
+    consumer_caps = read_consumer_capacity(store)
+    local_free = total_free_by_accel(consumer_caps, kinds=("local",))
+    if local_free:
+        _log(f"Live local-agent capacity: {local_free}")
     if per_tick_cap != MAX_SCHEDULE_PER_TICK:
         _log(f"Autoscale per-tick cap: {MAX_SCHEDULE_PER_TICK} -> {per_tick_cap} (queue={len(queued)})")
 
@@ -115,6 +126,15 @@ def schedule_queued_jobs(
         if not accel:
             pass
         elif available.get(accel, 0) <= 0:
+            continue
+
+        # Yield to a live local agent if it has capacity for this accel and
+        # the job isn't pinned to gcp. Decrement our internal book so we
+        # don't yield more jobs than the local agent could actually take in
+        # this tick.
+        if not pinned and accel and local_free.get(accel, 0) > 0:
+            local_free[accel] -= 1
+            _log(f"Yielding {job.job_id} to local agent ({accel}, free remaining={local_free[accel]})")
             continue
 
         cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0

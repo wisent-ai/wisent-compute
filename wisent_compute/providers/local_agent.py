@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..config import BUCKET
 from ..models import Job, JobState, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
+from ..queue.capacity import publish_capacity
 from ..queue.storage import JobStorage
 
 
@@ -190,8 +191,16 @@ def run_agent(gpu_type: str = ""):
         # No job running — check if we can pick one up
         if _vast_has_renter():
             _log("Vast renter active, waiting...")
+            # Publish 0 capacity so the scheduler doesn't yield jobs to us
+            # while a paying renter is on the box.
+            publish_capacity(store, f"local-{os.uname().nodename}", "local", {})
             time.sleep(POLL_INTERVAL)
             continue
+
+        # Publish current capacity (1 slot of our GPU) so the cloud-function
+        # dispatcher knows it can yield jobs we'd run for free.
+        free_slots = {gpu_type: 1} if gpu_type and gpu_type != "cpu" else {}
+        publish_capacity(store, f"local-{os.uname().nodename}", "local", free_slots)
 
         # Look for a queued job matching our GPU
         _log("Polling queue...")
