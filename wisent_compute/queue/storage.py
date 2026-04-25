@@ -5,6 +5,7 @@ Uses gsutil subprocess for CLI (gcloud auth), Python SDK for Cloud Function (ADC
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -81,48 +82,74 @@ class JobStorage:
     def bucket(self):
         return self._sdk_bucket
 
-    def write_job(self, prefix: str, job: Job):
-        path = f"{self.gs}/{prefix}/{job.job_id}.json"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            f.write(job.to_json())
+    # Internal helpers — use SDK when ADC available (Cloud Function path),
+    # fall back to gsutil subprocess for CLI usage.
+    def _upload_text(self, blob_path: str, content: str):
+        if self._sdk_bucket:
+            self._sdk_bucket.blob(blob_path).upload_from_string(content)
+            return
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tmp", delete=False) as f:
+            f.write(content)
             tmp = f.name
-        _gsutil_cp(tmp, path)
+        _gsutil_cp(tmp, f"{self.gs}/{blob_path}")
         Path(tmp).unlink(missing_ok=True)
 
+    def _download_text(self, blob_path: str) -> str | None:
+        if self._sdk_bucket:
+            blob = self._sdk_bucket.blob(blob_path)
+            if not blob.exists():
+                return None
+            return blob.download_as_text()
+        return _gsutil_cat(f"{self.gs}/{blob_path}")
+
+    def _delete_blob(self, blob_path: str):
+        if self._sdk_bucket:
+            blob = self._sdk_bucket.blob(blob_path)
+            if blob.exists():
+                blob.delete()
+            return
+        _gsutil_rm(f"{self.gs}/{blob_path}")
+
+    def _list_paths(self, prefix: str) -> list[str]:
+        if self._sdk_bucket:
+            return [b.name for b in self._sdk_bucket.list_blobs(prefix=prefix)]
+        return [
+            p.removeprefix(self.gs + "/")
+            for p in _gsutil_ls(f"{self.gs}/{prefix}")
+        ]
+
+    def write_job(self, prefix: str, job: Job):
+        self._upload_text(f"{prefix}/{job.job_id}.json", job.to_json())
+
     def read_job(self, prefix: str, job_id: str) -> Job | None:
-        data = _gsutil_cat(f"{self.gs}/{prefix}/{job_id}.json")
+        data = self._download_text(f"{prefix}/{job_id}.json")
         return Job.from_json(data) if data else None
 
     def delete_job(self, prefix: str, job_id: str):
-        _gsutil_rm(f"{self.gs}/{prefix}/{job_id}.json")
+        self._delete_blob(f"{prefix}/{job_id}.json")
 
     def move_job(self, job: Job, from_prefix: str, to_prefix: str):
         self.write_job(to_prefix, job)
-        _gsutil_rm(f"{self.gs}/{from_prefix}/{job.job_id}.json")
+        self._delete_blob(f"{from_prefix}/{job.job_id}.json")
 
     def list_jobs(self, prefix: str) -> list[Job]:
-        paths = _gsutil_ls(f"{self.gs}/{prefix}/")
+        paths = self._list_paths(f"{prefix}/")
         jobs = []
         for p in paths:
             if p.endswith(".json"):
-                data = _gsutil_cat(p)
+                data = self._download_text(p)
                 if data:
                     jobs.append(Job.from_json(data))
         return jobs
 
     def upload_script(self, job_id: str, content: str):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-            f.write(content)
-            tmp = f.name
-        _gsutil_cp(tmp, f"{self.gs}/scripts/{job_id}.sh")
-        Path(tmp).unlink(missing_ok=True)
+        self._upload_text(f"scripts/{job_id}.sh", content)
 
     def download_script(self, job_id: str) -> str:
-        data = _gsutil_cat(f"{self.gs}/scripts/{job_id}.sh")
-        return data or ""
+        return self._download_text(f"scripts/{job_id}.sh") or ""
 
     def read_status(self, job_id: str) -> str | None:
-        data = _gsutil_cat(f"{self.gs}/status/{job_id}/status")
+        data = self._download_text(f"status/{job_id}/status")
         return data.strip().split()[0] if data else None
 
     def heartbeat_stale(self, job_id: str, threshold_minutes: int) -> bool:
@@ -139,7 +166,7 @@ class JobStorage:
 
     def cleanup_status(self, job_id: str):
         for suffix in ("status", "heartbeat"):
-            _gsutil_rm(f"{self.gs}/status/{job_id}/{suffix}")
+            self._delete_blob(f"status/{job_id}/{suffix}")
 
     def list_all_jobs(self) -> dict[str, list[Job]]:
         result = {}
