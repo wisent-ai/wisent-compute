@@ -97,6 +97,21 @@ def schedule_queued_jobs(
     now_utc = datetime.now(timezone.utc)
     per_tick_cap = _dynamic_per_tick_cap(len(queued))
 
+    # Per-accelerator fairness: when a heterogeneous batch is queued
+    # (e.g. T4 + A100-40 + A100-80 jobs all waiting), pure FIFO means the
+    # first-submitted accel hogs every tick until its quota saturates while
+    # other accels sit idle. Compute a soft per-accel per-tick share so each
+    # accel makes progress concurrently. Round up so distinct_accels=3 with
+    # cap=50 gives 17 each (the leftover 1 falls to whichever accel comes
+    # first in the sorted queue). The pass after this loop fills any
+    # remaining budget without per-accel limits, so we don't underuse.
+    distinct_accels = {(j.gpu_type or "_cpu") for j in queued}
+    if distinct_accels:
+        per_accel_share = max(1, -(-per_tick_cap // len(distinct_accels)))
+    else:
+        per_accel_share = per_tick_cap
+    accel_dispatched: dict[str, int] = {}
+
     # Read live consumer capacity. Any local agent reporting a free slot for
     # an accelerator is a free-hardware peer we should yield to before paying
     # for a fresh GCE VM. We track yields by accel so a job we yielded in
@@ -110,48 +125,35 @@ def schedule_queued_jobs(
         _log(f"Autoscale per-tick cap: {MAX_SCHEDULE_PER_TICK} -> {per_tick_cap} (queue={len(queued)})")
 
     scheduled = 0
-    for job in queued:
-        if scheduled >= per_tick_cap:
-            _log(f"Hit per-tick cap ({per_tick_cap})")
-            break
 
+    def _attempt(job: Job, enforce_accel_share: bool) -> str:
+        """Try to dispatch one job. Returns 'ok'/'yield'/'skip'/'cap'/'fail'."""
+        nonlocal scheduled
         pinned = getattr(job, "pin_to_provider", False)
         if pinned and job.provider != provider_name:
-            continue
-
+            return "skip"
         if not _backoff_due(job, now_utc):
-            continue
-
+            return "skip"
         accel = job.gpu_type or ""
-        if not accel:
-            pass
-        elif available.get(accel, 0) <= 0:
-            continue
-
-        # Yield to a live local agent if it has capacity for this accel and
-        # the job isn't pinned to gcp. Decrement our internal book so we
-        # don't yield more jobs than the local agent could actually take in
-        # this tick.
+        if accel and available.get(accel, 0) <= 0:
+            return "skip"
+        if enforce_accel_share and accel and accel_dispatched.get(accel, 0) >= per_accel_share:
+            return "skip"
         if not pinned and accel and local_free.get(accel, 0) > 0:
             local_free[accel] -= 1
             _log(f"Yielding {job.job_id} to local agent ({accel}, free remaining={local_free[accel]})")
-            continue
-
+            return "yield"
         cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0
         if cap > 0 and accel:
             preemptible = getattr(job, "preemptible", False)
             rate = _accel_hourly_rate(accel, preemptible)
             if rate > 0 and rate > cap:
                 _log(f"Skip {job.job_id}: ${rate:.2f}/hr > cap ${cap:.2f}/hr")
-                continue
-
+                return "cap"
         script = store.download_script(job.job_id)
         for key, val in secrets.items():
             script = script.replace(f"${{{key}}}", val)
-
         instance_name = f"{INSTANCE_PREFIX}-{job.job_id}"
-        # When a Spot-requesting job has been preempted past its cap, this
-        # attempt switches to on-demand so it has a chance to actually finish.
         switch_to_ondemand = (
             getattr(job, "preemptible", False)
             and getattr(job, "preempt_count", 0)
@@ -162,7 +164,6 @@ def schedule_queued_jobs(
         )
         if switch_to_ondemand:
             _log(f"{job.job_id}: preempt cap reached ({job.preempt_count}); dispatching on-demand this attempt")
-
         ref = provider.create_instance(
             name=instance_name,
             machine_type=job.machine_type,
@@ -173,7 +174,6 @@ def schedule_queued_jobs(
             startup_script=script,
             preemptible=preemptible_for_call,
         )
-
         if ref is None:
             job.dispatch_attempts = getattr(job, "dispatch_attempts", 0) + 1
             job.last_dispatch_attempt = now_utc.isoformat()
@@ -181,19 +181,36 @@ def schedule_queued_jobs(
             wait_idx = min(job.dispatch_attempts, len(DISPATCH_BACKOFF_MINUTES) - 1)
             wait = DISPATCH_BACKOFF_MINUTES[wait_idx]
             _log(f"Failed to create instance for {job.job_id} (attempt {job.dispatch_attempts}); backing off {wait}m")
-            continue
-
-        # Successful dispatch — reset attempt counter.
+            return "fail"
         job.dispatch_attempts = 0
         job.last_dispatch_attempt = None
         job.instance_ref = ref
         job.state = JobState.RUNNING.value
         job.started_at = now_utc.isoformat()
         store.move_job(job, "queue", "running")
-
         if accel:
             available[accel] = available.get(accel, 0) - 1
+            accel_dispatched[accel] = accel_dispatched.get(accel, 0) + 1
         scheduled += 1
         _log(f"Scheduled {job.job_id} on {ref} (preemptible={preemptible_for_call})")
+        return "ok"
+
+    # Pass 1 — fairness: each accel limited to per_accel_share dispatches so
+    # heterogeneous batches make concurrent progress instead of one accel
+    # hogging the whole tick.
+    for job in queued:
+        if scheduled >= per_tick_cap:
+            break
+        _attempt(job, enforce_accel_share=True)
+
+    # Pass 2 — fill any remaining tick budget without the per-accel cap so
+    # we don't underuse capacity when one accel still has plenty of room.
+    if scheduled < per_tick_cap:
+        for job in queued:
+            if scheduled >= per_tick_cap:
+                break
+            if job.state != JobState.QUEUED.value:
+                continue  # was claimed in pass 1
+            _attempt(job, enforce_accel_share=False)
 
     return scheduled
