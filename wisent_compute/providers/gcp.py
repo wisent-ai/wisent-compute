@@ -20,7 +20,7 @@ class GCPProvider(Provider):
 
     def create_instance(self, name, machine_type, accel_type,
                         boot_disk_gb, image, image_project,
-                        startup_script) -> str | None:
+                        startup_script, preemptible: bool = False) -> str | None:
         for zone in ZONE_ROTATION:
             try:
                 # Delete any existing terminated instance with same name
@@ -42,9 +42,20 @@ class GCPProvider(Provider):
                 meta = compute_v1.Metadata(items=[
                     compute_v1.Items(key="startup-script", value=startup_script),
                 ])
-                sched = compute_v1.Scheduling(
-                    preemptible=False, on_host_maintenance="TERMINATE",
-                )
+                if preemptible:
+                    # Use Spot (the modern provisioning model). The legacy
+                    # `preemptible` flag is a separate Bool that GCP keeps for
+                    # back-compat; setting both is redundant but explicit.
+                    sched = compute_v1.Scheduling(
+                        preemptible=True,
+                        provisioning_model="SPOT",
+                        on_host_maintenance="TERMINATE",
+                        instance_termination_action="STOP",
+                    )
+                else:
+                    sched = compute_v1.Scheduling(
+                        preemptible=False, on_host_maintenance="TERMINATE",
+                    )
                 accels = []
                 if accel_type:
                     accels.append(compute_v1.AcceleratorConfig(
@@ -60,7 +71,7 @@ class GCPProvider(Provider):
                 )
                 op = self.client.insert(project=self.project, zone=zone, instance_resource=inst)
                 op.result()
-                _log(f"Created {name}@{zone}")
+                _log(f"Created {name}@{zone} preemptible={preemptible}")
                 return f"{name}@{zone}"
             except Exception as e:
                 if "already exists" in str(e):
@@ -83,6 +94,15 @@ class GCPProvider(Provider):
             return inst.status in ("RUNNING", "STAGING", "PROVISIONING")
         except Exception:
             return False
+
+    def instance_lifecycle_state(self, instance_ref: str) -> str | None:
+        """Return raw GCE status: RUNNING/TERMINATED/STOPPED/STAGING/etc."""
+        name, zone = instance_ref.split("@")
+        try:
+            inst = self.client.get(project=self.project, zone=zone, instance=name)
+            return inst.status
+        except Exception:
+            return None
 
     def list_running_instances(self) -> dict[str, int]:
         counts = {}

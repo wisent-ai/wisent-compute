@@ -24,6 +24,25 @@ GPU_SIZING = {
     },
 }
 
+# On-demand $ per accelerator-hour. Used for cost-aware dispatch.
+# Source: GCP us-central1 list pricing (subject to change; refresh quarterly).
+GPU_HOURLY_RATE_USD = {
+    "nvidia-tesla-t4": 0.35,
+    "nvidia-l4": 0.71,
+    "nvidia-tesla-a100": 2.93,        # 40GB
+    "nvidia-tesla-a100-80gb": 3.67,
+    "nvidia-h100-80gb": 11.06,
+}
+# Spot/preemptible discount factor (multiply on-demand by this to get Spot rate).
+# Empirically ~0.5x for A100, ~0.4x for L4, ~0.3x for T4.
+SPOT_DISCOUNT = {
+    "nvidia-tesla-t4": 0.30,
+    "nvidia-l4": 0.40,
+    "nvidia-tesla-a100": 0.49,
+    "nvidia-tesla-a100-80gb": 0.49,
+    "nvidia-h100-80gb": 0.45,
+}
+
 
 @dataclass
 class Job:
@@ -48,6 +67,14 @@ class Job:
     boot_disk_gb: int = 200
     startup_script_uri: str = ""
     error: str | None = None
+    # New routing/cost fields. Default values keep all existing jobs behaving
+    # exactly as before — older clients that don't set them keep working.
+    preemptible: bool = False              # if true, dispatch on Spot
+    pin_to_provider: bool = False          # if true, only the named provider claims
+    max_cost_per_hour_usd: float = 0.0     # 0 = no cap
+    preempt_count: int = 0                 # # times this job was preempted on Spot
+    max_preempts_before_ondemand: int = 3  # after N preempts, fall back to on-demand
+    priority: int = 0                      # higher = scheduled first within FIFO bucket
 
     def __post_init__(self):
         if not self.created_at:

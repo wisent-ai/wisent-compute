@@ -9,7 +9,13 @@ import urllib.error
 
 import click
 
-from .config import BUCKET
+from .config import (
+    BUCKET,
+    DEFAULT_ANY_PROVIDER,
+    DEFAULT_MAX_COST_PER_HOUR_USD,
+    DEFAULT_PREEMPTIBLE,
+    DEFAULT_PRIORITY,
+)
 from .queue.submit import submit_job, COMPUTE_API
 from .queue.storage import JobStorage
 
@@ -34,9 +40,21 @@ def main():
 
 @main.command()
 @click.argument("command")
-@click.option("--provider", default="gcp")
+@click.option("--provider", default="gcp",
+              help="Preferred provider (gcp/local). With --any-provider this is just a hint.")
 @click.option("--batch", "batch_file", default=None, help="File with commands")
-def submit(command, provider, batch_file):
+@click.option("--spot/--no-spot", default=DEFAULT_PREEMPTIBLE,
+              help="Dispatch on Spot/Preemptible GPUs (cheaper, can be preempted).")
+@click.option("--max-cost-per-hour", "max_cost_per_hour", type=float,
+              default=DEFAULT_MAX_COST_PER_HOUR_USD,
+              help="Hard cap on $/hour for the chosen accelerator. 0 = no cap.")
+@click.option("--any-provider/--pin-provider", "any_provider",
+              default=DEFAULT_ANY_PROVIDER,
+              help="If true (default), any consumer with capacity can claim. "
+                   "If --pin-provider, only the named --provider is allowed.")
+@click.option("--priority", type=int, default=DEFAULT_PRIORITY,
+              help="Higher = scheduled first within FIFO bucket.")
+def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider, priority):
     """Submit a job (or batch) to the queue."""
     commands = []
     if batch_file:
@@ -47,10 +65,22 @@ def submit(command, provider, batch_file):
 
     batch_id = f"batch-{int(time.time())}"
     for cmd in commands:
-        job = submit_job(cmd, provider=provider, batch_id=batch_id, bucket=BUCKET)
+        job = submit_job(
+            cmd, provider=provider, batch_id=batch_id, bucket=BUCKET,
+            preemptible=spot,
+            max_cost_per_hour_usd=max_cost_per_hour,
+            pin_to_provider=not any_provider,
+            priority=priority,
+        )
         click.echo(f"  {job.job_id}  {job.gpu_type or 'cpu':>20s}  {cmd[:60]}")
     mode = "API" if _api_key() else "GCS"
-    click.echo(f"\nSubmitted {len(commands)} job(s) via {mode}. Batch: {batch_id}")
+    flags = []
+    if spot: flags.append("spot")
+    if max_cost_per_hour > 0: flags.append(f"cap=${max_cost_per_hour:.2f}/hr")
+    if not any_provider: flags.append(f"pinned={provider}")
+    if priority: flags.append(f"priority={priority}")
+    flag_str = (" [" + ", ".join(flags) + "]") if flags else ""
+    click.echo(f"\nSubmitted {len(commands)} job(s) via {mode}{flag_str}. Batch: {batch_id}")
 
 
 @main.command()

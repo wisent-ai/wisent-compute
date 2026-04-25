@@ -1,11 +1,20 @@
-"""Job scheduler: pick queued jobs and create instances."""
+"""Job scheduler: pick queued jobs and create instances.
+
+Routing rules:
+- job.pin_to_provider=True + job.provider="local" -> only local agent claims
+- job.pin_to_provider=True + job.provider=<X>     -> only provider X claims
+- job.pin_to_provider=False (default)             -> any consumer with capacity
+  can claim. The Cloud Function (this file) skips a job ONLY if its capacity
+  cannot satisfy the job (no quota, or cost cap exceeds available SKU rate);
+  the local agent then has a chance.
+"""
 from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
 
 from ..config import MAX_SCHEDULE_PER_TICK, INSTANCE_PREFIX
-from ..models import Job, JobState
+from ..models import Job, JobState, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 from .quota import get_available_slots
@@ -16,13 +25,34 @@ def _log(msg):
     sys.stderr.flush()
 
 
+def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
+    """Return $/hour for one accelerator of this type at given pricing model."""
+    base = GPU_HOURLY_RATE_USD.get(accel_type, 0.0)
+    if not preemptible:
+        return base
+    return base * SPOT_DISCOUNT.get(accel_type, 0.5)
+
+
+def _dynamic_per_tick_cap(queue_depth: int) -> int:
+    """Autoscale dispatch cap with queue depth.
+
+    Defaults to MAX_SCHEDULE_PER_TICK (4) for shallow queues, scales up for
+    larger bursts so a 723-job batch doesn't drip-feed at 4-per-tick. Hard
+    upper bound to avoid quota-thundering-herd.
+    """
+    base = MAX_SCHEDULE_PER_TICK
+    if queue_depth <= base * 2:
+        return base
+    return min(50, base + (queue_depth - base * 2) // 4 + 4)
+
+
 def schedule_queued_jobs(
     store: JobStorage,
     provider: Provider,
     provider_name: str,
     secrets: dict,
 ) -> int:
-    """Pick queued jobs that fit available GPU slots, create instances."""
+    """Pick queued jobs that fit available GPU slots and cost caps; create instances."""
     available = get_available_slots(store, provider, provider_name)
     _log(f"Available slots: {available}")
 
@@ -31,36 +61,54 @@ def schedule_queued_jobs(
         return 0
 
     queued = store.list_jobs("queue")
-    queued.sort(key=lambda j: j.created_at)
+    queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
+
+    per_tick_cap = _dynamic_per_tick_cap(len(queued))
+    if per_tick_cap != MAX_SCHEDULE_PER_TICK:
+        _log(f"Autoscale per-tick cap: {MAX_SCHEDULE_PER_TICK} -> {per_tick_cap} (queue={len(queued)})")
 
     scheduled = 0
     for job in queued:
-        if scheduled >= MAX_SCHEDULE_PER_TICK:
-            _log(f"Hit per-tick cap ({MAX_SCHEDULE_PER_TICK})")
+        if scheduled >= per_tick_cap:
+            _log(f"Hit per-tick cap ({per_tick_cap})")
             break
 
-        # Skip local-only jobs — those are handled by the local agent
-        if job.provider == "local":
+        pinned = getattr(job, "pin_to_provider", False)
+        if pinned and job.provider != provider_name:
             continue
 
-        accel = job.gpu_type
-        if not accel:
-            accel = ""
-
-        # CPU jobs (no GPU) always schedule
+        accel = job.gpu_type or ""
         if not accel:
             pass
         elif available.get(accel, 0) <= 0:
             continue
 
-        # Download startup script
-        script = store.download_script(job.job_id)
+        cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0
+        if cap > 0 and accel:
+            preemptible = getattr(job, "preemptible", False)
+            rate = _accel_hourly_rate(accel, preemptible)
+            if rate > 0 and rate > cap:
+                _log(f"Skip {job.job_id}: ${rate:.2f}/hr > cap ${cap:.2f}/hr")
+                continue
 
-        # Inject secrets into script
+        script = store.download_script(job.job_id)
         for key, val in secrets.items():
             script = script.replace(f"${{{key}}}", val)
 
         instance_name = f"{INSTANCE_PREFIX}-{job.job_id}"
+        # When a Spot-requesting job has been preempted past its cap, this
+        # attempt switches to on-demand so it has a chance to actually finish.
+        switch_to_ondemand = (
+            getattr(job, "preemptible", False)
+            and getattr(job, "preempt_count", 0)
+               >= getattr(job, "max_preempts_before_ondemand", 3)
+        )
+        preemptible_for_call = (
+            getattr(job, "preemptible", False) and not switch_to_ondemand
+        )
+        if switch_to_ondemand:
+            _log(f"{job.job_id}: preempt cap reached ({job.preempt_count}); dispatching on-demand this attempt")
+
         ref = provider.create_instance(
             name=instance_name,
             machine_type=job.machine_type,
@@ -69,6 +117,7 @@ def schedule_queued_jobs(
             image=job.image,
             image_project=job.image_project,
             startup_script=script,
+            preemptible=preemptible_for_call,
         )
 
         if ref is None:
@@ -83,6 +132,6 @@ def schedule_queued_jobs(
         if accel:
             available[accel] = available.get(accel, 0) - 1
         scheduled += 1
-        _log(f"Scheduled {job.job_id} on {ref}")
+        _log(f"Scheduled {job.job_id} on {ref} (preemptible={preemptible_for_call})")
 
     return scheduled

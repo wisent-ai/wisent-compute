@@ -24,7 +24,11 @@ class AWSProvider(Provider):
 
     def create_instance(self, name, machine_type, accel_type,
                         boot_disk_gb, image, image_project,
-                        startup_script) -> str | None:
+                        startup_script, preemptible: bool = False) -> str | None:
+        # AWS Spot instances would require RequestSpotInstances + a different
+        # lifecycle than RunInstances. The current implementation always boots
+        # on-demand; preemptible=True is accepted for interface compatibility
+        # but is not yet wired through.
         sg = os.environ.get("AWS_SECURITY_GROUP", "")
         iam = os.environ.get("AWS_IAM_PROFILE", "wisent-instance-profile")
         ud = base64.b64encode(startup_script.encode()).decode()

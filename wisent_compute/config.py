@@ -15,6 +15,13 @@ HEARTBEAT_STALE_MINUTES = 15
 MAX_SCHEDULE_PER_TICK = 4
 INSTANCE_PREFIX = "wisent"
 
+# Defaults for the smart-routing CLI flags. 0 means "no cap"; the scheduler
+# only enforces a cost gate when this is positive.
+DEFAULT_MAX_COST_PER_HOUR_USD = 0.0
+DEFAULT_PRIORITY = 0
+DEFAULT_PREEMPTIBLE = False
+DEFAULT_ANY_PROVIDER = True
+
 DEFAULT_IMAGE = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
 DEFAULT_IMAGE_PROJECT = "deeplearning-platform-release"
 DEFAULT_CPU_IMAGE_FAMILY = "ubuntu-2204-lts"

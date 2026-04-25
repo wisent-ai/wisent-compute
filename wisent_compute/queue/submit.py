@@ -33,12 +33,23 @@ def submit_job(
     provider: str = "gcp",
     batch_id: str = "",
     bucket: str = "",
+    *,
+    preemptible: bool = False,
+    max_cost_per_hour_usd: float = 0.0,
+    pin_to_provider: bool = False,
+    priority: int = 0,
 ) -> Job:
     """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
     if api_key:
         return _submit_via_api(command, api_key, provider)
-    return _submit_via_gcs(command, provider, batch_id, bucket)
+    return _submit_via_gcs(
+        command, provider, batch_id, bucket,
+        preemptible=preemptible,
+        max_cost_per_hour_usd=max_cost_per_hour_usd,
+        pin_to_provider=pin_to_provider,
+        priority=priority,
+    )
 
 
 def _submit_via_api(command: str, api_key: str, provider: str) -> Job:
@@ -84,7 +95,14 @@ def _submit_via_api(command: str, api_key: str, provider: str) -> Job:
         raise RuntimeError(f"API error {e.code}: {body}")
 
 
-def _submit_via_gcs(command: str, provider: str, batch_id: str, bucket: str) -> Job:
+def _submit_via_gcs(
+    command: str, provider: str, batch_id: str, bucket: str,
+    *,
+    preemptible: bool = False,
+    max_cost_per_hour_usd: float = 0.0,
+    pin_to_provider: bool = False,
+    priority: int = 0,
+) -> Job:
     """Submit directly to GCS queue (no API server needed)."""
     from .storage import JobStorage
     bucket = bucket or BUCKET
@@ -118,6 +136,10 @@ def _submit_via_gcs(command: str, provider: str, batch_id: str, bucket: str) -> 
         batch_id=batch_id,
         state=JobState.QUEUED.value,
         startup_script_uri=f"gs://{bucket}/scripts/{job_id}.sh",
+        preemptible=preemptible,
+        max_cost_per_hour_usd=max_cost_per_hour_usd,
+        pin_to_provider=pin_to_provider,
+        priority=priority,
     )
 
     store = JobStorage(bucket)

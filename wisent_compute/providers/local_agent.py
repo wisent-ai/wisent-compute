@@ -182,10 +182,18 @@ def run_agent(gpu_type: str = ""):
         _log("Polling queue...")
         queued = store.list_jobs("queue")
         _log(f"Found {len(queued)} queued job(s)")
-        queued.sort(key=lambda j: j.created_at)
+        # Higher priority first; older first within same priority.
+        queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
         picked = None
         for job in queued:
-            # Local agent picks up: provider=local, CPU jobs, or matching GPU
+            # Local agent claim rule:
+            # - if pinned to a non-local provider, never claim
+            # - if pinned to local, always claim
+            # - otherwise (default): claim if our GPU satisfies the job
+            #   (CPU job, no gpu_type, or matching gpu_type)
+            pinned = getattr(job, "pin_to_provider", False)
+            if pinned and job.provider != "local":
+                continue
             matches = (
                 job.provider == "local"
                 or not job.gpu_type
