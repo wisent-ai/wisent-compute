@@ -33,8 +33,10 @@ mkdir -p /home/ubuntu/output
 STATUS_BUCKET="wisent-compute"
 echo "RUNNING $(date -u +%Y-%m-%dT%H:%M:%SZ)" | gsutil cp - "gs://${STATUS_BUCKET}/status/${JOB_ID}/status" || true
 
-# Heartbeat every 5 min
-(crontab -l 2>/dev/null; echo "*/5 * * * * echo RUNNING \$(date -u +\%Y-\%m-\%dT\%H:\%M:\%SZ) | gsutil cp - gs://${STATUS_BUCKET}/status/${JOB_ID}/heartbeat 2>/dev/null") | crontab -
+# Heartbeat every 5 min. Tolerate the case where cron isn't installed on
+# the deeplearning-platform image — when crontab is missing, set -e
+# would otherwise kill the entire startup script before the eval runs.
+(crontab -l 2>/dev/null || true; echo "*/5 * * * * echo RUNNING \$(date -u +\%Y-\%m-\%dT\%H:\%M:\%SZ) | gsutil cp - gs://${STATUS_BUCKET}/status/${JOB_ID}/heartbeat 2>/dev/null") | crontab - || true
 
 export WISENT_DTYPE=auto
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
