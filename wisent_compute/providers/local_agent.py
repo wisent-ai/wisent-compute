@@ -16,8 +16,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import BUCKET
-from ..models import Job, JobState
+from ..models import Job, JobState, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
 from ..queue.storage import JobStorage
+
+
+def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
+    """$/hour for one accelerator at the given pricing model.
+
+    Mirrors scheduler._accel_hourly_rate so both consumers apply the same
+    cost-cap rule. Local agents are typically free hardware, but any job
+    with max_cost_per_hour_usd set still respects that cap — it expresses
+    intent ("don't run this on anything pricier than X") regardless of
+    which consumer claims it.
+    """
+    base = GPU_HOURLY_RATE_USD.get(accel_type, 0.0)
+    if not preemptible:
+        return base
+    return base * SPOT_DISCOUNT.get(accel_type, 0.5)
 
 POLL_INTERVAL = 60
 HEARTBEAT_INTERVAL = 300
@@ -199,9 +214,19 @@ def run_agent(gpu_type: str = ""):
                 or not job.gpu_type
                 or job.gpu_type == gpu_type
             )
-            if matches:
-                picked = job
-                break
+            if not matches:
+                continue
+            # Cost cap mirrors scheduler.py: refuse jobs where the local
+            # agent's GPU exceeds the per-job $/hour budget.
+            cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0
+            if cap > 0 and job.gpu_type:
+                preemptible = getattr(job, "preemptible", False)
+                rate = _accel_hourly_rate(job.gpu_type, preemptible)
+                if rate > 0 and rate > cap:
+                    _log(f"Skip {job.job_id}: ${rate:.2f}/hr > cap ${cap:.2f}/hr")
+                    continue
+            picked = job
+            break
 
         if not picked:
             time.sleep(POLL_INTERVAL)
