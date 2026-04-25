@@ -67,12 +67,24 @@ def estimate_gpu_memory(command: str) -> int:
 
 
 def lookup_instance_type(provider: str, gpu_mem_gb: int) -> tuple[str, str]:
-    """Return (machine_type, accel_type) for the given memory requirement."""
+    """Return (machine_type, accel_type) for the given memory requirement.
+
+    If gpu_mem_gb exceeds every tier in GPU_SIZING, returns the LARGEST
+    available tier rather than ("", ""). The previous behavior produced an
+    empty machine_type that the GCE create_instance call rejected with
+    'Machine type with name "" does not exist', wedging the job. Sending
+    it to the largest tier means the in-VM workload may still OOM, but
+    that's a clearer failure mode than a malformed instance request.
+    """
     from .models import GPU_SIZING
     sizing = GPU_SIZING.get(provider, {})
-    best_mem, best_spec = 999999, ("", "")
+    if not sizing:
+        return ("", "")
+    best_mem, best_spec = 10**9, None
+    largest_mem, largest_spec = 0, None
     for mem, spec in sizing.items():
+        if mem > largest_mem:
+            largest_mem, largest_spec = mem, spec
         if mem >= gpu_mem_gb and mem < best_mem:
-            best_mem = mem
-            best_spec = spec
-    return best_spec
+            best_mem, best_spec = mem, spec
+    return best_spec if best_spec is not None else largest_spec

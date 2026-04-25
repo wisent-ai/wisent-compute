@@ -134,6 +134,16 @@ def schedule_queued_jobs(
             return "skip"
         if not _backoff_due(job, now_utc):
             return "skip"
+        # Guard against malformed jobs (empty machine_type from older versions
+        # of lookup_instance_type when gpu_mem exceeded all tiers). Mark them
+        # failed so they leave the queue instead of looping every tick.
+        if not (job.machine_type or "").strip():
+            job.state = JobState.FAILED.value
+            job.failed_at = now_utc.isoformat()
+            job.error = "machine_type is empty (job was created before the lookup_instance_type fix)"
+            store.move_job(job, "queue", "failed")
+            _log(f"{job.job_id}: failed (empty machine_type)")
+            return "fail"
         accel = job.gpu_type or ""
         if accel and available.get(accel, 0) <= 0:
             return "skip"
