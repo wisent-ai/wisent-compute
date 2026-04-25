@@ -62,12 +62,22 @@ class GCPProvider(Provider):
                         accelerator_type=f"zones/{zone}/acceleratorTypes/{accel_type}",
                         accelerator_count=1,
                     ))
+                # Attach wisent-compute-sa so the instance can write status +
+                # heartbeat to GCS, pull HF models with the in-startup token,
+                # and fetch from gcloud APIs. Without an SA attached, the
+                # metadata service returns 404 for default tokens and the
+                # whole startup script crashes before extraction begins.
+                sa = compute_v1.ServiceAccount(
+                    email=f"wisent-compute-sa@{self.project}.iam.gserviceaccount.com",
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
                 inst = compute_v1.Instance(
                     name=name,
                     machine_type=f"zones/{zone}/machineTypes/{machine_type}",
                     disks=[disk], network_interfaces=[net],
                     metadata=meta, scheduling=sched,
                     guest_accelerators=accels,
+                    service_accounts=[sa],
                 )
                 op = self.client.insert(project=self.project, zone=zone, instance_resource=inst)
                 op.result()
