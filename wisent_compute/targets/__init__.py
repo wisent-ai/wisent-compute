@@ -37,6 +37,15 @@ class ComputeTarget:
     max_concurrent: Optional[int] = None
     team_id: Optional[int] = None
     notes: str = ""
+    # env_overrides and agent_args propagate via the GCS registry to running
+    # agents — the agent compares them every poll and exits-for-restart when
+    # they change, so systemd brings it back up with the new env / CLI flags.
+    env_overrides: dict = field(default_factory=dict)
+    agent_args: list = field(default_factory=list)
+    # vram_gb is used by the agent to expand its capacity broadcast to every
+    # GCP gpu_type whose required VRAM ≤ this value (compatibility-list
+    # broadcast). Without it, the agent only advertises gpu_type as-is.
+    vram_gb: Optional[int] = None
     extra: dict = field(default_factory=dict)
 
 
@@ -44,6 +53,7 @@ def _from_dict(d: dict) -> ComputeTarget:
     known = {
         "name", "kind", "gpu_type", "slots", "ssh", "region",
         "spot", "max_concurrent", "team_id", "notes",
+        "env_overrides", "agent_args", "vram_gb",
     }
     extra = {k: v for k, v in d.items() if k not in known}
     return ComputeTarget(
@@ -57,6 +67,9 @@ def _from_dict(d: dict) -> ComputeTarget:
         max_concurrent=d.get("max_concurrent"),
         team_id=d.get("team_id"),
         notes=d.get("notes", ""),
+        env_overrides=dict(d.get("env_overrides") or {}),
+        agent_args=list(d.get("agent_args") or []),
+        vram_gb=d.get("vram_gb"),
         extra=extra,
     )
 

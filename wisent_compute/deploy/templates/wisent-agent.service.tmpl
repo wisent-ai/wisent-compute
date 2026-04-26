@@ -1,0 +1,28 @@
+[Unit]
+Description=Wisent Compute local GPU agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={USER}
+Group={USER}
+WorkingDirectory={HOME}
+Environment=HOME={HOME}
+Environment=PATH={PATH}
+Environment=PYTHONUNBUFFERED=1
+Environment=GOOGLE_APPLICATION_CREDENTIALS={ADC_PATH}
+Environment=GOOGLE_CLOUD_PROJECT={GCP_PROJECT}
+Environment=GCP_PROJECT={GCP_PROJECT}
+Environment=WC_BUCKET={WC_BUCKET}
+Environment=HF_TOKEN={HF_TOKEN}
+Environment=HUGGING_FACE_HUB_TOKEN={HF_TOKEN}
+Environment=WISENT_DTYPE=auto
+ExecStart={WC_BIN} agent --auto
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/var/log/wisent-agent.log
+StandardError=append:/var/log/wisent-agent.log
+
+[Install]
+WantedBy=multi-user.target

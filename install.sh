@@ -1,69 +1,68 @@
 #!/usr/bin/env bash
-# One-command onboarding for a new compute target.
+# One-command onboarding for a new Linux compute target.
 #
-# Usage (run on the box you want to add to the queue):
+# Usage (run on the box you want to add to the queue, as root or via sudo):
 #
-#   curl -fsSL https://raw.githubusercontent.com/wisent-ai/wisent-compute/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/wisent-ai/wisent-compute/main/install.sh | sudo bash
+#   # or, if HF_TOKEN must land on the box for activation jobs:
+#   curl -fsSL https://raw.githubusercontent.com/wisent-ai/wisent-compute/main/install.sh | sudo HF_TOKEN=hf_xxx bash
 #
-# What it does:
-#   1. pip install --user --upgrade wisent-compute (from PyPI)
-#   2. Drops a launchd plist (Darwin) or systemd --user unit (Linux)
-#      that runs `wc agent --auto` so the agent self-starts at boot
-#      and self-recovers on crash.
-#   3. Loads the service so the agent starts immediately.
+# What it does, in order:
+#   1. python3 -m pip install --break-system-packages --user wisent-compute wisent
+#      wisent-tools wisent-extractors wisent-evaluators (latest from PyPI)
+#   2. Renders wisent-agent.service from the package's deploy template,
+#      writes /etc/systemd/system/wisent-agent.service, daemon-reload,
+#      enable --now -> the agent self-starts at boot, restarts on failure,
+#      and reads gpu_type/slots/env_overrides/agent_args from the GCS-hosted
+#      registry every poll.
+#   3. Renders wisent-upgrade.service + wisent-upgrade.timer from templates,
+#      enables the timer -> daily pip-upgrade of the wisent stack so registry
+#      config + new releases reach the box without further SSH.
 #
-# After this single command, any change to gs://wisent-compute/registry.json
-# propagates to the agent on its next poll cycle. No further manual steps.
-#
-# Prerequisites the operator still needs once per box:
-#   - GOOGLE_APPLICATION_CREDENTIALS pointing at an SA key with read access
-#     to gs://wisent-compute/, OR a `gcloud auth application-default login`
-#     session for the user the service runs as.
-#   - The host's hostname (or the SSH user@host string) appears in
-#     wisent_compute/targets/registry.json with kind=local. If absent,
-#     the agent will still start but `wc agent --auto` will exit because
-#     no entry matches its hostname.
+# After this single command, every subsequent change to
+# gs://wisent-compute/registry.json propagates automatically. Picking the
+# right hostname / kind=local entry is up to whoever maintains the registry.
 
 set -euo pipefail
 
-OS="$(uname -s)"
+if [ "$(id -u)" -ne 0 ]; then
+    echo "[install] ERROR: this script must run as root (use sudo)." >&2
+    exit 1
+fi
+
+# Determine the unprivileged user the agent will run as. SUDO_USER is set by
+# sudo; fall back to "ubuntu" which is the default on Ubuntu cloud images.
+TARGET_USER="${SUDO_USER:-ubuntu}"
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+    echo "[install] ERROR: could not resolve home for user '$TARGET_USER'" >&2
+    exit 1
+fi
 HOSTNAME_S="$(hostname -s 2>/dev/null || hostname)"
-echo "[install] OS=${OS} hostname=${HOSTNAME_S}"
+echo "[install] user=$TARGET_USER home=$TARGET_HOME hostname=$HOSTNAME_S"
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "[install] ERROR: python3 not found on PATH" >&2
     exit 1
 fi
 
-echo "[install] pip install --user --upgrade wisent-compute"
-python3 -m pip install --user --upgrade wisent-compute
+echo "[install] pip install --user --break-system-packages --upgrade wisent stack"
+sudo -u "$TARGET_USER" python3 -m pip install --user --break-system-packages --upgrade \
+    wisent-compute wisent wisent-tools wisent-extractors wisent-evaluators
 
-# Resolve wc binary that pip just installed (handles --user PATH variations).
-WC_BIN="$(python3 -c 'import shutil, sys; sys.stdout.write(shutil.which("wc") or "")')"
-if [ -z "$WC_BIN" ] || [ "$WC_BIN" = "/usr/bin/wc" ]; then
-    for cand in \
-        "$HOME/.local/bin/wc" \
-        "$HOME/Library/Python/3.12/bin/wc" \
-        "$HOME/Library/Python/3.11/bin/wc" \
-        "$HOME/Library/Python/3.10/bin/wc" \
-        ; do
-        if [ -x "$cand" ]; then
-            WC_BIN="$cand"
-            break
-        fi
-    done
-fi
-if [ -z "$WC_BIN" ] || [ ! -x "$WC_BIN" ]; then
-    echo "[install] ERROR: could not locate the wc binary after pip install" >&2
+# Resolve wc binary that pip just installed.
+WC_BIN="$TARGET_HOME/.local/bin/wc"
+if [ ! -x "$WC_BIN" ]; then
+    echo "[install] ERROR: wc binary not found at $WC_BIN after pip install" >&2
     exit 1
 fi
 echo "[install] wc binary: $WC_BIN"
 
-# Find ADC path so the service inherits credentials. Prefer the user's
-# gcloud-managed default; falls back to an explicit GOOGLE_APPLICATION_CREDENTIALS.
+# ADC discovery. Operator can pre-set GOOGLE_APPLICATION_CREDENTIALS; otherwise
+# pick up whatever gcloud-managed legacy credentials sit under the user's home.
 ADC_PATH="${GOOGLE_APPLICATION_CREDENTIALS:-}"
 if [ -z "$ADC_PATH" ]; then
-    for cand in "$HOME/.config/gcloud/legacy_credentials/"*"/adc.json"; do
+    for cand in "$TARGET_HOME/.config/gcloud/legacy_credentials/"*"/adc.json"; do
         if [ -f "$cand" ]; then
             ADC_PATH="$cand"
             break
@@ -71,81 +70,74 @@ if [ -z "$ADC_PATH" ]; then
     done
 fi
 if [ -z "$ADC_PATH" ]; then
-    echo "[install] WARNING: no Application Default Credentials found"
-    echo "[install] WARNING: agent will start but cannot read GCS until ADC is set"
+    echo "[install] WARNING: no ADC found. Agent will start but cannot read GCS"
+    echo "[install] until $TARGET_HOME/.config/gcloud/legacy_credentials/.../adc.json exists"
+    ADC_PATH="$TARGET_HOME/.config/gcloud/adc.json"
 fi
+echo "[install] ADC path: $ADC_PATH"
 
-case "$OS" in
-    Darwin)
-        LABEL="com.wisent.compute.agent"
-        PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-        mkdir -p "$HOME/Library/LaunchAgents"
-        cat > "$PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>${LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${WC_BIN}</string>
-        <string>agent</string>
-        <string>--auto</string>
-    </array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>/tmp/${LABEL}.log</string>
-    <key>StandardErrorPath</key><string>/tmp/${LABEL}.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PYTHONUNBUFFERED</key><string>1</string>
-        <key>GOOGLE_APPLICATION_CREDENTIALS</key><string>${ADC_PATH}</string>
-    </dict>
-</dict>
-</plist>
-PLIST
-        UID_VAL=$(id -u)
-        launchctl bootout "gui/${UID_VAL}/${LABEL}" 2>/dev/null || true
-        launchctl bootstrap "gui/${UID_VAL}" "$PLIST"
-        launchctl kickstart -k "gui/${UID_VAL}/${LABEL}" || true
-        echo "[install] launchd job ${LABEL} loaded; logs at /tmp/${LABEL}.log"
-        ;;
-    Linux)
-        UNIT_DIR="$HOME/.config/systemd/user"
-        mkdir -p "$UNIT_DIR"
-        UNIT="$UNIT_DIR/wisent-compute-agent.service"
-        cat > "$UNIT" <<UNIT
-[Unit]
-Description=Wisent Compute local GPU agent (auto)
-After=network-online.target
-Wants=network-online.target
+# Optional HF token + GCP project + bucket override.
+HF_TOKEN_VAL="${HF_TOKEN:-}"
+GCP_PROJECT_VAL="${GCP_PROJECT:-wisent-480400}"
+WC_BUCKET_VAL="${WC_BUCKET:-wisent-compute}"
+PATH_VAL="$TARGET_HOME/google-cloud-sdk/bin:$TARGET_HOME/.local/bin:/usr/bin:/bin"
 
-[Service]
-Type=simple
-Environment=PYTHONUNBUFFERED=1
-Environment=GOOGLE_APPLICATION_CREDENTIALS=${ADC_PATH}
-ExecStart=${WC_BIN} agent --auto
-Restart=on-failure
-RestartSec=30
+# Resolve the deploy templates shipped inside the installed package.
+TEMPLATE_DIR=$(sudo -u "$TARGET_USER" python3 - <<'PY'
+import os, wisent_compute
+print(os.path.join(os.path.dirname(wisent_compute.__file__), "deploy", "templates"))
+PY
+)
+if [ ! -d "$TEMPLATE_DIR" ]; then
+    echo "[install] ERROR: deploy templates not found under installed package" >&2
+    exit 1
+fi
+echo "[install] templates: $TEMPLATE_DIR"
 
-[Install]
-WantedBy=default.target
-UNIT
-        systemctl --user daemon-reload
-        systemctl --user enable --now wisent-compute-agent.service
-        echo "[install] systemd --user unit ${UNIT} enabled"
-        echo "[install] follow logs with: journalctl --user -u wisent-compute-agent -f"
-        ;;
-    *)
-        echo "[install] ERROR: unsupported OS: ${OS}" >&2
-        exit 1
-        ;;
-esac
+render_template() {
+    local src="$1"
+    local dst="$2"
+    sed -e "s|{USER}|$TARGET_USER|g" \
+        -e "s|{HOME}|$TARGET_HOME|g" \
+        -e "s|{PATH}|$PATH_VAL|g" \
+        -e "s|{ADC_PATH}|$ADC_PATH|g" \
+        -e "s|{GCP_PROJECT}|$GCP_PROJECT_VAL|g" \
+        -e "s|{WC_BUCKET}|$WC_BUCKET_VAL|g" \
+        -e "s|{HF_TOKEN}|$HF_TOKEN_VAL|g" \
+        -e "s|{WC_BIN}|$WC_BIN|g" \
+        "$src" > "$dst"
+    chmod 644 "$dst"
+}
 
-echo "[install] DONE. Agent is running and broadcasting capacity."
-echo "[install] Verify on any other box with:"
-echo "          GOOGLE_APPLICATION_CREDENTIALS=... wc status"
-echo "[install] Hostname '${HOSTNAME_S}' must match a kind=local entry in"
-echo "          wisent_compute/targets/registry.json (or its ssh field's host part)"
-echo "          for the agent to claim its slot count from the registry."
+echo "[install] rendering /etc/systemd/system/wisent-agent.service"
+render_template "$TEMPLATE_DIR/wisent-agent.service.tmpl" /etc/systemd/system/wisent-agent.service
+
+echo "[install] rendering /etc/systemd/system/wisent-upgrade.service"
+render_template "$TEMPLATE_DIR/wisent-upgrade.service.tmpl" /etc/systemd/system/wisent-upgrade.service
+
+echo "[install] rendering /etc/systemd/system/wisent-upgrade.timer"
+render_template "$TEMPLATE_DIR/wisent-upgrade.timer.tmpl" /etc/systemd/system/wisent-upgrade.timer
+
+touch /var/log/wisent-agent.log /var/log/wisent-upgrade.log
+chown "$TARGET_USER:$TARGET_USER" /var/log/wisent-agent.log /var/log/wisent-upgrade.log
+
+systemctl daemon-reload
+systemctl enable --now wisent-agent.service
+systemctl enable --now wisent-upgrade.timer
+
+sleep 4
+echo
+echo "=== wisent-agent ==="
+systemctl is-active wisent-agent || true
+tail -3 /var/log/wisent-agent.log 2>/dev/null || true
+echo
+echo "=== wisent-upgrade timer ==="
+systemctl is-active wisent-upgrade.timer || true
+systemctl list-timers wisent-upgrade.timer --no-pager 2>/dev/null | head -3 || true
+
+echo
+echo "[install] DONE. Hostname '$HOSTNAME_S' must match a kind=local entry in"
+echo "          gs://wisent-compute/registry.json (or its ssh user@host part)"
+echo "          for the agent to pick up its slot count + env_overrides."
+echo "[install] Agent log: /var/log/wisent-agent.log"
+echo "[install] Upgrade log: /var/log/wisent-upgrade.log"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Wisent Compute self-upgrade daily timer
+
+[Timer]
+OnBootSec=10min
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+Unit=wisent-upgrade.service
+
+[Install]
+WantedBy=timers.target
