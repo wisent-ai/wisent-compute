@@ -188,13 +188,13 @@ def agent(gpu_type, target, auto):
     import os as _os
     if auto:
         from .targets import lookup_self
-        t = lookup_self(_os.uname().nodename, source="gcs")
+        t = lookup_self(_os.uname().nodename, source="auto")
         if not t:
-            raise click.ClickException(
-                f"hostname '{_os.uname().nodename}' not found in GCS registry"
-            )
+            raise click.ClickException(f"hostname '{_os.uname().nodename}' not in registry")
         gpu_type = gpu_type or (t.gpu_type or "")
         _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
+        for k, v in (t.env_overrides or {}).items():
+            _os.environ.setdefault(k, str(v))
         click.echo(f"agent --auto: target={t.name} gpu_type={gpu_type} slots={t.slots}")
     elif target:
         from .targets import lookup
