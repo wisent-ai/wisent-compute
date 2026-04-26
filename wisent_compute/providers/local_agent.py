@@ -86,18 +86,26 @@ def _detect_gpu_type() -> str:
     return "cpu"
 
 
-def _job_eligible(job, gpu_type: str) -> bool:
-    """Replicates the original local-agent claim rules: pinned-non-local rejects,
-    pinned-local always claims, otherwise GPU type must match (or be unset)."""
+def _job_eligible(job, gpu_type: str, vram_gb: int = 0) -> bool:
+    """Local-agent claim rules. Matches if pinned-local; or job.gpu_type is empty;
+    or job.gpu_type equals our own; or job.gpu_type is in the VRAM-compatibility
+    list (we have at least its tier of VRAM). The compatibility branch lets the
+    box claim A100/L4 jobs it was yielded by the scheduler's compat broadcast."""
     pinned = getattr(job, "pin_to_provider", False)
     if pinned and job.provider != "local":
         return False
-    matches = job.provider == "local" or not job.gpu_type or job.gpu_type == gpu_type
+    job_accel = job.gpu_type or ""
+    matches = (
+        job.provider == "local"
+        or not job_accel
+        or job_accel == gpu_type
+        or (vram_gb > 0 and job_accel in _compat_accel_types(vram_gb))
+    )
     if not matches:
         return False
     cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0
-    if cap > 0 and job.gpu_type:
-        rate = _accel_hourly_rate(job.gpu_type, getattr(job, "preemptible", False))
+    if cap > 0 and job_accel:
+        rate = _accel_hourly_rate(job_accel, getattr(job, "preemptible", False))
         if rate > 0 and rate > cap:
             return False
     return True
@@ -198,7 +206,7 @@ def run_agent(gpu_type: str = ""):
         for job in queued:
             if started >= free:
                 break
-            if not _job_eligible(job, gpu_type):
+            if not _job_eligible(job, gpu_type, vram_gb):
                 continue
             slots.append(start_slot(store, job, hostname, _log))
             started += 1
