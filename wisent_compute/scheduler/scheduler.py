@@ -95,8 +95,11 @@ def schedule_queued_jobs(
 
     queued = store.list_jobs("queue")
     queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
-
     now_utc = datetime.now(timezone.utc)
+
+    from .skip_done import filter_already_done
+    queued = filter_already_done(queued, store, now_utc, _log)
+
     per_tick_cap = _dynamic_per_tick_cap(len(queued))
 
     # Per-accelerator fairness: when a heterogeneous batch is queued
