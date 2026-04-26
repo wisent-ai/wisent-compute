@@ -68,6 +68,40 @@ def _model_from_command(cmd: str) -> str:
     return parts.split()[0] if parts.split() else ""
 
 
+def wall_time_table(rows: list[dict]) -> dict[tuple[str, str], float]:
+    """Median observed wall_time_seconds keyed by (model, gpu_type)."""
+    buckets: dict[tuple[str, str], list[float]] = {}
+    for r in rows:
+        key = (r["model"] or "(unknown)", r["gpu_type"])
+        buckets.setdefault(key, []).append(float(r["wall_s"]))
+    out: dict[tuple[str, str], float] = {}
+    for key, walls in buckets.items():
+        walls.sort()
+        out[key] = walls[len(walls) // 2]
+    return out
+
+
+def heuristic_wall_time_seconds(gpu_mem_gb: int) -> float:
+    """Used when no completed-job data exists for a (model, gpu_type) pair.
+
+    Derived from cdacc255 phase data: 50s startup + 7 strategies, each strategy
+    spending ~80s on layer upload plus extract time scaling with model size.
+    """
+    base = 50.0
+    per_strategy = 80.0 + max(0.0, gpu_mem_gb * 5.0)
+    return base + 7.0 * per_strategy
+
+
+def estimate_wall_time(job_command: str, gpu_type: str, gpu_mem_gb: int,
+                       table: dict[tuple[str, str], float]) -> float:
+    """Median observed wall-time for this (model, gpu_type) when available."""
+    model = _model_from_command(job_command) or "(unknown)"
+    val = table.get((model, gpu_type))
+    if val and val > 0:
+        return val
+    return heuristic_wall_time_seconds(gpu_mem_gb)
+
+
 def collect_completed(store: JobStorage) -> list[dict]:
     """One entry per finished job with wall-time + cost attribution."""
     rows: list[dict] = []

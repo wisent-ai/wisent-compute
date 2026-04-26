@@ -129,16 +129,20 @@ def schedule_queued_jobs(
     if local_vram_pool:
         _log(f"Live local-agent free_vram_gb: {local_vram_pool}")
 
-    # COST-OPTIMAL LOCAL PACK: greedy knapsack over queued jobs by
-    # $-saved-per-GB-of-local-VRAM. The local consumer is free hardware,
-    # so packing jobs that would otherwise cost the most on GCP first
-    # maximizes total $-saved per VRAM gigabyte. Jobs picked here get
-    # yielded to local even if they're not at the front of the FIFO queue;
-    # the scheduler's main loop still respects FIFO for everything that
-    # falls through to GCP create_instance, so submission order still
-    # determines GCP ordering.
+    # COST-OPTIMAL LOCAL PACK: knapsack over queued jobs by
+    # $-saved-per-GB-of-local-VRAM, weighted by per-job wall-time so the
+    # score reflects total dollars-saved-per-GB on this specific job (not
+    # per-hour-of-running). Wall-time comes from the median of past
+    # completed jobs of the same (model, gpu_type); when that bucket is
+    # empty, a model-size heuristic is used. Best-fit-decreasing packing.
     yield_targets: dict[str, str] = {}  # job_id -> consumer_id
     if local_vram_pool:
+        from .cost import collect_completed, estimate_wall_time, wall_time_table
+        try:
+            wt_table = wall_time_table(collect_completed(store))
+        except Exception as exc:
+            _log(f"wall_time_table unavailable ({exc}); using heuristic only")
+            wt_table = {}
         scored: list[tuple[float, int, Job]] = []
         for j in queued:
             need = int(getattr(j, "gpu_mem_gb", 0) or 0)
@@ -151,7 +155,8 @@ def schedule_queued_jobs(
             )
             if rate <= 0:
                 continue
-            score = rate / need  # $/hr per GB consumed
+            wall_s = estimate_wall_time(j.command, j.gpu_type or "", need, wt_table)
+            score = (wall_s / 3600.0) * rate / need  # $-saved per GB on this job
             scored.append((score, need, j))
         scored.sort(key=lambda t: -t[0])
         local_remaining = dict(local_vram_pool)
