@@ -1,0 +1,93 @@
+name: registry-bootstrap
+
+# Auto-provisions agents on every kind=local registry entry whose `ssh` field
+# is set, triggered when wisent_compute/targets/registry.json changes on main.
+# After the operator has dropped the deploy public key into the workstation's
+# ~/.ssh/authorized_keys ONCE, every subsequent registry edit lands the agent
+# (or refreshes the unit) on the named host without anyone touching the box.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "wisent_compute/targets/registry.json"
+      - ".github/workflows/registry-bootstrap.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: wisent-compute-registry-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT: wisent-480400
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install wisent-compute
+        run: python -m pip install --upgrade wisent-compute
+
+      - name: Load deploy SSH key
+        # WISENT_BOOTSTRAP_SSH_KEY is a repo or org secret containing the
+        # private key whose public counterpart sits in the workstation's
+        # authorized_keys. Without this secret set, the step is skipped
+        # cleanly (no failure) so a registry change to a target with
+        # ssh=null still no-ops.
+        if: ${{ env.HAS_KEY == 'true' }}
+        env:
+          HAS_KEY: ${{ secrets.WISENT_BOOTSTRAP_SSH_KEY != '' }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.WISENT_BOOTSTRAP_SSH_KEY }}" > ~/.ssh/wisent_bootstrap
+          chmod 600 ~/.ssh/wisent_bootstrap
+          eval "$(ssh-agent -s)"
+          ssh-add ~/.ssh/wisent_bootstrap
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+
+      - name: List local targets to provision
+        id: targets
+        run: |
+          python - <<'PY'
+          import json, os
+          with open("wisent_compute/targets/registry.json") as f:
+              data = json.load(f)
+          targets = [
+              t for t in data.get("targets", [])
+              if t.get("kind") == "local" and t.get("ssh")
+          ]
+          print(f"::group::Targets to provision ({len(targets)})")
+          for t in targets:
+              print(f"  {t['name']}  ssh={t['ssh']}  slots={t.get('slots',1)}")
+          print("::endgroup::")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("names=" + ",".join(t["name"] for t in targets) + "\n")
+              fh.write("count=" + str(len(targets)) + "\n")
+          PY
+
+      - name: Run wc bootstrap for each named target
+        if: ${{ steps.targets.outputs.count != '0' }}
+        run: |
+          IFS=',' read -ra NAMES <<< "${{ steps.targets.outputs.names }}"
+          for name in "${NAMES[@]}"; do
+              echo "::group::bootstrap $name"
+              wc bootstrap --target "$name" || echo "[err] $name failed"
+              echo "::endgroup::"
+          done
+
+      - name: Summary
+        run: |
+          echo "Registry-driven bootstrap complete."
+          echo "Provisioned ${{ steps.targets.outputs.count }} target(s)."
+          echo "Targets without ssh field set are listed in the registry as"
+          echo "unprovisioned and skipped here without error."
