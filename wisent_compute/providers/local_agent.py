@@ -7,16 +7,14 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
 import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 
 from ..config import BUCKET
-from ..models import Job, JobState, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
+from ..models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
 from ..queue.capacity import publish_capacity
 from ..queue.storage import JobStorage
 
@@ -38,20 +36,6 @@ def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
 POLL_INTERVAL = 60
 HEARTBEAT_INTERVAL = 300
 VAST_API = "https://console.vast.ai/api/v0"
-
-
-def _gsutil_bin() -> str:
-    import shutil
-    found = shutil.which("gsutil")
-    if found:
-        return found
-    for p in [
-        os.path.expanduser("~/google-cloud-sdk/bin/gsutil"),
-        "/opt/google-cloud-sdk/bin/gsutil",
-    ]:
-        if os.path.isfile(p):
-            return p
-    return "gsutil"
 
 
 def _log(msg):
@@ -102,166 +86,75 @@ def _detect_gpu_type() -> str:
     return "cpu"
 
 
-def _write_heartbeat(store: JobStorage, job_id: str):
-    ts = datetime.now(timezone.utc).isoformat()
-    with open("/tmp/wc_heartbeat.txt", "w") as f:
-        f.write(f"RUNNING {ts}")
-    subprocess.run(
-        [_gsutil_bin(), "cp", "/tmp/wc_heartbeat.txt", f"gs://{store.bucket_name}/status/{job_id}/heartbeat"],
-        capture_output=True,
-    )
-
-
-def _write_status(store: JobStorage, job_id: str, status: str):
-    with open("/tmp/wc_status.txt", "w") as f:
-        f.write(status)
-    subprocess.run(
-        [_gsutil_bin(), "cp", "/tmp/wc_status.txt", f"gs://{store.bucket_name}/status/{job_id}/status"],
-        capture_output=True,
-    )
-
-
-def _upload_output(store: JobStorage, job_id: str, output_dir: str):
-    subprocess.run(
-        [_gsutil_bin(), "-m", "cp", "-r", f"{output_dir}/*", f"gs://{store.bucket_name}/status/{job_id}/output/"],
-        capture_output=True,
-    )
+def _job_eligible(job, gpu_type: str) -> bool:
+    """Replicates the original local-agent claim rules: pinned-non-local rejects,
+    pinned-local always claims, otherwise GPU type must match (or be unset)."""
+    pinned = getattr(job, "pin_to_provider", False)
+    if pinned and job.provider != "local":
+        return False
+    matches = job.provider == "local" or not job.gpu_type or job.gpu_type == gpu_type
+    if not matches:
+        return False
+    cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0
+    if cap > 0 and job.gpu_type:
+        rate = _accel_hourly_rate(job.gpu_type, getattr(job, "preemptible", False))
+        if rate > 0 and rate > cap:
+            return False
+    return True
 
 
 def run_agent(gpu_type: str = ""):
-    """Main agent loop. Polls queue, runs jobs when Vast.ai is idle."""
+    """Main agent loop. Polls queue, runs jobs when Vast.ai is idle.
+
+    Concurrent slots: up to WC_LOCAL_SLOTS (env, default 1) jobs run in
+    parallel on the same GPU. Bumping this absorbs more of the bulk
+    queue without spilling to GCP — fits the auto-batch-capped
+    activation extraction (~3 GiB per Llama-1B worker on a 48 GB card).
+    """
+    from .local.slots import advance_slot, start_slot
     if not gpu_type:
         gpu_type = _detect_gpu_type()
-    _log(f"Agent started. GPU: {gpu_type}")
+    max_slots = max(1, int(os.environ.get("WC_LOCAL_SLOTS", "1")))
+    _log(f"Agent started. GPU: {gpu_type}  max_slots={max_slots}")
 
     store = JobStorage(BUCKET)
-    current_proc = None
-    current_job = None
-    paused = False
-    last_heartbeat = 0
+    hostname = os.uname().nodename
+    consumer_id = f"local-{hostname}"
+    slots: list[dict] = []
 
     while True:
-        now = time.time()
+        vast_active = _vast_has_renter()
 
-        # If running a job, manage it
-        if current_proc is not None:
-            # Check if Vast.ai renter appeared
-            if not paused and _vast_has_renter():
-                _log(f"Renter detected, pausing job {current_job.job_id}")
-                os.kill(current_proc.pid, signal.SIGSTOP)
-                paused = True
+        # Advance every running slot; drop the ones that finished.
+        slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
 
-            # Check if renter left
-            if paused and not _vast_has_renter():
-                _log(f"Renter gone, resuming job {current_job.job_id}")
-                os.kill(current_proc.pid, signal.SIGCONT)
-                paused = False
+        # If a paying renter is on the Vast box, broadcast 0 capacity so
+        # the scheduler stops handing us new jobs (existing slots stay
+        # paused via SIGSTOP until the renter leaves).
+        if vast_active:
+            publish_capacity(store, consumer_id, "local", {})
+            time.sleep(POLL_INTERVAL)
+            continue
 
-            # Check if process finished
-            ret = current_proc.poll()
-            if ret is not None:
-                status = "COMPLETED" if ret == 0 else f"FAILED exit={ret}"
-                _write_status(store, current_job.job_id, status)
-                output_dir = f"/tmp/wc-{current_job.job_id}/output"
-                if Path(output_dir).exists():
-                    _upload_output(store, current_job.job_id, output_dir)
+        free = max_slots - len(slots)
+        free_slots = {gpu_type: free} if gpu_type and gpu_type != "cpu" and free > 0 else {}
+        publish_capacity(store, consumer_id, "local", free_slots)
 
-                state = JobState.COMPLETED if ret == 0 else JobState.FAILED
-                current_job.state = state.value
-                ts = datetime.now(timezone.utc).isoformat()
-                if ret == 0:
-                    current_job.completed_at = ts
-                else:
-                    current_job.failed_at = ts
-                store.move_job(current_job, "running", state.value)
-                _log(f"Job {current_job.job_id} {state.value}")
-                current_proc = None
-                current_job = None
-                paused = False
-                continue
-
-            # Heartbeat
-            if not paused and now - last_heartbeat > HEARTBEAT_INTERVAL:
-                _write_heartbeat(store, current_job.job_id)
-                last_heartbeat = now
-
+        if free <= 0:
             time.sleep(10)
             continue
 
-        # No job running — check if we can pick one up
-        if _vast_has_renter():
-            _log("Vast renter active, waiting...")
-            # Publish 0 capacity so the scheduler doesn't yield jobs to us
-            # while a paying renter is on the box.
-            publish_capacity(store, f"local-{os.uname().nodename}", "local", {})
-            time.sleep(POLL_INTERVAL)
-            continue
-
-        # Publish current capacity (1 slot of our GPU) so the cloud-function
-        # dispatcher knows it can yield jobs we'd run for free.
-        free_slots = {gpu_type: 1} if gpu_type and gpu_type != "cpu" else {}
-        publish_capacity(store, f"local-{os.uname().nodename}", "local", free_slots)
-
-        # Look for a queued job matching our GPU
-        _log("Polling queue...")
+        # Pull eligible jobs from the queue, fill up to `free` of them.
         queued = store.list_jobs("queue")
-        _log(f"Found {len(queued)} queued job(s)")
-        # Higher priority first; older first within same priority.
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
-        picked = None
+        started = 0
         for job in queued:
-            # Local agent claim rule:
-            # - if pinned to a non-local provider, never claim
-            # - if pinned to local, always claim
-            # - otherwise (default): claim if our GPU satisfies the job
-            #   (CPU job, no gpu_type, or matching gpu_type)
-            pinned = getattr(job, "pin_to_provider", False)
-            if pinned and job.provider != "local":
+            if started >= free:
+                break
+            if not _job_eligible(job, gpu_type):
                 continue
-            matches = (
-                job.provider == "local"
-                or not job.gpu_type
-                or job.gpu_type == gpu_type
-            )
-            if not matches:
-                continue
-            # Cost cap mirrors scheduler.py: refuse jobs where the local
-            # agent's GPU exceeds the per-job $/hour budget.
-            cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0
-            if cap > 0 and job.gpu_type:
-                preemptible = getattr(job, "preemptible", False)
-                rate = _accel_hourly_rate(job.gpu_type, preemptible)
-                if rate > 0 and rate > cap:
-                    _log(f"Skip {job.job_id}: ${rate:.2f}/hr > cap ${cap:.2f}/hr")
-                    continue
-            picked = job
-            break
+            slots.append(start_slot(store, job, hostname, _log))
+            started += 1
 
-        if not picked:
+        if started == 0:
             time.sleep(POLL_INTERVAL)
-            continue
-
-        # Start the job
-        _log(f"Starting job {picked.job_id}: {picked.command[:60]}")
-        work_dir = f"/tmp/wc-{picked.job_id}"
-        os.makedirs(f"{work_dir}/output", exist_ok=True)
-
-        _write_status(store, picked.job_id, f"RUNNING {datetime.now(timezone.utc).isoformat()}")
-
-        picked.state = JobState.RUNNING.value
-        picked.started_at = datetime.now(timezone.utc).isoformat()
-        picked.instance_ref = f"local@{os.uname().nodename}"
-        store.move_job(picked, "queue", "running")
-
-        log_file = open(f"{work_dir}/output/command_output.log", "w")
-        current_proc = subprocess.Popen(
-            picked.command,
-            shell=True,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            cwd=work_dir,
-            env={**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1"},
-        )
-        current_job = picked
-        last_heartbeat = time.time()
-        _write_heartbeat(store, picked.job_id)
