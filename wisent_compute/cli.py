@@ -6,6 +6,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+from pathlib import Path
 
 import click
 
@@ -223,6 +224,37 @@ def coordinator(target, once):
     """
     from .coordinator import run as run_coordinator
     raise SystemExit(run_coordinator(target=target, once=once))
+
+
+@main.group()
+def cost():
+    """Per-job and per-batch cost reporting from observed wall-times."""
+
+
+@cost.command("report")
+def cost_report():
+    """Summarize $ spent per target_kind and per model from completed jobs."""
+    from .scheduler.cost import format_report, report
+    from .queue.storage import JobStorage
+    rep = report(JobStorage(BUCKET))
+    for line in format_report(rep):
+        click.echo(line)
+
+
+@cost.command("estimate")
+@click.argument("batch_file", type=click.Path(exists=True, dir_okay=False))
+def cost_estimate(batch_file):
+    """Project total $ for a batch file using observed per-job cost."""
+    from .scheduler.cost import project_batch
+    from .queue.storage import JobStorage
+    proj = project_batch(Path(batch_file), JobStorage(BUCKET))
+    if proj["projected_cost_usd"] is None:
+        click.echo(f"cannot project: {proj.get('reason', 'no data')}")
+        return
+    click.echo(f"jobs_in_batch:        {proj['jobs_in_batch']}")
+    click.echo(f"samples:              {proj['samples']} completed jobs in queue history")
+    click.echo(f"avg_cost_usd_per_job: ${proj['avg_cost_usd_per_job']:.4f}")
+    click.echo(f"projected_cost_usd:   ${proj['projected_cost_usd']:.2f}")
 
 
 @main.group()
