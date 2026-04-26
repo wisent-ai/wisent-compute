@@ -80,6 +80,12 @@ class Job:
     # being retried on every tick. Resets on successful dispatch.
     dispatch_attempts: int = 0
     last_dispatch_attempt: str | None = None
+    # Submitter provenance. Populated by submit_job from $USER + os.uname().nodename
+    # at submit time so every job in queue/running/completed/failed records who
+    # put it there. Defaults are empty string for back-compat with old records.
+    submitted_by: str = ""        # username on the submitting machine
+    submitted_from: str = ""      # hostname of the submitting machine
+    submitted_via: str = ""       # cli | api | other
 
     def __post_init__(self):
         if not self.created_at:

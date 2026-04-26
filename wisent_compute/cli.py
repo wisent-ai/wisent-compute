@@ -112,14 +112,15 @@ def _status_api(filter_id):
 def _status_gcs(filter_id):
     store = JobStorage(BUCKET)
     all_jobs = store.list_all_jobs()
-    click.echo(f"{'JOB ID':<12} {'STATE':<12} {'GPU':<20} {'RESTARTS':<10} {'COMMAND'}")
-    click.echo("-" * 90)
+    click.echo(f"{'JOB ID':<12} {'STATE':<10} {'GPU':<18} {'SUBMITTED_BY':<22} {'COMMAND'}")
+    click.echo("-" * 110)
     for state in ("running", "queue", "completed", "failed"):
         for job in all_jobs[state]:
             if filter_id and filter_id not in (job.job_id, job.batch_id):
                 continue
-            cmd = job.command[:50] + "..." if len(job.command) > 50 else job.command
-            click.echo(f"{job.job_id:<12} {state:<12} {job.gpu_type or 'cpu':<20} {job.restarts:<10} {cmd}")
+            cmd = job.command[:42] + "..." if len(job.command) > 42 else job.command
+            who = (f"{getattr(job, 'submitted_by', '') or '?'}@{(getattr(job, 'submitted_from', '') or '')[:12]}")[:22]
+            click.echo(f"{job.job_id:<12} {state:<10} {job.gpu_type or 'cpu':<18} {who:<22} {cmd}")
     counts = {k: len(v) for k, v in all_jobs.items()}
     click.echo(f"\n{counts['running']} running, {counts['queue']} queued, "
                f"{counts['completed']} completed, {counts['failed']} failed")

@@ -126,6 +126,12 @@ def _submit_via_gcs(
         "WISENT_VERSION": os.environ.get("WISENT_VERSION", "latest"),
     })
 
+    submitter = os.environ.get("USER", "") or os.environ.get("LOGNAME", "")
+    try:
+        host = os.uname().nodename
+    except AttributeError:
+        host = ""
+
     job = Job(
         job_id=job_id,
         command=command,
@@ -140,6 +146,9 @@ def _submit_via_gcs(
         max_cost_per_hour_usd=max_cost_per_hour_usd,
         pin_to_provider=pin_to_provider,
         priority=priority,
+        submitted_by=submitter,
+        submitted_from=host,
+        submitted_via="cli",
     )
 
     store = JobStorage(bucket)
