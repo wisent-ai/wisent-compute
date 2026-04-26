@@ -121,9 +121,6 @@ def schedule_queued_jobs(
     # before it actually claims.
     consumer_caps = read_consumer_capacity(store)
     local_free = total_free_by_accel(consumer_caps, kinds=("local",))
-    # Per-consumer free VRAM (gigabytes). Scheduler yields a job iff its
-    # gpu_mem_gb fits in some consumer's free_vram_gb. Decrement that
-    # consumer's pool when yielding so we don't double-yield within a tick.
     local_vram_pool: dict[str, int] = {
         cid: vram for cid, vram in consumers_by_free_vram(consumer_caps, kinds=("local",))
     }
@@ -131,6 +128,48 @@ def schedule_queued_jobs(
         _log(f"Live local-agent slots: {local_free}")
     if local_vram_pool:
         _log(f"Live local-agent free_vram_gb: {local_vram_pool}")
+
+    # COST-OPTIMAL LOCAL PACK: greedy knapsack over queued jobs by
+    # $-saved-per-GB-of-local-VRAM. The local consumer is free hardware,
+    # so packing jobs that would otherwise cost the most on GCP first
+    # maximizes total $-saved per VRAM gigabyte. Jobs picked here get
+    # yielded to local even if they're not at the front of the FIFO queue;
+    # the scheduler's main loop still respects FIFO for everything that
+    # falls through to GCP create_instance, so submission order still
+    # determines GCP ordering.
+    yield_targets: dict[str, str] = {}  # job_id -> consumer_id
+    if local_vram_pool:
+        scored: list[tuple[float, int, Job]] = []
+        for j in queued:
+            need = int(getattr(j, "gpu_mem_gb", 0) or 0)
+            if need <= 0 or getattr(j, "pin_to_provider", False):
+                continue
+            if not _backoff_due(j, now_utc):
+                continue
+            rate = _accel_hourly_rate(
+                j.gpu_type or "", getattr(j, "preemptible", False)
+            )
+            if rate <= 0:
+                continue
+            score = rate / need  # $/hr per GB consumed
+            scored.append((score, need, j))
+        scored.sort(key=lambda t: -t[0])
+        local_remaining = dict(local_vram_pool)
+        for score, need, j in scored:
+            best_cid = None
+            best_free = -1
+            for cid, free_gb in local_remaining.items():
+                if free_gb >= need and free_gb > best_free:
+                    best_cid, best_free = cid, free_gb
+            if best_cid is None:
+                continue
+            yield_targets[j.job_id] = best_cid
+            local_remaining[best_cid] -= need
+        if yield_targets:
+            _log(
+                f"Cost-optimal local pack: {len(yield_targets)} jobs yielded; "
+                f"remaining_vram={local_remaining}"
+            )
     if per_tick_cap != MAX_SCHEDULE_PER_TICK:
         _log(f"Autoscale per-tick cap: {MAX_SCHEDULE_PER_TICK} -> {per_tick_cap} (queue={len(queued)})")
 
@@ -159,16 +198,10 @@ def schedule_queued_jobs(
             return "skip"
         if enforce_accel_share and accel and accel_dispatched.get(accel, 0) >= per_accel_share:
             return "skip"
-        # VRAM-first yield: pick the local consumer with the most free VRAM
-        # whose pool still admits this job's gpu_mem_gb. Falls back to the
-        # legacy slot-counted yield if no consumer publishes free_vram_gb.
-        need_gb = int(getattr(job, "gpu_mem_gb", 0) or 0)
-        if not pinned and need_gb > 0 and local_vram_pool:
-            best_cid = max(local_vram_pool, key=lambda c: local_vram_pool[c])
-            if local_vram_pool[best_cid] >= need_gb:
-                local_vram_pool[best_cid] -= need_gb
-                _log(f"Yielding {job.job_id} to {best_cid} ({need_gb}GB; free_vram remaining={local_vram_pool[best_cid]})")
-                return "yield"
+        # Honour the cost-optimal pre-pass first.
+        if not pinned and job.job_id in yield_targets:
+            _log(f"Yielding {job.job_id} to {yield_targets[job.job_id]} (cost-optimal pack)")
+            return "yield"
         if not pinned and accel and local_free.get(accel, 0) > 0 and not local_vram_pool:
             local_free[accel] -= 1
             _log(f"Yielding {job.job_id} to local agent ({accel}, slots remaining={local_free[accel]})")
