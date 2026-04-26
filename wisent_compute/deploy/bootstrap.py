@@ -108,3 +108,38 @@ def run(targets, dry_run: bool, echo: Callable[[str], None]) -> None:
             _provision(t, dry_run, echo)
         except Exception as exc:
             echo(f"[err]  {t.name}: {exc}")
+
+
+def run_bootstrap(target, dry_run: bool, local_install: bool,
+                  echo: Callable[[str], None]) -> None:
+    """Top-level dispatcher used by `wc bootstrap`. Decides between the
+    SSH-based remote install and the local launchd/systemd --user install,
+    and accepts either a kind=local target or a runtime=daemon coordinator.
+    """
+    from ..targets import load_targets, lookup, lookup_coordinator
+    from .local_install import install_local
+
+    if local_install:
+        if not target:
+            raise RuntimeError("--local requires --target NAME")
+        t = lookup(target)
+        if t and t.kind == "local":
+            install_local(t, "agent", dry_run, echo)
+            return
+        c = lookup_coordinator(target)
+        if c and c.runtime in ("daemon", "cron"):
+            install_local(c, "coordinator", dry_run, echo)
+            return
+        if c and c.runtime == "gcp_cloud_function":
+            raise RuntimeError(
+                f"coordinator '{target}' runtime=gcp_cloud_function: deployed via CI, "
+                "not provisionable as a local service."
+            )
+        raise RuntimeError(f"'{target}' not found in registry (or wrong kind/runtime)")
+
+    targets = [lookup(target)] if target else None
+    if targets is not None and targets[0] is None:
+        raise RuntimeError(f"target '{target}' not found in registry")
+    if targets is None:
+        targets = [t for t in load_targets() if t.kind == "local"]
+    run(targets, dry_run=dry_run, echo=echo)

@@ -256,23 +256,12 @@ def registry_pull():
 
 
 @main.command()
-@click.option("--target", default=None,
-              help="Provision only this named target. Default: all kind=local entries.")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Print the systemd unit and ssh commands without executing.")
-def bootstrap(target, dry_run):
-    """Provision wc agent on every kind=local registry entry that has ssh set.
-
-    For each target: ssh in, install/upgrade wisent-compute, drop a
-    systemd unit running `WC_LOCAL_SLOTS=<slots> wc agent`, and enable
-    it so the agent self-recovers on reboot. Targets with ssh=null are
-    listed and skipped — they need a host configured first.
-    """
-    from .targets import load_targets, lookup
-    from .deploy import bootstrap as deploy_bootstrap
-    targets = [lookup(target)] if target else None
-    if targets is not None and targets[0] is None:
-        raise click.ClickException(f"target '{target}' not found in registry")
-    if targets is None:
-        targets = [t for t in load_targets() if t.kind == "local"]
-    deploy_bootstrap.run(targets, dry_run=dry_run, echo=click.echo)
+@click.option("--target", default=None, help="Specific entry name (target or coordinator).")
+@click.option("--dry-run", is_flag=True, default=False, help="Print unit/plist; do not enable.")
+@click.option("--local", "local_install", is_flag=True, default=False,
+              help="Install on THIS machine (launchd/systemd --user) instead of via SSH.")
+def bootstrap(target, dry_run, local_install):
+    """Provision wisent-compute services persistently across reboots."""
+    from .deploy.bootstrap import run_bootstrap
+    run_bootstrap(target=target, dry_run=dry_run, local_install=local_install,
+                  echo=click.echo)
