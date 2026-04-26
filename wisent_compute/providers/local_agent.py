@@ -172,8 +172,7 @@ def run_agent(gpu_type: str = ""):
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
     _log(f"Agent started. GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
 
-    initial_env_keys = {k for k, v in os.environ.items() if k.startswith(("HF_", "WISENT_", "WC_"))}
-    initial_env = {k: os.environ[k] for k in initial_env_keys}
+    initial_env: dict[str, str] = dict(os.environ)
     initial_gpu = gpu_type
 
     store = JobStorage(BUCKET)
@@ -185,10 +184,17 @@ def run_agent(gpu_type: str = ""):
         t = lookup_self(hostname, source="auto")
         if t and t.kind == "local":
             registry_env = t.env_overrides or {}
-            if (registry_env.items() ^ initial_env.items()) and not slots:
-                _log("Registry env override delta; exit for systemd restart")
+            # Only trigger restart on keys the registry actually declares whose
+            # values differ from what we were started with. Don't compare the
+            # whole environment — that would always differ.
+            env_delta = {
+                k: str(v) for k, v in registry_env.items()
+                if str(initial_env.get(k, "")) != str(v)
+            }
+            if env_delta and not slots:
+                _log(f"Registry env override delta {env_delta}; exit for systemd restart")
                 raise SystemExit(0)
-            if (t.gpu_type or initial_gpu) != initial_gpu and not slots:
+            if t.gpu_type and t.gpu_type != initial_gpu and not slots:
                 _log(f"Registry gpu_type {initial_gpu} -> {t.gpu_type}; exit for restart")
                 raise SystemExit(0)
             if t.vram_gb and int(t.vram_gb) != total_vram_gb:

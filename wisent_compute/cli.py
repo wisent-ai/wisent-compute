@@ -194,7 +194,7 @@ def agent(gpu_type, target, auto):
         gpu_type = gpu_type or (t.gpu_type or "")
         _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
         for k, v in (t.env_overrides or {}).items():
-            _os.environ.setdefault(k, str(v))
+            _os.environ[k] = str(v)
         click.echo(f"agent --auto: target={t.name} gpu_type={gpu_type} slots={t.slots}")
     elif target:
         from .targets import lookup
