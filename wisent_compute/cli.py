@@ -171,19 +171,30 @@ def cancel(job_id):
 
 
 @main.command()
-@click.option("--gpu-type", default="", help="GPU type (auto-detected if --target absent)")
+@click.option("--gpu-type", default="", help="GPU type (auto-detected if --target/--auto absent)")
 @click.option("--target", default=None,
-              help="Pull gpu_type and slot count from compute_targets registry by name.")
-def agent(gpu_type, target):
+              help="Pull gpu_type and slot count from registry by name.")
+@click.option("--auto", is_flag=True, default=False,
+              help="Look up self in the GCS-hosted registry by hostname; no manual config.")
+def agent(gpu_type, target, auto):
     """Run local GPU agent. Polls queue, respects Vast.ai renters.
 
-    With --target NAME, reads the named entry from
-    wisent_compute/targets/registry.json and exports WC_LOCAL_SLOTS so
-    the agent runs the configured number of concurrent slots and pins
-    its gpu_type without env-var fiddling.
+    --auto looks up the local hostname in gs://wisent-compute/registry.json
+    and uses that entry's slots/gpu_type. Re-fetches periodically so registry
+    edits propagate without restarting the agent.
     """
     import os as _os
-    if target:
+    if auto:
+        from .targets import lookup_self
+        t = lookup_self(_os.uname().nodename, source="gcs")
+        if not t:
+            raise click.ClickException(
+                f"hostname '{_os.uname().nodename}' not found in GCS registry"
+            )
+        gpu_type = gpu_type or (t.gpu_type or "")
+        _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
+        click.echo(f"agent --auto: target={t.name} gpu_type={gpu_type} slots={t.slots}")
+    elif target:
         from .targets import lookup
         t = lookup(target)
         if not t:
@@ -195,6 +206,36 @@ def agent(gpu_type, target):
         click.echo(f"agent: target={t.name} gpu_type={gpu_type} slots={t.slots}")
     from .providers.local_agent import run_agent
     run_agent(gpu_type=gpu_type)
+
+
+@main.group()
+def registry():
+    """Manage the canonical compute-target registry hosted in GCS."""
+
+
+@registry.command("push")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False), required=False)
+def registry_push(path):
+    """Upload local registry.json to gs://wisent-compute/registry.json."""
+    import shutil, subprocess
+    from .targets import REGISTRY_PATH, GCS_REGISTRY_URI
+    src = path or str(REGISTRY_PATH)
+    gsutil = shutil.which("gsutil") or "gsutil"
+    r = subprocess.run([gsutil, "cp", src, GCS_REGISTRY_URI], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise click.ClickException(r.stderr or r.stdout or "gsutil cp failed")
+    click.echo(f"pushed {src} -> {GCS_REGISTRY_URI}")
+
+
+@registry.command("pull")
+def registry_pull():
+    """Print the GCS-hosted registry to stdout."""
+    from .targets import _load_from_gcs
+    data = _load_from_gcs()
+    if data is None:
+        raise click.ClickException("could not fetch registry from GCS")
+    import json as _json
+    click.echo(_json.dumps(data, indent=2))
 
 
 @main.command()

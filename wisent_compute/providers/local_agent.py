@@ -112,6 +112,7 @@ def run_agent(gpu_type: str = ""):
     activation extraction (~3 GiB per Llama-1B worker on a 48 GB card).
     """
     from .local.slots import advance_slot, start_slot
+    from ..targets import lookup_self
     if not gpu_type:
         gpu_type = _detect_gpu_type()
     max_slots = max(1, int(os.environ.get("WC_LOCAL_SLOTS", "1")))
@@ -123,6 +124,19 @@ def run_agent(gpu_type: str = ""):
     slots: list[dict] = []
 
     while True:
+        # Re-read the GCS registry every cycle so an edit to slots/gpu_type
+        # propagates to a running agent without a restart. Falls back to the
+        # values from startup if GCS is unreachable.
+        t = lookup_self(hostname, source="gcs")
+        if t and t.kind == "local":
+            new_slots = max(1, int(t.slots))
+            if new_slots != max_slots:
+                _log(f"Registry update: slots {max_slots} -> {new_slots}")
+                max_slots = new_slots
+            if t.gpu_type and t.gpu_type != gpu_type:
+                _log(f"Registry update: gpu_type {gpu_type} -> {t.gpu_type}")
+                gpu_type = t.gpu_type
+
         vast_active = _vast_has_renter()
 
         # Advance every running slot; drop the ones that finished.
