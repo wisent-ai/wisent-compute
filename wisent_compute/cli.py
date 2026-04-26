@@ -208,6 +208,23 @@ def agent(gpu_type, target, auto):
     run_agent(gpu_type=gpu_type)
 
 
+@main.command()
+@click.option("--target", default=None,
+              help="Coordinator name in registry (default: the one with active=true).")
+@click.option("--once", is_flag=True, default=False,
+              help="Run a single scheduling tick and exit (cron-friendly).")
+def coordinator(target, once):
+    """Run the scheduling tick locally instead of the GCP Cloud Function.
+
+    Reads the named coordinator entry from the registry, loops on its
+    interval_seconds, runs the same monitor_jobs/schedule_queued_jobs
+    chain the Cloud Function does. State stays in the registry-declared
+    state_uri so all consumers (cloud + local) keep seeing the same queue.
+    """
+    from .coordinator import run as run_coordinator
+    raise SystemExit(run_coordinator(target=target, once=once))
+
+
 @main.group()
 def registry():
     """Manage the canonical compute-target registry hosted in GCS."""

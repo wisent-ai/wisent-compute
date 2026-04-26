@@ -17,5 +17,25 @@
       "max_concurrent": 20,
       "notes": "GCP T4 Spot dispatcher. Drives instance creation via wisent-compute cloud function."
     }
+  ],
+  "coordinators": [
+    {
+      "name": "gcp-cloud-function",
+      "runtime": "gcp_cloud_function",
+      "host": null,
+      "interval_seconds": 180,
+      "state_uri": "gs://wisent-compute",
+      "active": true,
+      "notes": "Default. wisent-compute-tick Cloud Function in us-central1, fired by Cloud Scheduler every 3 minutes. Deployed via deploy/redeploy_function.sh from CI."
+    },
+    {
+      "name": "local-mac",
+      "runtime": "daemon",
+      "host": null,
+      "interval_seconds": 60,
+      "state_uri": "gs://wisent-compute",
+      "active": false,
+      "notes": "Run `wc coordinator --target local-mac` on this Mac to drive the tick locally instead of GCP. State stays in GCS so cloud agents and local consumers all see the same queue. Set active=true to mark this as the primary; only one coordinator should be active at a time."
+    }
   ]
 }

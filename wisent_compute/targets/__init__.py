@@ -119,6 +119,66 @@ def local_targets(path: Path | None = None, source: str = "auto") -> list[Comput
     return [t for t in load_targets(path, source=source) if t.kind == "local"]
 
 
+@dataclass
+class Coordinator:
+    """Where the scheduling tick runs.
+
+    runtime values:
+      gcp_cloud_function   wisent-compute-tick CF + Cloud Scheduler (default).
+      daemon               long-running `wc coordinator` process (any box).
+      cron                 crontab entry that calls `wc coordinator --once`.
+      aws_lambda           reserved.
+    """
+    name: str
+    runtime: str
+    host: Optional[str] = None  # ssh user@host for daemon/cron, None = local
+    interval_seconds: int = 180
+    state_uri: str = "gs://wisent-compute"
+    active: bool = False
+    notes: str = ""
+    extra: dict = field(default_factory=dict)
+
+
+def _coord_from_dict(d: dict) -> Coordinator:
+    known = {"name", "runtime", "host", "interval_seconds", "state_uri", "active", "notes"}
+    extra = {k: v for k, v in d.items() if k not in known}
+    return Coordinator(
+        name=d["name"],
+        runtime=d.get("runtime", "daemon"),
+        host=d.get("host"),
+        interval_seconds=int(d.get("interval_seconds", 180)),
+        state_uri=d.get("state_uri", "gs://wisent-compute"),
+        active=bool(d.get("active", False)),
+        notes=d.get("notes", ""),
+        extra=extra,
+    )
+
+
+def load_coordinators(path: Path | None = None, source: str = "auto") -> list[Coordinator]:
+    """Load every coordinator entry from the registry. Empty list if missing."""
+    data: dict | None = None
+    if source in ("gcs", "auto"):
+        data = _load_from_gcs()
+    if data is None and source in ("local", "auto"):
+        p = path or REGISTRY_PATH
+        if p.is_file():
+            with p.open() as f:
+                data = json.load(f)
+    if data is None:
+        return []
+    raw = data.get("coordinators") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [_coord_from_dict(d) for d in raw if isinstance(d, dict) and d.get("name")]
+
+
+def lookup_coordinator(name: str, source: str = "auto") -> Optional[Coordinator]:
+    for c in load_coordinators(source=source):
+        if c.name == name:
+            return c
+    return None
+
+
 def lookup_self(hostname: str, source: str = "gcs") -> Optional[ComputeTarget]:
     """Find the registry entry whose ssh ends in @<hostname> or whose name == hostname.
 

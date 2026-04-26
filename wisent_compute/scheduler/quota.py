@@ -7,11 +7,20 @@ from ..providers.base import Provider
 
 
 def load_quotas(store: JobStorage) -> dict:
-    """Load quota config from GCS config/quotas.json."""
-    blob = store.bucket.blob("config/quotas.json")
-    if not blob.exists():
-        return {}
-    return json.loads(blob.download_as_text())
+    """Load quota config from GCS config/quotas.json.
+
+    Uses the Python SDK when ADC is available (Cloud Function path), falls
+    back to JobStorage._download_text which itself falls back to gsutil.
+    The previous implementation crashed with AttributeError on the daemon
+    coordinator path because store.bucket is None when the SDK isn't in use.
+    """
+    if store.bucket is not None:
+        blob = store.bucket.blob("config/quotas.json")
+        if not blob.exists():
+            return {}
+        return json.loads(blob.download_as_text())
+    raw = store._download_text("config/quotas.json")
+    return json.loads(raw) if raw else {}
 
 
 def get_available_slots(store: JobStorage, provider: Provider, provider_name: str) -> dict[str, int]:
