@@ -22,7 +22,9 @@ from datetime import datetime, timezone, timedelta
 
 from ..config import MAX_SCHEDULE_PER_TICK, INSTANCE_PREFIX
 from ..models import Job, JobState, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
-from ..queue.capacity import read_consumer_capacity, total_free_by_accel
+from ..queue.capacity import (
+    consumers_by_free_vram, read_consumer_capacity, total_free_by_accel,
+)
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 from .quota import get_available_slots
@@ -119,8 +121,16 @@ def schedule_queued_jobs(
     # before it actually claims.
     consumer_caps = read_consumer_capacity(store)
     local_free = total_free_by_accel(consumer_caps, kinds=("local",))
+    # Per-consumer free VRAM (gigabytes). Scheduler yields a job iff its
+    # gpu_mem_gb fits in some consumer's free_vram_gb. Decrement that
+    # consumer's pool when yielding so we don't double-yield within a tick.
+    local_vram_pool: dict[str, int] = {
+        cid: vram for cid, vram in consumers_by_free_vram(consumer_caps, kinds=("local",))
+    }
     if local_free:
-        _log(f"Live local-agent capacity: {local_free}")
+        _log(f"Live local-agent slots: {local_free}")
+    if local_vram_pool:
+        _log(f"Live local-agent free_vram_gb: {local_vram_pool}")
     if per_tick_cap != MAX_SCHEDULE_PER_TICK:
         _log(f"Autoscale per-tick cap: {MAX_SCHEDULE_PER_TICK} -> {per_tick_cap} (queue={len(queued)})")
 
@@ -149,9 +159,19 @@ def schedule_queued_jobs(
             return "skip"
         if enforce_accel_share and accel and accel_dispatched.get(accel, 0) >= per_accel_share:
             return "skip"
-        if not pinned and accel and local_free.get(accel, 0) > 0:
+        # VRAM-first yield: pick the local consumer with the most free VRAM
+        # whose pool still admits this job's gpu_mem_gb. Falls back to the
+        # legacy slot-counted yield if no consumer publishes free_vram_gb.
+        need_gb = int(getattr(job, "gpu_mem_gb", 0) or 0)
+        if not pinned and need_gb > 0 and local_vram_pool:
+            best_cid = max(local_vram_pool, key=lambda c: local_vram_pool[c])
+            if local_vram_pool[best_cid] >= need_gb:
+                local_vram_pool[best_cid] -= need_gb
+                _log(f"Yielding {job.job_id} to {best_cid} ({need_gb}GB; free_vram remaining={local_vram_pool[best_cid]})")
+                return "yield"
+        if not pinned and accel and local_free.get(accel, 0) > 0 and not local_vram_pool:
             local_free[accel] -= 1
-            _log(f"Yielding {job.job_id} to local agent ({accel}, free remaining={local_free[accel]})")
+            _log(f"Yielding {job.job_id} to local agent ({accel}, slots remaining={local_free[accel]})")
             return "yield"
         cap = getattr(job, "max_cost_per_hour_usd", 0.0) or 0.0
         if cap > 0 and accel:

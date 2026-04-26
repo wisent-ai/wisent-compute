@@ -32,14 +32,27 @@ def publish_capacity(
     consumer_id: str,
     kind: str,
     free_slots: dict[str, int],
+    free_vram_gb: int | None = None,
+    total_vram_gb: int | None = None,
 ) -> None:
-    """Write this consumer's current free-slot snapshot to GCS."""
+    """Write this consumer's current capacity snapshot to GCS.
+
+    free_vram_gb is the authoritative admission signal for local consumers:
+    the scheduler yields a queued job whose gpu_mem_gb fits in this number,
+    instead of decrementing a flat per-accel slot counter that ignores the
+    job's actual memory footprint. free_slots is kept for backward compat
+    with consumers that haven't been upgraded yet.
+    """
     payload = {
         "consumer_id": consumer_id,
         "kind": kind,
         "free_slots": free_slots,
         "published_at": datetime.now(timezone.utc).isoformat(),
     }
+    if free_vram_gb is not None:
+        payload["free_vram_gb"] = int(free_vram_gb)
+    if total_vram_gb is not None:
+        payload["total_vram_gb"] = int(total_vram_gb)
     store._upload_text(f"{CAPACITY_PREFIX}{consumer_id}.json", json.dumps(payload))
 
 
@@ -82,3 +95,17 @@ def total_free_by_accel(consumers: dict[str, dict], kinds: tuple[str, ...] | Non
         for accel, n in (payload.get("free_slots") or {}).items():
             totals[accel] = totals.get(accel, 0) + int(n or 0)
     return totals
+
+
+def consumers_by_free_vram(consumers: dict[str, dict], kinds: tuple[str, ...] | None = None) -> list[tuple[str, int]]:
+    """[(consumer_id, free_vram_gb), ...] sorted descending. Empty if none publish vram."""
+    rows: list[tuple[str, int]] = []
+    for payload in consumers.values():
+        if kinds and payload.get("kind") not in kinds:
+            continue
+        v = payload.get("free_vram_gb")
+        if v is None:
+            continue
+        rows.append((payload["consumer_id"], int(v)))
+    rows.sort(key=lambda r: -r[1])
+    return rows

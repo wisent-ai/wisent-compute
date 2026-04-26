@@ -136,14 +136,29 @@ def _compat_accel_types(local_vram_gb: int) -> list[str]:
     return accels
 
 
-def _build_capacity_dict(gpu_type: str, free: int, vram_gb: int) -> dict[str, int]:
-    """Capacity broadcast: own gpu_type plus every compatible GCP type."""
-    if not gpu_type or gpu_type == "cpu" or free <= 0:
-        return {}
-    out: dict[str, int] = {gpu_type: free}
-    for compat in _compat_accel_types(vram_gb):
-        out.setdefault(compat, free)
+def _build_capacity_dict(gpu_type: str, free_vram_gb: int, total_vram_gb: int) -> dict[str, int]:
+    """Backward-compat slot-shaped broadcast: free_slots[<accel>] = number of
+    that-tier-sized jobs that fit in our free VRAM. Lets older schedulers
+    still see capacity even though the authoritative admission signal is the
+    free_vram_gb field below."""
+    from ..models import GPU_SIZING
+    out: dict[str, int] = {}
+    if not gpu_type or gpu_type == "cpu" or free_vram_gb <= 0:
+        return out
+    for tier, (_, accel) in GPU_SIZING.get("gcp", {}).items():
+        if total_vram_gb >= tier and accel:
+            n = max(0, free_vram_gb // max(1, tier))
+            if n > 0:
+                out[accel] = max(out.get(accel, 0), n)
+    if gpu_type not in out and free_vram_gb > 0:
+        out[gpu_type] = 1
     return out
+
+
+def _slot_vram(slot: dict) -> int:
+    """Best-effort VRAM cost a running slot occupies."""
+    job = slot.get("job")
+    return int(getattr(job, "gpu_mem_gb", 0) or 0)
 
 
 def run_agent(gpu_type: str = ""):
@@ -152,16 +167,14 @@ def run_agent(gpu_type: str = ""):
     from ..targets import lookup_self
     if not gpu_type:
         gpu_type = _detect_gpu_type()
-    max_slots = max(1, int(os.environ.get("WC_LOCAL_SLOTS", "1")))
-    vram_gb = _detect_local_vram_gb()
-    _log(f"Agent started. GPU: {gpu_type}  max_slots={max_slots}  vram_gb={vram_gb}")
+    total_vram_gb = max(1, _detect_local_vram_gb())
+    # WC_LOCAL_SLOTS retained as a HARD safety cap (defaults to no cap when 0).
+    hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
+    _log(f"Agent started. GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
 
-    # Snapshot the env vars and cli args we were started with — if the
-    # registry asks for a different set, we exit so systemd restarts us
-    # with the new state.
     initial_env_keys = {k for k, v in os.environ.items() if k.startswith(("HF_", "WISENT_", "WC_"))}
     initial_env = {k: os.environ[k] for k in initial_env_keys}
-    initial_args = (gpu_type, max_slots)
+    initial_gpu = gpu_type
 
     store = JobStorage(BUCKET)
     hostname = os.uname().nodename
@@ -169,46 +182,50 @@ def run_agent(gpu_type: str = ""):
     slots: list[dict] = []
 
     while True:
-        t = lookup_self(hostname, source="gcs")
+        t = lookup_self(hostname, source="auto")
         if t and t.kind == "local":
             registry_env = t.env_overrides or {}
-            registry_extra = (registry_env.items() ^ initial_env.items())
-            registry_args = (t.gpu_type or gpu_type, max(1, int(t.slots)))
-            if registry_extra and not slots:
-                _log(f"Registry env override delta detected; exiting for systemd restart")
+            if (registry_env.items() ^ initial_env.items()) and not slots:
+                _log("Registry env override delta; exit for systemd restart")
                 raise SystemExit(0)
-            if registry_args != initial_args and not slots:
-                _log(f"Registry args delta {initial_args} -> {registry_args}; exit for restart")
+            if (t.gpu_type or initial_gpu) != initial_gpu and not slots:
+                _log(f"Registry gpu_type {initial_gpu} -> {t.gpu_type}; exit for restart")
                 raise SystemExit(0)
-            if t.vram_gb and int(t.vram_gb) != vram_gb:
-                _log(f"Registry vram_gb update {vram_gb} -> {t.vram_gb}")
-                vram_gb = int(t.vram_gb)
+            if t.vram_gb and int(t.vram_gb) != total_vram_gb:
+                _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
+                total_vram_gb = int(t.vram_gb)
 
         vast_active = _vast_has_renter()
         slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
         if vast_active:
-            publish_capacity(store, consumer_id, "local", {})
+            publish_capacity(store, consumer_id, "local", {}, free_vram_gb=0,
+                             total_vram_gb=total_vram_gb)
             time.sleep(POLL_INTERVAL)
             continue
 
-        free = max_slots - len(slots)
-        free_slots = _build_capacity_dict(gpu_type, free, vram_gb)
-        publish_capacity(store, consumer_id, "local", free_slots)
+        used_vram = sum(_slot_vram(s) for s in slots)
+        free_vram_gb = max(0, total_vram_gb - used_vram)
+        free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
+        publish_capacity(store, consumer_id, "local", free_slots,
+                         free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb)
 
-        if free <= 0:
+        if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
             time.sleep(10)
             continue
 
-        # Pull eligible jobs from the queue, fill up to `free` of them.
         queued = store.list_jobs("queue")
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
         started = 0
         for job in queued:
-            if started >= free:
+            if hard_slot_cap > 0 and len(slots) >= hard_slot_cap:
                 break
-            if not _job_eligible(job, gpu_type, vram_gb):
+            need = int(getattr(job, "gpu_mem_gb", 0) or 0)
+            if need > free_vram_gb:
+                continue
+            if not _job_eligible(job, gpu_type, total_vram_gb):
                 continue
             slots.append(start_slot(store, job, hostname, _log))
+            free_vram_gb -= need
             started += 1
 
         if started == 0:

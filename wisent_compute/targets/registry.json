@@ -5,28 +5,28 @@
       "kind": "local",
       "ssh": "root@10.0.0.36",
       "gpu_type": "nvidia-tesla-t4",
-      "slots": 4,
+      "slots": 0,
       "vram_gb": 96,
       "env_overrides": {
-        "WC_LOCAL_SLOTS": "4",
+        "WC_LOCAL_SLOTS": "0",
         "WISENT_DTYPE": "auto"
       },
       "agent_args": ["--gpu-type", "nvidia-tesla-t4"],
-      "notes": "ubuntu-server LAN host (RTX PRO 6000 Blackwell, 96GB). gpu_type intentionally lies as nvidia-tesla-t4 so the GCS scheduler yields T4 jobs to it; vram_gb drives the compatibility-list broadcast that also exposes nvidia-l4/nvidia-tesla-a100 slots since 96GB > 40GB > 24GB > 16GB tiers. Hostname `ubuntu-server` is what the agent matches against."
+      "notes": "ubuntu-server LAN host (RTX PRO 6000 Blackwell, 96GB). slots=0 means no hard concurrency cap; admission is purely VRAM-based (sum of in-flight job.gpu_mem_gb <= vram_gb). gpu_type=nvidia-tesla-t4 is the SKU label the agent uses for its broadcast; the scheduler yields any job whose gpu_mem_gb fits, regardless of label."
     },
     {
       "name": "ubuntu-server",
       "kind": "local",
       "ssh": "root@10.0.0.36",
       "gpu_type": "nvidia-tesla-t4",
-      "slots": 4,
+      "slots": 0,
       "vram_gb": 96,
       "env_overrides": {
-        "WC_LOCAL_SLOTS": "4",
+        "WC_LOCAL_SLOTS": "0",
         "WISENT_DTYPE": "auto"
       },
       "agent_args": ["--gpu-type", "nvidia-tesla-t4"],
-      "notes": "Alias matching the actual hostname `ubuntu-server` so wc agent --auto's lookup_self() resolves on the box itself; same target as rtx-pro-6000-workstation."
+      "notes": "Alias matching the actual hostname so wc agent --auto resolves on the box itself; same target as rtx-pro-6000-workstation."
     },
     {
       "name": "gcp-spot-t4",
