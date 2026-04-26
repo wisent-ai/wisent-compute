@@ -171,8 +171,50 @@ def cancel(job_id):
 
 
 @main.command()
-@click.option("--gpu-type", default="", help="GPU type (auto-detected)")
-def agent(gpu_type):
-    """Run local GPU agent. Polls queue, respects Vast.ai renters."""
+@click.option("--gpu-type", default="", help="GPU type (auto-detected if --target absent)")
+@click.option("--target", default=None,
+              help="Pull gpu_type and slot count from compute_targets registry by name.")
+def agent(gpu_type, target):
+    """Run local GPU agent. Polls queue, respects Vast.ai renters.
+
+    With --target NAME, reads the named entry from
+    wisent_compute/targets/registry.json and exports WC_LOCAL_SLOTS so
+    the agent runs the configured number of concurrent slots and pins
+    its gpu_type without env-var fiddling.
+    """
+    import os as _os
+    if target:
+        from .targets import lookup
+        t = lookup(target)
+        if not t:
+            raise click.ClickException(f"target '{target}' not found in registry")
+        if t.kind != "local":
+            raise click.ClickException(f"target '{target}' kind={t.kind}, expected local")
+        gpu_type = gpu_type or (t.gpu_type or "")
+        _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
+        click.echo(f"agent: target={t.name} gpu_type={gpu_type} slots={t.slots}")
     from .providers.local_agent import run_agent
     run_agent(gpu_type=gpu_type)
+
+
+@main.command()
+@click.option("--target", default=None,
+              help="Provision only this named target. Default: all kind=local entries.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print the systemd unit and ssh commands without executing.")
+def bootstrap(target, dry_run):
+    """Provision wc agent on every kind=local registry entry that has ssh set.
+
+    For each target: ssh in, install/upgrade wisent-compute, drop a
+    systemd unit running `WC_LOCAL_SLOTS=<slots> wc agent`, and enable
+    it so the agent self-recovers on reboot. Targets with ssh=null are
+    listed and skipped — they need a host configured first.
+    """
+    from .targets import load_targets, lookup
+    from .deploy import bootstrap as deploy_bootstrap
+    targets = [lookup(target)] if target else None
+    if targets is not None and targets[0] is None:
+        raise click.ClickException(f"target '{target}' not found in registry")
+    if targets is None:
+        targets = [t for t in load_targets() if t.kind == "local"]
+    deploy_bootstrap.run(targets, dry_run=dry_run, echo=click.echo)

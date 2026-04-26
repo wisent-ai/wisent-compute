@@ -1,0 +1,21 @@
+{
+  "targets": [
+    {
+      "name": "rtx-pro-6000-workstation",
+      "kind": "local",
+      "ssh": null,
+      "gpu_type": "nvidia-rtx-pro-6000",
+      "slots": 4,
+      "notes": "Wisent workstation. Set ssh to user@host once the box is reachable; until then bootstrap leaves this entry unprovisioned and the queue runs without it."
+    },
+    {
+      "name": "gcp-spot-t4",
+      "kind": "gcp",
+      "region": "us-central1",
+      "gpu_type": "nvidia-tesla-t4",
+      "spot": true,
+      "max_concurrent": 20,
+      "notes": "GCP T4 Spot dispatcher. Drives instance creation via wisent-compute cloud function."
+    }
+  ]
+}

@@ -3,3 +3,5 @@ __pycache__/
 dist/
 build/
 .env
+.DS_Store
+**/.DS_Store
