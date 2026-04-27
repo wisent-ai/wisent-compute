@@ -28,6 +28,32 @@ def _render_template(template_name: str, variables: dict) -> str:
     return content
 
 
+def submit_batch(commands: list[str], **kwargs) -> int:
+    """Submit many commands concurrently. Returns the count submitted.
+
+    Falls through to per-line submit_job for the actual GCS writes; the
+    concurrency just hides GCS round-trip latency. ThreadPoolExecutor is
+    correct here: each worker is I/O-bound on GCS, not CPU.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    workers = 1 if len(commands) <= 4 else 64
+    if workers == 1:
+        for cmd in commands:
+            submit_job(cmd, **kwargs)
+        return len(commands)
+    done = 0
+    errors = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(submit_job, cmd, **kwargs) for cmd in commands]
+        for fut in as_completed(futures):
+            done += 1
+            try:
+                fut.result()
+            except Exception:
+                errors += 1
+    return done - errors
+
+
 def submit_job(
     command: str,
     provider: str = "gcp",

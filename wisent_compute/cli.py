@@ -63,17 +63,14 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
             commands = [l.strip() for l in f if l.strip() and not l.startswith("#")]
     else:
         commands = [command]
-
     batch_id = f"batch-{int(time.time())}"
-    for cmd in commands:
-        job = submit_job(
-            cmd, provider=provider, batch_id=batch_id, bucket=BUCKET,
-            preemptible=spot,
-            max_cost_per_hour_usd=max_cost_per_hour,
-            pin_to_provider=not any_provider,
-            priority=priority,
-        )
-        click.echo(f"  {job.job_id}  {job.gpu_type or 'cpu':>20s}  {cmd[:60]}")
+    from .queue.submit import submit_batch
+    n = submit_batch(
+        commands, provider=provider, batch_id=batch_id, bucket=BUCKET,
+        preemptible=spot, max_cost_per_hour_usd=max_cost_per_hour,
+        pin_to_provider=not any_provider, priority=priority,
+    )
+    click.echo(f"  submitted {n}/{len(commands)} jobs")
     mode = "API" if _api_key() else "GCS"
     flags = []
     if spot: flags.append("spot")
