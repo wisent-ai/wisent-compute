@@ -110,9 +110,18 @@ class JobStorage:
             return
         _gsutil_rm(f"{self.gs}/{blob_path}")
 
-    def _list_paths(self, prefix: str) -> list[str]:
+    def _list_paths(self, prefix: str, *, oldest_first: int = 0) -> list[str]:
+        """Return blob names under `prefix`. When oldest_first>0, return only
+        that many names sorted by GCS time_created ascending — bounded
+        listing for hot prefixes (queue/ has 14k+ blobs, fetching all of
+        them every Cloud Function tick blew the 60s timeout). The single
+        list_blobs call already returns blob metadata so sorting is free."""
         if self._sdk_bucket:
-            return [b.name for b in self._sdk_bucket.list_blobs(prefix=prefix)]
+            blobs = list(self._sdk_bucket.list_blobs(prefix=prefix))
+            if oldest_first > 0:
+                blobs.sort(key=lambda b: b.time_created)
+                blobs = blobs[:oldest_first]
+            return [b.name for b in blobs]
         return [
             p.removeprefix(self.gs + "/")
             for p in _gsutil_ls(f"{self.gs}/{prefix}")
@@ -132,21 +141,24 @@ class JobStorage:
         self.write_job(to_prefix, job)
         self._delete_blob(f"{from_prefix}/{job.job_id}.json")
 
-    def list_jobs(self, prefix: str) -> list[Job]:
-        """Parallel-fetch every job JSON under prefix/ via a thread pool.
+    def list_jobs(self, prefix: str, *, oldest_first: int = 0) -> list[Job]:
+        """Parallel-fetch job JSONs under prefix/ via a thread pool.
 
-        Sequential per-blob _download_text was the bottleneck for the
-        scheduler tick: 14k blobs × ~5ms round-trip = 70+s, blowing the
-        60s Cloud Function timeout before dispatch could fire. Threads
-        are correct here because each worker is I/O-bound on GCS, not
-        CPU. Workers scale with path count up to a fixed ceiling so a
-        small queue doesn't pay thread-pool startup cost.
+        oldest_first>0 caps to that many blobs picked by GCS time_created
+        — required for queue/ where 14k+ blobs would otherwise force the
+        scheduler to download every JSON before slicing per_tick_cap and
+        blow the 60s function timeout. Threads parallelise the I/O-bound
+        downloads. Workers scale with path count up to the GCS client's
+        connection pool size to avoid 'pool full' churn.
         """
         from concurrent.futures import ThreadPoolExecutor
-        paths = [p for p in self._list_paths(f"{prefix}/") if p.endswith(".json")]
+        paths = [
+            p for p in self._list_paths(f"{prefix}/", oldest_first=oldest_first)
+            if p.endswith(".json")
+        ]
         if not paths:
             return []
-        workers = min(64, max(1, len(paths)))
+        workers = min(10, max(1, len(paths)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             blobs = list(pool.map(self._download_text, paths))
         jobs = []

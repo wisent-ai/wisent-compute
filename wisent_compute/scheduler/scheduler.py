@@ -93,15 +93,15 @@ def schedule_queued_jobs(
         _log("No GPU slots available")
         return 0
 
-    queued = store.list_jobs("queue")
+    # Cap the listing in JobStorage so we never download more than we'd
+    # dispatch this tick. queue/ holds 14k+ blobs after a big batch submit
+    # and downloading every JSON blew the 60s function timeout. Pick by
+    # GCS time_created ascending (FIFO) — anything past _dynamic_per_tick_cap's
+    # ceiling × 8 wouldn't fit in this tick's budget anyway.
+    list_cap = _dynamic_per_tick_cap(10**9) * 8
+    queued = store.list_jobs("queue", oldest_first=list_cap)
     queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
     now_utc = datetime.now(timezone.utc)
-    # Cap how many queued jobs we hand to the per-tick passes. The 60s Cloud
-    # Function timeout is bottlenecked by the HF skip-done filter (one GCS
-    # move per matched job) and the dispatch loop (each create_instance
-    # blocks until the GCE op completes). Limiting to a few hundred bounds
-    # the per-tick wall time without slowing dispatch — anything past
-    # per_tick_cap * 8 wouldn't dispatch this tick anyway.
     full_queue_depth = len(queued)
     per_tick_cap = _dynamic_per_tick_cap(full_queue_depth)
     queued = queued[: per_tick_cap * 8]
