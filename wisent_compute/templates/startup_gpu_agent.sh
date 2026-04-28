@@ -37,6 +37,15 @@ export WISENT_DTYPE=auto
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 export WC_LOCAL_SLOTS=0
+# Pin numba threads BEFORE numba is imported. wisent code sets this to 1 in
+# 8 modules but the import order on the agent's subprocess path lets numba
+# initialise with the system cpu count first, and the later os.environ
+# rewrite raises 'Cannot set NUMBA_NUM_THREADS once threads have been
+# launched'. Setting it in the agent's own env propagates to subprocesses.
+export NUMBA_NUM_THREADS=1
+# Slow HF API calls so we don't hit the 1000-requests-per-5min limit when
+# 20+ cloud agents all hit ArabicMMLU/etc dataset metadata at once.
+export HF_HUB_DOWNLOAD_TIMEOUT=120
 
 # Pre-warm the small auxiliary models so each claimed job skips the download.
 huggingface-cli download cross-encoder/nli-deberta-v3-small || true
