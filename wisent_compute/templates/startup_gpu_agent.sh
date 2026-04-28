@@ -36,7 +36,7 @@ pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0
 # and the script-based load failed with that exact RuntimeError. 3.x
 # preserves the script-loader path for tasks that haven't migrated to
 # parquet yet.
-pip install --upgrade --force-reinstall 'datasets>=3.0,<4.0'
+pip install --upgrade --force-reinstall 'datasets>=3.0,<4.0' 'huggingface-hub>=0.34.0,<1.0'
 pip uninstall -y hf-xet || true
 
 export HF_TOKEN="${HF_TOKEN}"
