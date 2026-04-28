@@ -56,6 +56,13 @@ def dispatch_agent_vms(
     """
     template = _TEMPLATE_PATH.read_text()
 
+    # Re-derive (machine_type, accel) per job from current GPU_SIZING rather
+    # than trust job.machine_type / job.gpu_type, which may be stale (a job
+    # submitted before a GPU_SIZING tier swap would still carry the old VM
+    # spec — e.g. a2-highgpu-2g + nvidia-tesla-a100 for 60GB jobs that GCP
+    # rejects with 'Invalid accelerator specs for accelerator optimized
+    # instances').
+    from ...config import lookup_instance_type
     buckets: dict[tuple[str, str], list] = {}
     for j in queued:
         if getattr(j, "pin_to_provider", False) and j.provider != provider_name:
@@ -64,8 +71,10 @@ def dispatch_agent_vms(
             continue
         if not backoff_due(j, now_utc):
             continue
-        accel = j.gpu_type or ""
-        mt = j.machine_type or ""
+        gpu_mem = int(getattr(j, "gpu_mem_gb", 0) or 0)
+        if gpu_mem <= 0:
+            continue
+        mt, accel = lookup_instance_type(provider_name, gpu_mem)
         if not (accel and mt):
             continue
         cap = getattr(j, "max_cost_per_hour_usd", 0.0) or 0.0

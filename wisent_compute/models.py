@@ -20,7 +20,7 @@ GPU_SIZING = {
         16: ("n1-standard-4", "nvidia-tesla-t4"),
         24: ("g2-standard-4", "nvidia-l4"),
         40: ("a2-highgpu-1g", "nvidia-tesla-a100"),
-        80: ("a2-highgpu-2g", "nvidia-tesla-a100"),
+        80: ("a2-ultragpu-1g", "nvidia-tesla-a100-80gb"),
     },
 }
 
