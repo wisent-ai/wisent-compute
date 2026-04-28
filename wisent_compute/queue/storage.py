@@ -133,13 +133,26 @@ class JobStorage:
         self._delete_blob(f"{from_prefix}/{job.job_id}.json")
 
     def list_jobs(self, prefix: str) -> list[Job]:
-        paths = self._list_paths(f"{prefix}/")
+        """Parallel-fetch every job JSON under prefix/ via a thread pool.
+
+        Sequential per-blob _download_text was the bottleneck for the
+        scheduler tick: 14k blobs × ~5ms round-trip = 70+s, blowing the
+        60s Cloud Function timeout before dispatch could fire. Threads
+        are correct here because each worker is I/O-bound on GCS, not
+        CPU. Workers scale with path count up to a fixed ceiling so a
+        small queue doesn't pay thread-pool startup cost.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        paths = [p for p in self._list_paths(f"{prefix}/") if p.endswith(".json")]
+        if not paths:
+            return []
+        workers = min(64, max(1, len(paths)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            blobs = list(pool.map(self._download_text, paths))
         jobs = []
-        for p in paths:
-            if p.endswith(".json"):
-                data = self._download_text(p)
-                if data:
-                    jobs.append(Job.from_json(data))
+        for data in blobs:
+            if data:
+                jobs.append(Job.from_json(data))
         return jobs
 
     def upload_script(self, job_id: str, content: str):
