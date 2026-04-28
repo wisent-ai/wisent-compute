@@ -243,7 +243,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False):
             time.sleep(10)
             continue
 
-        queued = store.list_jobs("queue")
+        queued = store.list_jobs("queue", oldest_first=400)
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
         started = 0
         for job in queued:
