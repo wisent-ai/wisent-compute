@@ -23,6 +23,12 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install --upgrade wisent-compute wisent wisent-extractors wisent-evaluators wisent-tools \
     lm-eval optuna matplotlib word2number evaluate
+# Pin transformers to a 4.x version. transformers 5.6.2 raises
+# 'does not appear to have files named (model-00000-of-...)'  with a
+# zero-indexed range that mismatches HF's 1-indexed sharded
+# safetensors (proven on Qwen/Qwen3-8B and openai/gpt-oss-20b). 4.55.x
+# uses range(1, n+1) and loads them correctly.
+pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
 pip uninstall -y hf-xet || true
 
 export HF_TOKEN="${HF_TOKEN}"
