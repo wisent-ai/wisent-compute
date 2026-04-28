@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from google.cloud import compute_v1
 
-from ..config import PROJECT, ZONE_ROTATION, INSTANCE_PREFIX
+from ..config import PROJECT, ZONE_ROTATION, MACHINE_TYPE_ZONES, INSTANCE_PREFIX
 from .base import Provider
 
 
@@ -21,7 +21,8 @@ class GCPProvider(Provider):
     def create_instance(self, name, machine_type, accel_type,
                         boot_disk_gb, image, image_project,
                         startup_script, preemptible: bool = False) -> str | None:
-        for zone in ZONE_ROTATION:
+        zones = MACHINE_TYPE_ZONES.get(machine_type, ZONE_ROTATION)
+        for zone in zones:
             try:
                 # Delete any existing terminated instance with same name
                 try:

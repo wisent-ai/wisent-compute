@@ -11,6 +11,18 @@ REGION = os.environ.get("GCP_REGION", "us-central1")
 ALERTS_TOPIC = os.environ.get("WC_ALERTS_TOPIC", f"projects/{PROJECT}/topics/wisent-compute-alerts")
 
 ZONE_ROTATION = [f"{REGION}-b", f"{REGION}-a", f"{REGION}-c", f"{REGION}-f"]
+# Per-machine-type zone rotation. Some SKUs (a2-ultragpu-*, a3-*) don't exist
+# in every us-central1 zone, and a2-ultragpu-1g spot capacity in
+# us-central1-a is regularly exhausted. For those buckets, prefer the zones
+# that ship the SKU and fall back to alternate regions for spot. The
+# provider iterates this list before falling back to ZONE_ROTATION.
+MACHINE_TYPE_ZONES = {
+    "a2-ultragpu-1g": [
+        f"{REGION}-c", f"{REGION}-a",
+        "us-east5-a", "us-east5-b", "us-east4-c",
+        "europe-west4-a",
+    ],
+}
 HEARTBEAT_STALE_MINUTES = 15
 MAX_SCHEDULE_PER_TICK = 4
 INSTANCE_PREFIX = "wisent"
