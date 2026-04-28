@@ -29,6 +29,14 @@ pip install --upgrade wisent-compute wisent wisent-extractors wisent-evaluators 
 # safetensors (proven on Qwen/Qwen3-8B and openai/gpt-oss-20b). 4.55.x
 # uses range(1, n+1) and loads them correctly.
 pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
+# Pin datasets to <4.0. The 4.x line dropped support for dataset loading
+# scripts (raises 'Dataset scripts are no longer supported, but found
+# flores.py' on basque_bench_flores_*, gsm8k via script-based forks,
+# etc.). Verified live on b141c65f at 23:18: agent has datasets==4.8.5
+# and the script-based load failed with that exact RuntimeError. 3.x
+# preserves the script-loader path for tasks that haven't migrated to
+# parquet yet.
+pip install --upgrade --force-reinstall 'datasets>=3.0,<4.0'
 pip uninstall -y hf-xet || true
 
 export HF_TOKEN="${HF_TOKEN}"
