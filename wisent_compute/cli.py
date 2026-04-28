@@ -171,17 +171,14 @@ def cancel(job_id):
 
 @main.command()
 @click.option("--gpu-type", default="", help="GPU type (auto-detected if --target/--auto absent)")
-@click.option("--target", default=None,
-              help="Pull gpu_type and slot count from registry by name.")
+@click.option("--target", default=None, help="Pull gpu_type/slots from registry by name.")
 @click.option("--auto", is_flag=True, default=False,
-              help="Look up self in the GCS-hosted registry by hostname; no manual config.")
-def agent(gpu_type, target, auto):
-    """Run local GPU agent. Polls queue, respects Vast.ai renters.
-
-    --auto looks up the local hostname in gs://wisent-compute/registry.json
-    and uses that entry's slots/gpu_type. Re-fetches periodically so registry
-    edits propagate without restarting the agent.
-    """
+              help="Look up self in registry by hostname; no manual config.")
+@click.option("--idle-shutdown", is_flag=True, default=False,
+              help="Exit (and self-delete the GCE VM) when no slots active and no "
+                   "queued job is eligible. Use on ephemeral cloud-VM agents.")
+def agent(gpu_type, target, auto, idle_shutdown):
+    """Run local GPU agent. Polls queue, respects Vast.ai renters."""
     import os as _os
     if auto:
         from .targets import lookup_self
@@ -204,7 +201,7 @@ def agent(gpu_type, target, auto):
         _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
         click.echo(f"agent: target={t.name} gpu_type={gpu_type} slots={t.slots}")
     from .providers.local_agent import run_agent
-    run_agent(gpu_type=gpu_type)
+    run_agent(gpu_type=gpu_type, idle_shutdown=idle_shutdown)
 
 
 @main.command()

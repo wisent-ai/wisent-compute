@@ -161,8 +161,32 @@ def _slot_vram(slot: dict) -> int:
     return int(getattr(job, "gpu_mem_gb", 0) or 0)
 
 
-def run_agent(gpu_type: str = ""):
-    """Main agent loop. Polls queue, runs jobs when Vast.ai is idle."""
+def _no_eligible_in_queue(store: JobStorage, gpu_type: str, total_vram_gb: int,
+                          free_vram_gb: int) -> bool:
+    """True when no queued job could even hypothetically fit + be eligible.
+
+    Pure condition check — no timer, no constant duration. Signal is "queue
+    holds nothing this consumer can run", not "we've waited N seconds".
+    """
+    queued = store.list_jobs("queue")
+    for job in queued:
+        need = int(getattr(job, "gpu_mem_gb", 0) or 0)
+        if need > free_vram_gb:
+            continue
+        if not _job_eligible(job, gpu_type, total_vram_gb):
+            continue
+        return False
+    return True
+
+
+def run_agent(gpu_type: str = "", idle_shutdown: bool = False):
+    """Main agent loop. Polls queue, runs jobs when Vast.ai is idle.
+
+    idle_shutdown=True: exit cleanly (and self-delete the GCE VM if running on
+    one) once both: (a) no slots active, and (b) no queued job is eligible to
+    run on this consumer's free VRAM. Used for the cloud-VM agent path. The
+    workstation/Vast.ai path leaves it False so the daemon stays up.
+    """
     from .local.slots import advance_slot, start_slot
     from ..targets import lookup_self
     if not gpu_type:
@@ -235,4 +259,11 @@ def run_agent(gpu_type: str = ""):
             started += 1
 
         if started == 0:
+            if idle_shutdown and not slots and _no_eligible_in_queue(
+                store, gpu_type, total_vram_gb, free_vram_gb,
+            ):
+                _log("idle_shutdown: no slots + no eligible queued jobs; exiting")
+                from .local.gcp_self import self_terminate
+                self_terminate(_log)
+                return
             time.sleep(POLL_INTERVAL)

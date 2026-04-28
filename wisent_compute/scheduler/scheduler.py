@@ -266,22 +266,23 @@ def schedule_queued_jobs(
         _log(f"Scheduled {job.job_id} on {ref} (preemptible={preemptible_for_call})")
         return "ok"
 
-    # Pass 1 — fairness: each accel limited to per_accel_share dispatches so
-    # heterogeneous batches make concurrent progress instead of one accel
-    # hogging the whole tick.
-    for job in queued:
-        if scheduled >= per_tick_cap:
-            break
-        _attempt(job, enforce_accel_share=True)
-
-    # Pass 2 — fill any remaining tick budget without the per-accel cap so
-    # we don't underuse capacity when one accel still has plenty of room.
-    if scheduled < per_tick_cap:
-        for job in queued:
-            if scheduled >= per_tick_cap:
-                break
-            if job.state != JobState.QUEUED.value:
-                continue  # was claimed in pass 1
-            _attempt(job, enforce_accel_share=False)
-
+    # Agent-mode dispatch: launch agent VMs that poll the queue and pack
+    # jobs by VRAM. Replaces the per-job VM dispatch — per-VM concurrency
+    # is now bounded by nvidia-smi readout, not a constant.
+    from .dispatch.agent import dispatch_agent_vms
+    scheduled += dispatch_agent_vms(
+        queued=queued,
+        yield_targets=yield_targets,
+        available=available,
+        accel_dispatched=accel_dispatched,
+        per_accel_share=per_accel_share,
+        per_tick_cap=per_tick_cap,
+        scheduled_so_far=scheduled,
+        provider=provider,
+        provider_name=provider_name,
+        secrets=secrets,
+        backoff_due=_backoff_due,
+        log_fn=_log,
+        now_utc=now_utc,
+    )
     return scheduled
