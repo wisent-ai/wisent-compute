@@ -14,7 +14,7 @@ _GCP_METRIC_TO_ACCEL = {
     "PREEMPTIBLE_NVIDIA_T4_GPUS": "nvidia-tesla-t4",
     "PREEMPTIBLE_NVIDIA_L4_GPUS": "nvidia-l4",
     "PREEMPTIBLE_NVIDIA_A100_GPUS": "nvidia-tesla-a100",
-    "PREEMPTIBLE_NVIDIA_A100_80GB_GPUS": "nvidia-tesla-a100-80gb",
+    "PREEMPTIBLE_NVIDIA_A100_80GB_GPUS": "nvidia-a100-80gb",
 }
 
 

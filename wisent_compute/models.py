@@ -20,7 +20,7 @@ GPU_SIZING = {
         16: ("n1-standard-4", "nvidia-tesla-t4"),
         24: ("g2-standard-4", "nvidia-l4"),
         40: ("a2-highgpu-1g", "nvidia-tesla-a100"),
-        80: ("a2-ultragpu-1g", "nvidia-tesla-a100-80gb"),
+        80: ("a2-ultragpu-1g", "nvidia-a100-80gb"),
     },
 }
 
@@ -30,7 +30,7 @@ GPU_HOURLY_RATE_USD = {
     "nvidia-tesla-t4": 0.35,
     "nvidia-l4": 0.71,
     "nvidia-tesla-a100": 2.93,        # 40GB
-    "nvidia-tesla-a100-80gb": 3.67,
+    "nvidia-a100-80gb": 3.67,
     "nvidia-h100-80gb": 11.06,
 }
 # Spot/preemptible discount factor (multiply on-demand by this to get Spot rate).
@@ -39,7 +39,7 @@ SPOT_DISCOUNT = {
     "nvidia-tesla-t4": 0.30,
     "nvidia-l4": 0.40,
     "nvidia-tesla-a100": 0.49,
-    "nvidia-tesla-a100-80gb": 0.49,
+    "nvidia-a100-80gb": 0.49,
     "nvidia-h100-80gb": 0.45,
 }
 
