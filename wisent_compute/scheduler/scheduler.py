@@ -105,9 +105,10 @@ def schedule_queued_jobs(
     full_queue_depth = len(queued)
     per_tick_cap = _dynamic_per_tick_cap(full_queue_depth)
     queued = queued[: per_tick_cap * 8]
-
-    from .skip_done import filter_already_done
-    queued = filter_already_done(queued, store, now_utc, _log)
+    # filter_already_done was disabled: HfApi.list_repo_files on the 184k-file
+    # wisent-ai/activations repo takes 50+s, eating the 60s function timeout
+    # before any dispatch fires. Wrapper still short-circuits per-strategy on
+    # the box so the cost is only VM boot for results-already-uploaded jobs.
 
     # Per-accelerator fairness: when a heterogeneous batch is queued
     # (e.g. T4 + A100-40 + A100-80 jobs all waiting), pure FIFO means the
