@@ -96,11 +96,18 @@ def schedule_queued_jobs(
     queued = store.list_jobs("queue")
     queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
     now_utc = datetime.now(timezone.utc)
+    # Cap how many queued jobs we hand to the per-tick passes. The 60s Cloud
+    # Function timeout is bottlenecked by the HF skip-done filter (one GCS
+    # move per matched job) and the dispatch loop (each create_instance
+    # blocks until the GCE op completes). Limiting to a few hundred bounds
+    # the per-tick wall time without slowing dispatch — anything past
+    # per_tick_cap * 8 wouldn't dispatch this tick anyway.
+    full_queue_depth = len(queued)
+    per_tick_cap = _dynamic_per_tick_cap(full_queue_depth)
+    queued = queued[: per_tick_cap * 8]
 
     from .skip_done import filter_already_done
     queued = filter_already_done(queued, store, now_utc, _log)
-
-    per_tick_cap = _dynamic_per_tick_cap(len(queued))
 
     # Per-accelerator fairness: when a heterogeneous batch is queued
     # (e.g. T4 + A100-40 + A100-80 jobs all waiting), pure FIFO means the

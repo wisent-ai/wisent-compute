@@ -1,7 +1,8 @@
 {
   "gcp": {
-    "nvidia-tesla-t4": {"total": 8, "reserved": 0},
-    "nvidia-l4": {"total": 8, "reserved": 4},
-    "nvidia-tesla-a100": {"total": 5, "reserved": 3}
+    "nvidia-tesla-t4": {"reserved": 0},
+    "nvidia-l4": {"reserved": 0},
+    "nvidia-tesla-a100": {"reserved": 0},
+    "nvidia-tesla-a100-80gb": {"reserved": 0}
   }
 }
