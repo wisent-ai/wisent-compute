@@ -126,6 +126,28 @@ def _detect_local_vram_gb() -> int:
     return 0
 
 
+def _smi_free_vram_gb() -> int:
+    """Live nvidia-smi free VRAM in GB on the first GPU, -1 if unreadable.
+
+    Used as a sanity floor on the agent's bookkeeping: if any other GPU
+    user (vLLM, jupyter, dev work) is consuming VRAM the agent doesn't
+    track, the bookkeeping overestimates free VRAM and the agent claims
+    jobs whose model-load OOMs immediately. Capping bookkeeping by the
+    smi reading prevents over-commit on shared GPUs.
+    """
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            mib = int(r.stdout.strip().splitlines()[0])
+            return mib // 1024
+    except Exception:
+        pass
+    return -1
+
+
 def _compat_accel_types(local_vram_gb: int) -> list[str]:
     """Every GCP gpu_type whose required VRAM tier ≤ local VRAM."""
     from ..models import GPU_SIZING
@@ -235,6 +257,14 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False):
 
         used_vram = sum(_slot_vram(s) for s in slots)
         free_vram_gb = max(0, total_vram_gb - used_vram)
+        # Cap bookkeeping by live nvidia-smi free reading so other GPU users
+        # (vLLM, jupyter, dev work) don't get over-committed. Without this
+        # the agent claims 26-60GB jobs on a box where only 7GB is actually
+        # free, the model-load OOM-fails in <10s, and the failure record
+        # has no stdout because the subprocess was CUDA-killed.
+        smi_free = _smi_free_vram_gb()
+        if smi_free >= 0 and smi_free < free_vram_gb:
+            free_vram_gb = smi_free
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
         publish_capacity(store, consumer_id, "local", free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb)
