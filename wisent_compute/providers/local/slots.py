@@ -91,6 +91,19 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn) -> dict:
             "last_hb": time.time(), "paused": False}
 
 
+def _tail_log(path: str, max_bytes: int = 4096) -> str:
+    """Last max_bytes of the per-job log; '' if missing/empty."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            data = f.read()
+        return data.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
 def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bool:
     """Advance one slot. Returns True if still running, False if completed/failed."""
     proc = slot["proc"]
@@ -108,6 +121,7 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         status = "COMPLETED" if ret == 0 else f"FAILED exit={ret}"
         _write_status(store, job.job_id, status)
         output_dir = f"/tmp/wc-{job.job_id}/output"
+        log_path = f"{output_dir}/command_output.log"
         if Path(output_dir).exists():
             _upload_output(store, job.job_id, output_dir)
         state = JobState.COMPLETED if ret == 0 else JobState.FAILED
@@ -117,6 +131,8 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
             job.completed_at = ts
         else:
             job.failed_at = ts
+            tail = _tail_log(log_path)
+            job.error = tail or f"exit={ret} (no stdout/stderr captured)"
         store.move_job(job, "running", state.value)
         try:
             slot["log_file"].close()
