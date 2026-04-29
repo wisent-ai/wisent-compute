@@ -70,13 +70,14 @@ def _dynamic_per_tick_cap(queue_depth: int) -> int:
     """Autoscale dispatch cap with queue depth.
 
     Defaults to MAX_SCHEDULE_PER_TICK (4) for shallow queues, scales up for
-    larger bursts so a 723-job batch doesn't drip-feed at 4-per-tick. Hard
-    upper bound to avoid quota-thundering-herd.
+    larger bursts so a 723-job batch doesn't drip-feed at 4-per-tick. Upper
+    bound aligned with the multi-region preemptible quota envelope (5
+    regions x ~36 spot GPUs = ~180 ceiling).
     """
     base = MAX_SCHEDULE_PER_TICK
     if queue_depth <= base * 2:
         return base
-    return min(50, base + (queue_depth - base * 2) // 4 + 4)
+    return min(150, base + (queue_depth - base * 2) // 4 + 4)
 
 
 def schedule_queued_jobs(

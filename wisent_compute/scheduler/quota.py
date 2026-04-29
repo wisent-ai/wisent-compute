@@ -18,23 +18,29 @@ _GCP_METRIC_TO_ACCEL = {
 }
 
 
-def _fetch_gcp_quotas(project: str, region: str) -> dict[str, int]:
-    """Live regional quota limits from GCP, keyed by internal accel_type names.
+def _fetch_gcp_quotas(project: str, regions: list[str]) -> dict[str, int]:
+    """Live regional quota limits from GCP, summed across all dispatch regions,
+    keyed by internal accel_type names.
 
-    Returns {} on any error so the scheduler can fall back to the GCS overlay
-    if the API is unreachable. Uses google-cloud-compute (already a dep).
+    Returns {} on any error in the FIRST region; partial coverage across
+    regions is preserved (a regional API hiccup just omits that region's
+    contribution). Uses google-cloud-compute (already a dep).
     """
     try:
         from google.cloud import compute_v1
         client = compute_v1.RegionsClient()
-        region_obj = client.get(project=project, region=region)
     except Exception:
         return {}
     out: dict[str, int] = {}
-    for q in region_obj.quotas:
-        accel = _GCP_METRIC_TO_ACCEL.get(q.metric)
-        if accel:
-            out[accel] = int(q.limit)
+    for region in regions:
+        try:
+            region_obj = client.get(project=project, region=region)
+        except Exception:
+            continue
+        for q in region_obj.quotas:
+            accel = _GCP_METRIC_TO_ACCEL.get(q.metric)
+            if accel:
+                out[accel] = out.get(accel, 0) + int(q.limit)
     return out
 
 
@@ -60,9 +66,9 @@ def load_quotas(store: JobStorage) -> dict:
     The GCS file only contributes `reserved` slots per accel. Falls through
     to the GCS file's `total` if the live API call fails (offline / dev).
     """
+    from ..config import REGIONS
     project = os.environ.get("GCP_PROJECT", "wisent-480400")
-    region = os.environ.get("GCP_REGION", "us-central1")
-    live = _fetch_gcp_quotas(project, region)
+    live = _fetch_gcp_quotas(project, REGIONS)
     overlay = _load_overlay(store)
     if not live:
         return overlay

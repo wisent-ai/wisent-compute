@@ -10,17 +10,50 @@ BUCKET = os.environ.get("WC_BUCKET", "wisent-compute")
 REGION = os.environ.get("GCP_REGION", "us-central1")
 ALERTS_TOPIC = os.environ.get("WC_ALERTS_TOPIC", f"projects/{PROJECT}/topics/wisent-compute-alerts")
 
-ZONE_ROTATION = [f"{REGION}-b", f"{REGION}-a", f"{REGION}-c", f"{REGION}-f"]
-# Per-machine-type zone rotation. Some SKUs (a2-ultragpu-*, a3-*) don't exist
-# in every us-central1 zone, and a2-ultragpu-1g spot capacity in
-# us-central1-a is regularly exhausted. For those buckets, prefer the zones
-# that ship the SKU and fall back to alternate regions for spot. The
-# provider iterates this list before falling back to ZONE_ROTATION.
+# Multi-region dispatch. Every region listed here is queried for live quota
+# AND iterated by the GCP provider when creating instances. Each region
+# carries a default GCP-issued quota (16 preemptible A100, 4 preemptible
+# A100-80GB, 8 preemptible L4, 8 preemptible T4) so spreading across these
+# 5 regions lifts total parallel-VM ceiling from ~28 to ~140 without any
+# quota-increase request. Override with GCP_REGIONS=us-central1,europe-west4
+# (comma-separated) to narrow the dispatch surface for testing.
+REGIONS = [r.strip() for r in os.environ.get(
+    "GCP_REGIONS",
+    "us-central1,europe-west4,us-east1,us-east4,us-east5",
+).split(",") if r.strip()]
+
+# Zones, ordered by preference. Primary region's zones first (lowest egress
+# from existing infra in us-central1), then alternates. Provider iterates
+# this list and falls through GCE 'does not exist' / 'no capacity' errors
+# until one zone accepts the create_instance call.
+ZONE_ROTATION = [
+    f"{REGION}-b", f"{REGION}-a", f"{REGION}-c", f"{REGION}-f",
+    "europe-west4-a", "europe-west4-b", "europe-west4-c",
+    "us-east1-c", "us-east1-d",
+    "us-east4-a", "us-east4-b", "us-east4-c",
+    "us-east5-a", "us-east5-b", "us-east5-c",
+]
+# Per-machine-type zone rotation. Some SKUs don't exist in every zone, or
+# have regional spot-capacity quirks. For those buckets, list the zones that
+# actually carry the SKU first; the provider falls back to ZONE_ROTATION.
 MACHINE_TYPE_ZONES = {
     "a2-ultragpu-1g": [
         f"{REGION}-c", f"{REGION}-a",
         "us-east5-a", "us-east5-b", "us-east4-c",
-        "europe-west4-a",
+        "europe-west4-a", "europe-west4-b",
+    ],
+    "a2-highgpu-1g": [
+        f"{REGION}-b", f"{REGION}-a", f"{REGION}-c", f"{REGION}-f",
+        "europe-west4-a", "europe-west4-b",
+        "us-east1-b", "us-east1-c",
+        "us-east4-a", "us-east4-b",
+    ],
+    "g2-standard-4": [  # nvidia-l4
+        f"{REGION}-a", f"{REGION}-b", f"{REGION}-c",
+        "europe-west4-a", "europe-west4-b",
+        "us-east1-c", "us-east1-d",
+        "us-east4-a", "us-east4-b", "us-east4-c",
+        "us-east5-a", "us-east5-b",
     ],
 }
 HEARTBEAT_STALE_MINUTES = 15
