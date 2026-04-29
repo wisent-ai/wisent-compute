@@ -6,3 +6,4 @@ build/
 .DS_Store
 **/.DS_Store
 agent.log
+wisent_compute/targets/registry.json

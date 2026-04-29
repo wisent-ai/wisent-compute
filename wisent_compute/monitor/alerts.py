@@ -44,7 +44,7 @@ def _telegram(message: str):
 def _email(subject: str, body: str):
     api_key = os.environ.get("WC_SENDGRID_API_KEY")
     to_addr = os.environ.get("WC_EMAIL_TO")
-    from_addr = os.environ.get("WC_EMAIL_FROM", "compute@wisent.ai")
+    from_addr = os.environ.get("WC_EMAIL_FROM", "compute@example.com")
     if not api_key or not to_addr:
         return
     url = "https://api.sendgrid.com/v3/mail/send"

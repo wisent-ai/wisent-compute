@@ -41,12 +41,11 @@ jobs:
       - name: Show identity
         run: gcloud auth list && gcloud config list
 
-      - name: Push compute-target registry to GCS
-        # Single source of truth. Running agents re-fetch every poll cycle,
-        # so a registry edit propagates without restarts or re-installs.
-        run: |
-          gsutil cp wisent_compute/targets/registry.json \
-            gs://wisent-compute/registry.json
+      # registry.json is no longer pushed from the repo: the file is
+      # operator-owned (gitignored, replaced by registry.example.json
+      # for documentation). Push your live registry to
+      # gs://wisent-compute/registry.json out-of-band — running agents
+      # re-fetch on every poll cycle.
 
       - name: Redeploy Cloud Function
         run: bash deploy/redeploy_function.sh
