@@ -177,7 +177,10 @@ def cancel(job_id):
 @click.option("--idle-shutdown", is_flag=True, default=False,
               help="Exit (and self-delete the GCE VM) when no slots active and no "
                    "queued job is eligible. Use on ephemeral cloud-VM agents.")
-def agent(gpu_type, target, auto, idle_shutdown):
+@click.option("--kind", default="local",
+              help='Consumer label in capacity broadcasts: "local" (physical box, '
+                   'default), "gcp" / "aws" / "vast" (ephemeral cloud-agent VM).')
+def agent(gpu_type, target, auto, idle_shutdown, kind):
     """Run local GPU agent. Polls queue, respects Vast.ai renters."""
     import os as _os
     if auto:
@@ -201,7 +204,7 @@ def agent(gpu_type, target, auto, idle_shutdown):
         _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
         click.echo(f"agent: target={t.name} gpu_type={gpu_type} slots={t.slots}")
     from .providers.local_agent import run_agent
-    run_agent(gpu_type=gpu_type, idle_shutdown=idle_shutdown)
+    run_agent(gpu_type=gpu_type, idle_shutdown=idle_shutdown, kind=kind)
 
 
 @main.command()

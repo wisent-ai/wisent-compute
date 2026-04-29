@@ -201,13 +201,18 @@ def _no_eligible_in_queue(store: JobStorage, gpu_type: str, total_vram_gb: int,
     return True
 
 
-def run_agent(gpu_type: str = "", idle_shutdown: bool = False):
+def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "local"):
     """Main agent loop. Polls queue, runs jobs when Vast.ai is idle.
 
     idle_shutdown=True: exit cleanly (and self-delete the GCE VM if running on
     one) once both: (a) no slots active, and (b) no queued job is eligible to
     run on this consumer's free VRAM. Used for the cloud-VM agent path. The
     workstation/Vast.ai path leaves it False so the daemon stays up.
+
+    kind: capacity-broadcast label distinguishing physical workstations
+    (kind="local") from ephemeral cloud-agent VMs (kind="gcp", "aws", ...).
+    Surfaces cloud-VM count to the dashboard. Local-vs-cloud yield rules in
+    the scheduler key on this same field.
     """
     from .local.slots import advance_slot, start_slot
     from ..targets import lookup_self
@@ -216,14 +221,14 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False):
     total_vram_gb = max(1, _detect_local_vram_gb())
     # WC_LOCAL_SLOTS retained as a HARD safety cap (defaults to no cap when 0).
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
-    _log(f"Agent started. GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
+    _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
 
     initial_env: dict[str, str] = dict(os.environ)
     initial_gpu = gpu_type
 
     store = JobStorage(BUCKET)
     hostname = os.uname().nodename
-    consumer_id = f"local-{hostname}"
+    consumer_id = f"{kind}-{hostname}"
     slots: list[dict] = []
 
     while True:
@@ -250,7 +255,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False):
         vast_active = _vast_has_renter()
         slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
         if vast_active:
-            publish_capacity(store, consumer_id, "local", {}, free_vram_gb=0,
+            publish_capacity(store, consumer_id, kind, {}, free_vram_gb=0,
                              total_vram_gb=total_vram_gb)
             time.sleep(POLL_INTERVAL)
             continue
@@ -266,7 +271,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False):
         if smi_free >= 0 and smi_free < free_vram_gb:
             free_vram_gb = smi_free
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
-        publish_capacity(store, consumer_id, "local", free_slots,
+        publish_capacity(store, consumer_id, kind, free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb)
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):

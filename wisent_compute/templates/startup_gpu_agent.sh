@@ -62,6 +62,6 @@ huggingface-cli download sentence-transformers/all-MiniLM-L6-v2 || true
 # Run the agent. --idle-shutdown makes it exit + self-delete the VM when the
 # queue holds nothing this VM can run. No timer, no slot constant — pure
 # condition-driven on (slots empty AND no eligible queued job).
-.venv/bin/wc agent --gpu-type "${ACCEL_TYPE}" --idle-shutdown
+.venv/bin/wc agent --kind gcp --gpu-type "${ACCEL_TYPE}" --idle-shutdown
 EXIT=$?
 echo "Agent exited with $EXIT at $(date -u)"
