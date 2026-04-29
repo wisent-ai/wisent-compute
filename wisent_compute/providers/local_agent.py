@@ -35,6 +35,11 @@ def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
 
 POLL_INTERVAL = 60
 HEARTBEAT_INTERVAL = 300
+# Time to sleep after a successful claim so nvidia-smi can reflect the
+# freshly-spawned subprocess's CUDA allocation before the next iteration
+# decides whether to claim again. Empirically a torch model load starts
+# allocating GPU memory within ~5 seconds of subprocess start.
+SETTLE_AFTER_CLAIM_SECONDS = 20
 VAST_API = "https://console.vast.ai/api/v0"
 
 
@@ -280,6 +285,18 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
 
         queued = store.list_jobs("queue", oldest_first=400)
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
+        # Claim AT MOST one new job per loop iteration. The previous version
+        # greedily claimed every job whose declared gpu_mem_gb fit in the
+        # bookkeeping budget, in the same iteration. Because nvidia-smi takes
+        # several seconds to reflect a freshly-spawned subprocess's CUDA
+        # allocation, smi_free still showed 80+ GB while 3 model loads were
+        # already underway — the cap-to-smi check was a no-op for the second
+        # and third claim. Result: 4 simultaneous model loads on a 96 GB
+        # workstation, total peak ~95 GB, last one OOMs mid-load (job ee060bb3
+        # tail showed Process 584222 46.30 GiB + 587657 15.81 GiB + 588506
+        # 8.54 GiB + 24.10 GiB this process = 94.75 GiB used, 0.21 GiB free).
+        # Now: claim 1, sleep SETTLE_AFTER_CLAIM_SECONDS, re-read smi at top
+        # of loop, decide whether the next claim still fits.
         started = 0
         for job in queued:
             if hard_slot_cap > 0 and len(slots) >= hard_slot_cap:
@@ -292,6 +309,15 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             slots.append(start_slot(store, job, hostname, _log))
             free_vram_gb -= need
             started += 1
+            break
+
+        if started > 0:
+            # Let nvidia-smi reflect the new subprocess's CUDA allocation
+            # before the next iteration's smi_free read. Without this, the
+            # agent re-enters the loop top with stale smi data and may claim
+            # again before the previous load has consumed any VRAM.
+            time.sleep(SETTLE_AFTER_CLAIM_SECONDS)
+            continue
 
         if started == 0:
             if idle_shutdown and not slots and _no_eligible_in_queue(
