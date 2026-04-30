@@ -54,6 +54,17 @@ export NUMBA_NUM_THREADS=1
 # Slow HF API calls so we don't hit the 1000-requests-per-5min limit when
 # 20+ cloud agents all hit ArabicMMLU/etc dataset metadata at once.
 export HF_HUB_DOWNLOAD_TIMEOUT=120
+# Kill telemetry/analytics pings — they count against the 1000/5min ceiling.
+export HF_HUB_DISABLE_TELEMETRY=1
+# Don't auto-resolve a stored token off disk; we already pass HF_TOKEN
+# explicitly. This avoids an extra HfFolder lookup in some code paths.
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+# When a file IS present in cache, transformers/huggingface_hub still issues
+# a HEAD to refresh the etag and re-validate. With cache-first loading in
+# wisent>=0.11.20 this normally won't fire, but if some path still bypasses
+# local_files_only we want the etag check to fail fast (1s) and fall back
+# to cache rather than block waiting on a rate-limited Hub.
+export HF_HUB_ETAG_TIMEOUT=1
 
 # Pre-warm the small auxiliary models so each claimed job skips the download.
 huggingface-cli download cross-encoder/nli-deberta-v3-small || true
