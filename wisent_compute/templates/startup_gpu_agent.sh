@@ -56,9 +56,13 @@ export NUMBA_NUM_THREADS=1
 export HF_HUB_DOWNLOAD_TIMEOUT=120
 # Kill telemetry/analytics pings — they count against the 1000/5min ceiling.
 export HF_HUB_DISABLE_TELEMETRY=1
-# Don't auto-resolve a stored token off disk; we already pass HF_TOKEN
-# explicitly. This avoids an extra HfFolder lookup in some code paths.
-export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+# NOTE: do NOT set HF_HUB_DISABLE_IMPLICIT_TOKEN here. Despite its name, that
+# flag disables BOTH the on-disk HfFolder lookup AND the HF_TOKEN env-var
+# resolution path inside huggingface_hub. We rely on env-var auth for gated
+# meta-llama repos, so leaving it unset (or =0) is the correct setting.
+# Confirmed live on 2026-04-30: setting this to 1 caused 49 of last 50
+# failures to be GatedRepoError 401 on Llama-2-7b-chat-hf and
+# Llama-3.2-1B-Instruct.
 # When a file IS present in cache, transformers/huggingface_hub still issues
 # a HEAD to refresh the etag and re-validate. With cache-first loading in
 # wisent>=0.11.20 this normally won't fire, but if some path still bypasses
