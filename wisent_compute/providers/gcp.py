@@ -47,11 +47,17 @@ class GCPProvider(Provider):
                     # Use Spot (the modern provisioning model). The legacy
                     # `preemptible` flag is a separate Bool that GCP keeps for
                     # back-compat; setting both is redundant but explicit.
+                    # instance_termination_action="DELETE" so a preempted VM is
+                    # fully removed (disk + instance), not just STOPped. With
+                    # STOP, every preemption left a zombie TERMINATED instance
+                    # holding 200GB of regional disk quota — empirically we
+                    # accumulated 546 of them in 4 days, eating ~109TB and
+                    # bottlenecking dispatch with DISKS_TOTAL_GB QUOTA_EXCEEDED.
                     sched = compute_v1.Scheduling(
                         preemptible=True,
                         provisioning_model="SPOT",
                         on_host_maintenance="TERMINATE",
-                        instance_termination_action="STOP",
+                        instance_termination_action="DELETE",
                     )
                 else:
                     sched = compute_v1.Scheduling(
