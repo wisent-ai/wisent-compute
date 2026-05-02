@@ -39,8 +39,11 @@ ZONE_ROTATION = [
 MACHINE_TYPE_ZONES = {
     "a2-ultragpu-1g": [
         f"{REGION}-c", f"{REGION}-a",
-        "us-east5-a", "us-east5-b", "us-east4-c",
-        "europe-west4-a", "europe-west4-b",
+        "us-east5-a", "us-east5-b",
+        "europe-west4-a",
+        # Removed 2026-05-01: machine-type not present in europe-west4-b;
+        # NVIDIA_A100_80GB_GPUS regional quota is 0 in us-east4, so
+        # us-east4-c was generating "Quota exceeded" errors every tick.
     ],
     "a2-highgpu-1g": [
         f"{REGION}-b", f"{REGION}-a", f"{REGION}-c", f"{REGION}-f",
@@ -56,8 +59,11 @@ MACHINE_TYPE_ZONES = {
         f"{REGION}-a", f"{REGION}-b", f"{REGION}-c",
         "europe-west4-a", "europe-west4-b",
         "us-east1-c", "us-east1-d",
-        "us-east4-a", "us-east4-b", "us-east4-c",
-        "us-east5-a", "us-east5-b",
+        "us-east4-a", "us-east4-c",
+        # Removed 2026-05-01: g2-standard-4 not present in us-east4-b,
+        # us-east5-a, us-east5-b. Confirmed via gcloud compute machine-types
+        # describe; the dispatcher was logging "Invalid machine type" each
+        # tick for these zones.
     ],
 }
 HEARTBEAT_STALE_MINUTES = 15
