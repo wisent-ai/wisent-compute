@@ -45,8 +45,12 @@ MACHINE_TYPE_ZONES = {
     "a2-highgpu-1g": [
         f"{REGION}-b", f"{REGION}-a", f"{REGION}-c", f"{REGION}-f",
         "europe-west4-a", "europe-west4-b",
-        "us-east1-b", "us-east1-c",
-        "us-east4-a", "us-east4-b",
+        "us-east1-b",
+        # us-east1-c, us-east4-a, us-east4-b removed 2026-05-01: confirmed via
+        # `gcloud compute machine-types describe a2-highgpu-1g --zone=...`
+        # that the SKU is not present in those zones; the dispatcher was
+        # logging "Machine type does not exist" on every attempt against them
+        # which wasted Cloud Function ticks and slowed fleet ramp-up.
     ],
     "g2-standard-4": [  # nvidia-l4
         f"{REGION}-a", f"{REGION}-b", f"{REGION}-c",
