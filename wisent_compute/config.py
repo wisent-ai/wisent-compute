@@ -84,12 +84,34 @@ DEFAULT_CPU_IMAGE_PROJECT = "ubuntu-os-cloud"
 DEFAULT_BOOT_DISK_GB = 200
 
 
+# Per-model peak-VRAM overrides for models whose actual peak diverges from
+# the params-based heuristic below. Numbers are observed peak GiB during
+# get-activations on an A100-80GB / RTX PRO 6000.
+#
+# openai/gpt-oss-20b: 78.6 GiB peak observed (job d3e0f18e tail, 2026-05-02).
+#   Model ships in mxfp4 packed format which is dequantized to bf16 in
+#   transformers' load path (mxfp4.py:115 convert_moe_packed_tensors), so
+#   on-disk size ~= 12 GiB but on-GPU peak balloons to ~80 GiB. Without
+#   this override the params-based heuristic predicts 72 GiB, leaving
+#   ~22 GiB free in the agent's bookkeeping. The agent then claims a
+#   second job that fits in 22 GiB (e.g. Llama-3.2-1B at 15 GiB) — once
+#   gpt-oss-20b finishes dequant, total = 78 + 15 = 93 GiB and the GPU
+#   OOMs. Reserving 88 GiB means no second job can be co-scheduled on a
+#   95 GiB GPU, which is the desired behavior for this model.
+MODEL_VRAM_OVERRIDES_GB = {
+    "openai/gpt-oss-20b": 88,
+}
+
+
 def estimate_gpu_memory(command: str) -> int:
     """Estimate GPU memory needed from a command string."""
     model_match = re.search(r'--model\s+(\S+)', command)
     if not model_match:
         return 0
-    model = model_match.group(1)
+    model = model_match.group(1).strip("'\"")
+
+    if model in MODEL_VRAM_OVERRIDES_GB:
+        return MODEL_VRAM_OVERRIDES_GB[model]
 
     params_b = 0
     m = re.search(r'(\d+\.?\d*)[Bb]', model)

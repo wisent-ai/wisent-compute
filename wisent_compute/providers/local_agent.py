@@ -13,7 +13,7 @@ import time
 import urllib.request
 from datetime import datetime
 
-from ..config import BUCKET
+from ..config import BUCKET, estimate_gpu_memory
 from ..models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
 from ..queue.capacity import publish_capacity
 from ..queue.storage import JobStorage
@@ -183,10 +183,8 @@ def _build_capacity_dict(gpu_type: str, free_vram_gb: int, total_vram_gb: int) -
 
 
 def _slot_vram(slot: dict) -> int:
-    """Best-effort VRAM cost a running slot occupies."""
     job = slot.get("job")
-    return int(getattr(job, "gpu_mem_gb", 0) or 0)
-
+    return max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))
 
 def _no_eligible_in_queue(store: JobStorage, gpu_type: str, total_vram_gb: int,
                           free_vram_gb: int) -> bool:
@@ -197,7 +195,7 @@ def _no_eligible_in_queue(store: JobStorage, gpu_type: str, total_vram_gb: int,
     """
     queued = store.list_jobs("queue")
     for job in queued:
-        need = int(getattr(job, "gpu_mem_gb", 0) or 0)
+        need = max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))  # live estimator
         if need > free_vram_gb:
             continue
         if not _job_eligible(job, gpu_type, total_vram_gb):
@@ -301,7 +299,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         for job in queued:
             if hard_slot_cap > 0 and len(slots) >= hard_slot_cap:
                 break
-            need = int(getattr(job, "gpu_mem_gb", 0) or 0)
+            need = max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))  # live estimator
             if need > free_vram_gb:
                 continue
             if not _job_eligible(job, gpu_type, total_vram_gb):
