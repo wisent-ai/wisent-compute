@@ -7,7 +7,7 @@ from google.cloud import pubsub_v1, secretmanager_v1
 from wisent_compute.config import PROJECT, BUCKET, ALERTS_TOPIC
 from wisent_compute.queue.storage import JobStorage
 from wisent_compute.providers import get_provider
-from wisent_compute.monitor import check_running_jobs
+from wisent_compute.monitor import check_running_jobs, reap_dead_agents
 from wisent_compute.scheduler import schedule_queued_jobs
 
 _publisher = None
@@ -48,9 +48,10 @@ def monitor_jobs(request=None):
         _publisher = pubsub_v1.PublisherClient()
 
     check_running_jobs(store, provider, _publisher)
+    reaped = reap_dead_agents(store, provider, kind="gcp")
 
     secrets = _load_secrets()
     scheduled = schedule_queued_jobs(store, provider, "gcp", secrets)
-    _log(f"Tick done: scheduled {scheduled}")
+    _log(f"Tick done: reaped {reaped} dead-agent VMs, scheduled {scheduled}")
 
     return "OK"

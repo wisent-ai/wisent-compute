@@ -1,1 +1,1 @@
-from .monitor import check_running_jobs
+from .monitor import check_running_jobs, reap_dead_agents

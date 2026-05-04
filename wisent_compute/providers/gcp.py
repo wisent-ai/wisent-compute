@@ -135,3 +135,18 @@ class GCPProvider(Provider):
                     atype = acc.accelerator_type.split("/")[-1]
                     counts[atype] = counts.get(atype, 0) + acc.accelerator_count
         return counts
+
+    def list_running_instance_refs(self) -> list[str]:
+        """[(name@zone), ...] for all RUNNING wisent-agent VMs. Used by the
+        dead-agent reaper to cross-reference against live capacity broadcasts."""
+        refs = []
+        request = compute_v1.AggregatedListInstancesRequest(
+            project=self.project,
+            filter=f"name:{INSTANCE_PREFIX}-*",
+        )
+        for zone_path, response in self.client.aggregated_list(request=request):
+            zone = zone_path.split("/")[-1]
+            for inst in response.instances or []:
+                if inst.status == "RUNNING":
+                    refs.append(f"{inst.name}@{zone}")
+        return refs

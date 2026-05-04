@@ -99,6 +99,35 @@ def _requeue(store: JobStorage, job: Job, reason: str):
     _log(f"{job.job_id}: requeued ({reason}, restart {job.restarts})")
 
 
+def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -> int:
+    """Delete RUNNING VMs whose `wc agent` has stopped publishing capacity.
+
+    The agent's main loop publishes a freshness-stamped JSON to
+    gs://<bucket>/capacity/<kind>-<hostname>.json on every iteration. If the
+    process crashes (OOM, segfault, uncaught exception) the GCE instance keeps
+    running, holding GPU + disk quota with zero work output. read_consumer_capacity
+    filters to broadcasts younger than CAPACITY_STALE_SECONDS. Any RUNNING VM
+    whose corresponding consumer_id is missing from that filtered set has a
+    dead agent and gets deleted here so the dispatcher can spawn a fresh
+    replacement.
+    """
+    from ..queue.capacity import read_consumer_capacity
+    live = read_consumer_capacity(store)  # consumer_id -> payload, fresh only
+    refs = provider.list_running_instance_refs()
+    deleted = 0
+    for ref in refs:
+        name = ref.split("@", 1)[0]
+        consumer_id = f"{kind}-{name}"
+        if consumer_id in live:
+            continue
+        provider.delete_instance(ref)
+        _log(f"reaped dead-agent VM {ref} (no fresh capacity broadcast for {consumer_id})")
+        deleted += 1
+    if deleted:
+        _log(f"reap_dead_agents: deleted {deleted} VM(s)")
+    return deleted
+
+
 def _requeue_preempted(store: JobStorage, job: Job, reason: str):
     """Move job back to queue, counting preemption separately from restarts.
 
