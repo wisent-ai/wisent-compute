@@ -129,6 +129,8 @@ class JobStorage:
 
     def write_job(self, prefix: str, job: Job):
         self._upload_text(f"{prefix}/{job.job_id}.json", job.to_json())
+        if prefix == "queue" and int(getattr(job, "priority", 0) or 0) > 0:
+            self.write_priority_marker(job)
 
     def read_job(self, prefix: str, job_id: str) -> Job | None:
         data = self._download_text(f"{prefix}/{job_id}.json")
@@ -136,10 +138,93 @@ class JobStorage:
 
     def delete_job(self, prefix: str, job_id: str):
         self._delete_blob(f"{prefix}/{job_id}.json")
+        if prefix == "queue":
+            self.delete_priority_marker(job_id)
 
     def move_job(self, job: Job, from_prefix: str, to_prefix: str):
         self.write_job(to_prefix, job)
         self._delete_blob(f"{from_prefix}/{job.job_id}.json")
+        if from_prefix == "queue":
+            self.delete_priority_marker(job.job_id)
+
+    def _priority_key(self, job: Job) -> str:
+        """Sortable name component: lower = higher real priority + older."""
+        prio = max(0, min(99999999, int(getattr(job, "priority", 0) or 0)))
+        inv = 99999999 - prio
+        ts = ""
+        ca = getattr(job, "created_at", None)
+        if ca is not None:
+            ts = ca.isoformat() if hasattr(ca, "isoformat") else str(ca)
+        return f"{inv:08d}-{ts}"
+
+    def write_priority_marker(self, job: Job):
+        """Index entry for priority>0 jobs. The blob NAME encodes
+        (inv_priority, created_at) so name-ascending sort = priority-desc
+        then FIFO. Body holds {job_id, priority} for unambiguous resolve."""
+        name = f"queue_priority/{self._priority_key(job)}-{job.job_id}.json"
+        body = json.dumps({"job_id": job.job_id, "priority": int(job.priority)})
+        self._upload_text(name, body)
+
+    def delete_priority_marker(self, job_id: str):
+        """Remove any priority marker(s) for this job_id. Safe no-op if absent."""
+        suffix = f"-{job_id}.json"
+        for path in self._list_paths("queue_priority/"):
+            if path.endswith(suffix):
+                self._delete_blob(path)
+
+    def list_priority_jobs(self, prefix: str, *, top_n: int) -> list[Job]:
+        """Fetch the top_n highest-priority jobs from prefix/ via the
+        queue_priority/ index. Markers sort ascending by name = (inv_priority,
+        created_at), so the first top_n give priority-desc + FIFO."""
+        if top_n <= 0:
+            return []
+        from concurrent.futures import ThreadPoolExecutor
+        marker_paths = sorted(
+            p for p in self._list_paths("queue_priority/") if p.endswith(".json")
+        )[:top_n]
+        if not marker_paths:
+            return []
+        workers = min(10, max(1, len(marker_paths)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            bodies = list(pool.map(self._download_text, marker_paths))
+        job_ids = []
+        for b in bodies:
+            if not b:
+                continue
+            try:
+                jid = json.loads(b).get("job_id")
+            except Exception:
+                continue
+            if jid:
+                job_ids.append(jid)
+        if not job_ids:
+            return []
+        job_paths = [f"{prefix}/{j}.json" for j in job_ids]
+        with ThreadPoolExecutor(max_workers=min(10, len(job_paths))) as pool:
+            blobs = list(pool.map(self._download_text, job_paths))
+        out = []
+        for data in blobs:
+            if data:
+                try:
+                    out.append(Job.from_json(data))
+                except Exception:
+                    pass
+        return out
+
+    def list_jobs_priority_first(self, prefix: str, *, cap: int) -> list[Job]:
+        """Combined listing: priority markers first, then FIFO oldest_first
+        over the same prefix. Deduped by job_id. The whole point of this
+        method is that high-priority jobs jump the FIFO listing window."""
+        pri = self.list_priority_jobs(prefix, top_n=cap)
+        fifo = self.list_jobs(prefix, oldest_first=cap)
+        seen: set[str] = set()
+        out: list[Job] = []
+        for j in (pri + fifo):
+            if j.job_id in seen:
+                continue
+            seen.add(j.job_id)
+            out.append(j)
+        return out
 
     def list_jobs(self, prefix: str, *, oldest_first: int = 0) -> list[Job]:
         """Parallel-fetch job JSONs under prefix/ via a thread pool.

@@ -100,7 +100,7 @@ def schedule_queued_jobs(
     # GCS time_created ascending (FIFO) — anything past _dynamic_per_tick_cap's
     # ceiling × 8 wouldn't fit in this tick's budget anyway.
     list_cap = _dynamic_per_tick_cap(10**9) * 8
-    queued = store.list_jobs("queue", oldest_first=list_cap)
+    queued = store.list_jobs_priority_first("queue", cap=list_cap)
     queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
     now_utc = datetime.now(timezone.utc)
     full_queue_depth = len(queued)

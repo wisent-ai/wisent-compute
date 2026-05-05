@@ -281,7 +281,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             time.sleep(10)
             continue
 
-        queued = store.list_jobs("queue", oldest_first=400)
+        queued = store.list_jobs_priority_first("queue", cap=400)
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
         # Claim AT MOST one new job per loop iteration. The previous version
         # greedily claimed every job whose declared gpu_mem_gb fit in the
