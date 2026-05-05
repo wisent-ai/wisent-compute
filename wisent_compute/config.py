@@ -99,8 +99,24 @@ DEFAULT_BOOT_DISK_GB = 200
 #   OOMs. Reserving 88 GiB means no second job can be co-scheduled on a
 #   95 GiB GPU, which is the desired behavior for this model.
 MODEL_VRAM_OVERRIDES_GB = {
-    "openai/gpt-oss-20b": 88,
+    # 80 GiB so a2-ultragpu-1g (80 GiB A100) can admit it (need=80 == free=80).
+    # Previously 88 to forbid co-scheduling on the 96 GiB workstation, but that
+    # locked the model to workstation-only. Workstation's lm-eval pt-task
+    # loading bug then made gpt-oss-20b throughput effectively zero. Switching
+    # to 80 + EXCLUSIVE_MODELS (below) keeps the no-co-schedule guarantee
+    # WITHOUT blocking 80 GiB cloud VMs from admitting the job.
+    "openai/gpt-oss-20b": 80,
 }
+
+# Models the agent must run with the entire GPU to itself. While a slot is
+# running one of these, the agent treats remaining free VRAM as 0 so no
+# second job is claimed. Reason: gpt-oss-20b's mxfp4 dequant balloons peak
+# from ~40 GiB to ~78 GiB after admission; on a 96 GiB workstation the
+# pre-balloon free reading lets the agent claim a co-scheduled small job
+# that then OOMs once dequant completes (job d3e0f18e, 0e8f54b6).
+EXCLUSIVE_MODELS = frozenset({
+    "openai/gpt-oss-20b",
+})
 
 
 def estimate_gpu_memory(command: str) -> int:

@@ -182,6 +182,11 @@ def _build_capacity_dict(gpu_type: str, free_vram_gb: int, total_vram_gb: int) -
     return out
 
 
+def _slot_is_exclusive(slot: dict) -> bool:
+    from ..config import EXCLUSIVE_MODELS
+    import re
+    m = re.search(r"--model\s+(\S+)", getattr(slot.get("job"), "command", "") or "")
+    return bool(m and m.group(1).strip("'\"") in EXCLUSIVE_MODELS)
 def _slot_vram(slot: dict) -> int:
     job = slot.get("job")
     return max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))
@@ -264,6 +269,10 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             continue
 
         used_vram = sum(_slot_vram(s) for s in slots)
+        # Exclusive-model lockout: while any slot runs a model in
+        # EXCLUSIVE_MODELS, force used = total so no co-schedule.
+        if any(_slot_is_exclusive(s) for s in slots):
+            used_vram = total_vram_gb
         free_vram_gb = max(0, total_vram_gb - used_vram)
         # Cap bookkeeping by live nvidia-smi free reading so other GPU users
         # (vLLM, jupyter, dev work) don't get over-committed. Without this
