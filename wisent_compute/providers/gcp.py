@@ -138,11 +138,18 @@ class GCPProvider(Provider):
 
     def list_running_instance_refs(self) -> list[str]:
         """[(name@zone), ...] for all RUNNING wisent-agent VMs. Used by the
-        dead-agent reaper to cross-reference against live capacity broadcasts."""
+        dead-agent reaper to cross-reference against live capacity broadcasts.
+
+        The filter intentionally narrows to `<prefix>-agent-*` (not just
+        `<prefix>-*`): the broader pattern also matches unrelated service
+        MIG instances in the same project (`wisent-mig-api-*`,
+        `wisent-mig-inference-*`, `wisent-mig-images-*`) which never
+        broadcast capacity, so the reaper would mass-delete them every tick.
+        """
         refs = []
         request = compute_v1.AggregatedListInstancesRequest(
             project=self.project,
-            filter=f"name:{INSTANCE_PREFIX}-*",
+            filter=f"name:{INSTANCE_PREFIX}-agent-*",
         )
         for zone_path, response in self.client.aggregated_list(request=request):
             zone = zone_path.split("/")[-1]
