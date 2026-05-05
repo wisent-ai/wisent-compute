@@ -57,32 +57,57 @@ def publish_capacity(
 
 
 def read_consumer_capacity(store: JobStorage) -> dict[str, dict]:
-    """Return {consumer_id: payload} for every live (non-stale) consumer."""
+    """Return {consumer_id: payload} for every live (non-stale) consumer.
+
+    Filters on blob.updated metadata BEFORE downloading. Previously every
+    tick downloaded all broadcast files (1900+ accumulated, most stale)
+    just to read published_at — at ~30ms/blob this exceeded the 60s Cloud
+    Function timeout, returned 504, and Cloud Scheduler auto-paused the
+    cron. Filtering on server-side metadata first means the tick reads
+    only the small number of fresh blobs.
+
+    Also deletes long-stale blobs (older than 1h, well past
+    CAPACITY_STALE_SECONDS=180s) so the bucket can't accumulate forever.
+    Capped per tick so the Cloud Function never spends its budget on GC.
+    """
+    if not store._sdk_bucket:
+        raise RuntimeError(
+            "read_consumer_capacity requires the GCS SDK bucket. "
+            "JobStorage was constructed without one (gsutil-only mode "
+            "is not supported on the dispatcher path)."
+        )
+
     now = datetime.now(timezone.utc)
+    cutoff_fresh = now.timestamp() - CAPACITY_STALE_SECONDS
+    cutoff_delete = now.timestamp() - 3600  # 1h
+
     out: dict[str, dict] = {}
-    paths = store._list_paths(CAPACITY_PREFIX)
-    for path in paths:
-        if not path.endswith(".json"):
+    stale_blobs = []
+    for blob in store._sdk_bucket.list_blobs(prefix=CAPACITY_PREFIX):
+        if not blob.name.endswith(".json"):
             continue
-        raw = store._download_text(path)
-        if not raw:
+        if blob.updated is None:
             continue
+        ts = blob.updated.timestamp()
+        if ts < cutoff_delete:
+            stale_blobs.append(blob)
+            continue
+        if ts < cutoff_fresh:
+            continue
+        raw = blob.download_as_text()
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        published = payload.get("published_at")
-        if not published:
-            continue
-        try:
-            ts = datetime.fromisoformat(published.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if (now - ts).total_seconds() > CAPACITY_STALE_SECONDS:
-            continue
         cid = payload.get("consumer_id")
         if cid:
             out[cid] = payload
+
+    for blob in stale_blobs[:200]:
+        try:
+            blob.delete()
+        except Exception:
+            pass
     return out
 
 
