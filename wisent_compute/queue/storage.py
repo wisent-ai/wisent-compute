@@ -214,7 +214,11 @@ class JobStorage:
     def list_jobs_priority_first(self, prefix: str, *, cap: int) -> list[Job]:
         """Combined listing: priority markers first, then FIFO oldest_first
         over the same prefix. Deduped by job_id. The whole point of this
-        method is that high-priority jobs jump the FIFO listing window."""
+        method is that high-priority jobs jump the FIFO listing window.
+        Calls migrations.backfill_priority_markers up-front so any pre-0.4.26
+        queued jobs get retroactive markers without manual intervention."""
+        from . import migrations as _mig
+        _mig.backfill_priority_markers(self)
         pri = self.list_priority_jobs(prefix, top_n=cap)
         fifo = self.list_jobs(prefix, oldest_first=cap)
         seen: set[str] = set()
