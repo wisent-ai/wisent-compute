@@ -25,6 +25,10 @@ pip install --upgrade wisent wisent-extractors wisent-evaluators wisent-tools \
     lm-eval optuna matplotlib word2number evaluate
 pip uninstall -y hf-xet || true
 
+# Optional source-repo clone + install. Populated by submit_job when the
+# caller passed --repo URL. Empty (no-op) when no repo was requested.
+${REPO_BLOCK}
+
 export HF_TOKEN="${HF_TOKEN}"
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
 huggingface-cli download meta-llama/Llama-3.2-1B-Instruct || true

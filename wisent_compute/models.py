@@ -120,6 +120,13 @@ class Job:
     submitted_by: str = ""        # username on the submitting machine
     submitted_from: str = ""      # hostname of the submitting machine
     submitted_via: str = ""       # cli | api | other
+    # Optional source repo to git clone before running command. The startup
+    # script clones repo into ./{repo_workdir} and pip-installs the [train]
+    # extra so 'cd {repo_workdir} && python -m train.foo' works without the
+    # caller having to glue clone+install onto every command. Empty = skip.
+    repo: str = ""                # https git URL (or git@host:owner/repo.git)
+    repo_workdir: str = ""        # subdir name; defaults to repo basename
+    repo_extras: str = "train"    # pip-install extras name; "" to skip install
 
     def __post_init__(self):
         if not self.created_at:

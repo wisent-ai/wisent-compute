@@ -28,6 +28,26 @@ def _render_template(template_name: str, variables: dict) -> str:
     return content
 
 
+def _render_repo_block(repo: str, workdir: str, extras: str) -> str:
+    """Bash that clones repo into $WORK/{workdir} and pip-installs its extras
+    so the user's command can `cd {workdir} && python -m foo` directly.
+    Returns empty string when no repo was requested."""
+    if not repo:
+        return ""
+    if not workdir:
+        # Default workdir = repo basename without .git
+        workdir = repo.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    install = ""
+    if extras:
+        install = f"pip install -e '.[{extras}]'"
+    return (
+        f"git clone --depth 1 {repo} {workdir}\n"
+        f"cd {workdir}\n"
+        f"{install}\n"
+        f"cd $WORK\n"
+    )
+
+
 def submit_batch(commands: list[str], **kwargs) -> int:
     """Submit many commands concurrently. Returns the count submitted.
 
@@ -64,6 +84,9 @@ def submit_job(
     max_cost_per_hour_usd: float = 0.0,
     pin_to_provider: bool = False,
     priority: int = 0,
+    repo: str = "",
+    repo_workdir: str = "",
+    repo_extras: str = "train",
 ) -> Job:
     """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
@@ -75,6 +98,7 @@ def submit_job(
         max_cost_per_hour_usd=max_cost_per_hour_usd,
         pin_to_provider=pin_to_provider,
         priority=priority,
+        repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
     )
 
 
@@ -128,6 +152,9 @@ def _submit_via_gcs(
     max_cost_per_hour_usd: float = 0.0,
     pin_to_provider: bool = False,
     priority: int = 0,
+    repo: str = "",
+    repo_workdir: str = "",
+    repo_extras: str = "train",
 ) -> Job:
     """Submit directly to GCS queue (no API server needed)."""
     from .storage import JobStorage
@@ -150,6 +177,7 @@ def _submit_via_gcs(
         "HF_TOKEN": hf_token,
         "GH_TOKEN": gh_token,
         "WISENT_VERSION": os.environ.get("WISENT_VERSION", "latest"),
+        "REPO_BLOCK": _render_repo_block(repo, repo_workdir, repo_extras),
     })
 
     submitter = os.environ.get("USER", "") or os.environ.get("LOGNAME", "")
@@ -175,6 +203,7 @@ def _submit_via_gcs(
         submitted_by=submitter,
         submitted_from=host,
         submitted_via="cli",
+        repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
     )
 
     store = JobStorage(bucket)

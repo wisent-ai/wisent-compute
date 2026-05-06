@@ -55,7 +55,11 @@ def main():
                    "If --pin-provider, only the named --provider is allowed.")
 @click.option("--priority", type=int, default=DEFAULT_PRIORITY,
               help="Higher = scheduled first within FIFO bucket.")
-def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider, priority):
+@click.option("--repo", default="", help="Optional git URL to clone before running command (no auth).")
+@click.option("--repo-workdir", default="", help="Override cloned-repo dir; default = repo basename.")
+@click.option("--repo-extras", default="train", help="pip extras to install on the clone; empty skips install.")
+def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider, priority,
+           repo, repo_workdir, repo_extras):
     """Submit a job (or batch) to the queue."""
     commands = []
     if batch_file:
@@ -69,6 +73,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         commands, provider=provider, batch_id=batch_id, bucket=BUCKET,
         preemptible=spot, max_cost_per_hour_usd=max_cost_per_hour,
         pin_to_provider=not any_provider, priority=priority,
+        repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
     )
     click.echo(f"  submitted {n}/{len(commands)} jobs")
     mode = "API" if _api_key() else "GCS"
