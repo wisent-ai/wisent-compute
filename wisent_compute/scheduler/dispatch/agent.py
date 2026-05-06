@@ -101,13 +101,15 @@ def dispatch_agent_vms(
         n_to_dispatch = min(len(jobs), quota_left, share_left,
                             per_tick_cap - scheduled)
         biggest = max(jobs, key=lambda j: int(getattr(j, "gpu_mem_gb", 0) or 0))
+        # Spot-only policy: if any job in the bucket was submitted with
+        # preemptible=True the dispatcher creates a Spot VM and stays
+        # on Spot. The previous escalation-to-on-demand path silently
+        # switched the bucket to STANDARD provisioning once any job had
+        # been preempted >=max_preempts_before_ondemand times, costing
+        # ~2x. If the user wants on-demand they should submit without
+        # the --spot flag, not have it inferred.
         any_preempt = any(getattr(j, "preemptible", False) for j in jobs)
-        switch_to_ondemand = any_preempt and any(
-            getattr(j, "preempt_count", 0)
-            >= getattr(j, "max_preempts_before_ondemand", 3)
-            for j in jobs
-        )
-        preemptible_for_call = any_preempt and not switch_to_ondemand
+        preemptible_for_call = any_preempt
         for i in range(n_to_dispatch):
             script = template.replace("${ACCEL_TYPE}", accel)
             for key, val in secrets.items():
