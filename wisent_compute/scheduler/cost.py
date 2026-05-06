@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Iterable
 
 from ..config import BUCKET
-from ..models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT, Job
+from ..models import (
+    GPU_HOURLY_RATE_USD, SPOT_DISCOUNT,
+    VM_BUNDLE_HOURLY_RATE_USD, GPU_TYPE_TO_MACHINE_TYPE,
+    Job,
+)
 from ..queue.storage import JobStorage
 
 
@@ -38,11 +42,21 @@ def _wall_seconds(job: Job) -> float | None:
     return max(0.0, (end - start).total_seconds())
 
 
-def _hourly_rate_usd(gpu_type: str, preemptible: bool) -> float:
-    base = GPU_HOURLY_RATE_USD.get(gpu_type, 0.0)
-    if not preemptible:
-        return base
-    return base * SPOT_DISCOUNT.get(gpu_type, 0.5)
+def _hourly_rate_usd(gpu_type: str, preemptible: bool, machine_type: str = "") -> float:
+    """Total $/hr the project actually pays for one VM (GPU + bundled vCPU + RAM).
+
+    GCP bills the GPU SKU and the A2/N1/G2 Core+Ram SKUs separately, so
+    summing both yields the line-item total a user sees in
+    Cloud Billing. Falls back to GPU_TYPE_TO_MACHINE_TYPE to look up the
+    bundle when machine_type wasn't recorded on the Job.
+    """
+    gpu = GPU_HOURLY_RATE_USD.get(gpu_type, 0.0)
+    if preemptible:
+        gpu *= SPOT_DISCOUNT.get(gpu_type, 0.5)
+    mt = machine_type or GPU_TYPE_TO_MACHINE_TYPE.get(gpu_type, "")
+    bundle_pair = VM_BUNDLE_HOURLY_RATE_USD.get(mt, (0.0, 0.0))
+    bundle = bundle_pair[1] if preemptible else bundle_pair[0]
+    return gpu + bundle
 
 
 def _target_kind(job: Job) -> str:
@@ -110,7 +124,11 @@ def collect_completed(store: JobStorage) -> list[dict]:
             wall = _wall_seconds(job)
             if wall is None:
                 continue
-            rate = _hourly_rate_usd(job.gpu_type, getattr(job, "preemptible", False))
+            rate = _hourly_rate_usd(
+                job.gpu_type,
+                getattr(job, "preemptible", False),
+                getattr(job, "machine_type", "") or "",
+            )
             cost = (wall / 3600.0) * rate
             rows.append({
                 "job_id": job.job_id,
