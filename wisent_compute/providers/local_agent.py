@@ -91,11 +91,18 @@ def _detect_gpu_type() -> str:
     return "cpu"
 
 
-def _job_eligible(job, gpu_type: str, vram_gb: int = 0) -> bool:
+def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local") -> bool:
     """Local-agent claim rules. Matches if pinned-local; or job.gpu_type is empty;
     or job.gpu_type equals our own; or job.gpu_type is in the VRAM-compatibility
-    list (we have at least its tier of VRAM). The compatibility branch lets the
-    box claim A100/L4 jobs it was yielded by the scheduler's compat broadcast."""
+    list (we have at least its tier of VRAM). Cloud agents (kind != 'local')
+    additionally refuse jobs whose model is in LOCAL_ONLY_MODELS so that
+    workstation-pinned models stay off paid cloud quota."""
+    from ..config import LOCAL_ONLY_MODELS
+    import re as _re
+    if kind != "local":
+        m = _re.search(r"--model\s+(\S+)", getattr(job, "command", "") or "")
+        if m and m.group(1).strip("'\"") in LOCAL_ONLY_MODELS:
+            return False
     pinned = getattr(job, "pin_to_provider", False)
     if pinned and job.provider != "local":
         return False
@@ -192,7 +199,7 @@ def _slot_vram(slot: dict) -> int:
     return max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))
 
 def _no_eligible_in_queue(store: JobStorage, gpu_type: str, total_vram_gb: int,
-                          free_vram_gb: int) -> bool:
+                          free_vram_gb: int, kind: str = "local") -> bool:
     """True when no queued job could even hypothetically fit + be eligible.
 
     Pure condition check — no timer, no constant duration. Signal is "queue
@@ -203,7 +210,7 @@ def _no_eligible_in_queue(store: JobStorage, gpu_type: str, total_vram_gb: int,
         need = max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))  # live estimator
         if need > free_vram_gb:
             continue
-        if not _job_eligible(job, gpu_type, total_vram_gb):
+        if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind):
             continue
         return False
     return True
@@ -311,7 +318,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             need = max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))  # live estimator
             if need > free_vram_gb:
                 continue
-            if not _job_eligible(job, gpu_type, total_vram_gb):
+            if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind):
                 continue
             slots.append(start_slot(store, job, hostname, _log))
             free_vram_gb -= need
@@ -328,7 +335,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
 
         if started == 0:
             if idle_shutdown and not slots and _no_eligible_in_queue(
-                store, gpu_type, total_vram_gb, free_vram_gb,
+                store, gpu_type, total_vram_gb, free_vram_gb, kind=kind,
             ):
                 _log("idle_shutdown: no slots + no eligible queued jobs; exiting")
                 from .local.gcp_self import self_terminate

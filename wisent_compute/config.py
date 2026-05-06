@@ -118,6 +118,16 @@ EXCLUSIVE_MODELS = frozenset({
     "openai/gpt-oss-20b",
 })
 
+# Models that may ONLY be claimed by local (on-prem) agents, never cloud.
+# Use case: gpt-oss-20b on a2-ultragpu-1g spot costs ~$2.40 per task
+# (extracted 2026-05-05 from billing_export); the workstation runs them at
+# $0 marginal. With ~6,166 gpt-oss-20b jobs in the current batch this is
+# ~$14.8k of avoidable spend in exchange for ~8x slower drain on this
+# subset only (other models keep flowing on cloud in parallel).
+LOCAL_ONLY_MODELS = frozenset({
+    "openai/gpt-oss-20b",
+})
+
 
 def estimate_gpu_memory(command: str) -> int:
     """Estimate GPU memory needed from a command string."""
