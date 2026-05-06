@@ -8,36 +8,38 @@ exec > /var/log/wisent-agent.log 2>&1
 
 echo "Wisent agent VM start: $(date -u)"
 
-while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-    echo "Waiting for apt lock..."
-done
-apt-get update
-apt-get install -y python3-venv python3-pip git ca-certificates curl gnupg
+# If /opt/wisent-agent/.venv is already populated by the baked image
+# (wisent-agent family, built via deploy/bake_agent_image.sh), skip the
+# install path entirely. Otherwise fall through to the legacy install path
+# so VMs running on the deeplearning-platform-release base still work.
+if [ ! -x /opt/wisent-agent/.venv/bin/wc ]; then
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        echo "Waiting for apt lock..."
+    done
+    apt-get update
+    apt-get install -y python3-venv python3-pip git ca-certificates curl gnupg
 
-WORK=/opt/wisent-agent
-rm -rf "$WORK"
-mkdir -p "$WORK"
-cd "$WORK"
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install --upgrade wisent-compute wisent wisent-extractors wisent-evaluators wisent-tools \
-    lm-eval optuna matplotlib word2number evaluate
-# Pin transformers to a 4.x version. transformers 5.6.2 raises
-# 'does not appear to have files named (model-00000-of-...)'  with a
-# zero-indexed range that mismatches HF's 1-indexed sharded
-# safetensors (proven on Qwen/Qwen3-8B and openai/gpt-oss-20b). 4.55.x
-# uses range(1, n+1) and loads them correctly.
-pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
-# Pin datasets to <4.0. The 4.x line dropped support for dataset loading
-# scripts (raises 'Dataset scripts are no longer supported, but found
-# flores.py' on basque_bench_flores_*, gsm8k via script-based forks,
-# etc.). Verified live on b141c65f at 23:18: agent has datasets==4.8.5
-# and the script-based load failed with that exact RuntimeError. 3.x
-# preserves the script-loader path for tasks that haven't migrated to
-# parquet yet.
-pip install --upgrade --force-reinstall 'datasets>=3.0,<4.0' 'huggingface-hub>=0.34.0,<1.0'
-pip uninstall -y hf-xet || true
+    WORK=/opt/wisent-agent
+    rm -rf "$WORK"
+    mkdir -p "$WORK"
+    cd "$WORK"
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install --upgrade pip
+    pip install --upgrade wisent-compute wisent wisent-extractors wisent-evaluators wisent-tools \
+        lm-eval optuna matplotlib word2number evaluate
+    pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
+    pip install --upgrade --force-reinstall 'datasets>=3.0,<4.0' 'huggingface-hub>=0.34.0,<1.0'
+    pip uninstall -y hf-xet || true
+else
+    echo "wisent-agent venv already present (baked image); skipping install"
+    cd /opt/wisent-agent
+    source .venv/bin/activate
+    # Self-update wisent-compute + wisent + wisent-tools to the latest PyPI
+    # without touching the heavy pinned deps. Cheap (small wheels) and lets
+    # us pick up scheduler/extractor changes between image bakes.
+    pip install --upgrade wisent-compute wisent wisent-tools wisent-extractors wisent-evaluators
+fi
 
 export HF_TOKEN="${HF_TOKEN}"
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
