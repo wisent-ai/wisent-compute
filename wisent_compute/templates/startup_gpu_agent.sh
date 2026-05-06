@@ -35,10 +35,16 @@ else
     echo "wisent-agent venv already present (baked image); skipping install"
     cd /opt/wisent-agent
     source .venv/bin/activate
-    # Self-update wisent-compute + wisent + wisent-tools to the latest PyPI
-    # without touching the heavy pinned deps. Cheap (small wheels) and lets
-    # us pick up scheduler/extractor changes between image bakes.
+    # Self-update wisent-compute + wisent + wisent-tools to the latest PyPI.
+    # Critical: re-pin transformers and datasets to the same versions the
+    # bake used. Without this, pip's resolver upgrades datasets to 4.x
+    # (which dropped dataset-loading scripts) when wisent's deps loosen,
+    # then every script-loaded task (flores.py, gsm8k forks, basque_bench)
+    # crashes with 'Dataset scripts are no longer supported'. Same for
+    # transformers 5.x's incompatible safetensors shard-name handling.
     pip install --upgrade wisent-compute wisent wisent-tools wisent-extractors wisent-evaluators
+    pip install --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
+    pip install --force-reinstall 'datasets>=3.0,<4.0' 'huggingface-hub>=0.34.0,<1.0'
 fi
 
 export HF_TOKEN="${HF_TOKEN}"
