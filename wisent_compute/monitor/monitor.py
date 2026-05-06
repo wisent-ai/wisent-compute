@@ -115,21 +115,34 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     live = read_consumer_capacity(store)  # consumer_id -> payload, fresh only
     refs = provider.list_running_instance_refs_with_age()
     deleted = 0
-    # Two reap conditions:
-    #   1. dead-agent: VM RUNNING but no fresh capacity broadcast (process crashed)
-    #   2. never-worked: VM RUNNING for >IDLE_GRACE_SECONDS, broadcasting fine,
-    #      but completed/ has zero entries with this instance_ref. The startup
-    #      script may have failed late (after the agent began broadcasting)
-    #      so the agent is alive but cannot actually claim — pure burn.
-    IDLE_GRACE_SECONDS = 1800  # half-window grace from VM creation before reap
+    # Two reap conditions, each with an age guard so a VM that's still in its
+    # startup-script install phase (pip install wisent-compute + transformers +
+    # aux model download takes ~5-10 minutes before the agent's first broadcast)
+    # doesn't get killed before it can do any work.
+    #
+    #   Branch A (dead-agent): VM age > BOOT_GRACE_SECONDS AND no fresh
+    #     capacity broadcast. Covers crashed agents AND startup-script
+    #     failures. The age guard prevents reaping fresh VMs that just
+    #     haven't finished installing yet.
+    #   Branch B (never-worked): VM age > IDLE_GRACE_SECONDS AND broadcasting
+    #     normally AND zero completions in completed/ for this instance_ref.
+    #     Covers agents that broadcast but cannot claim (some upstream
+    #     failure in the claim path).
+    BOOT_GRACE_SECONDS = 900       # 15-window grace for startup script + first broadcast
+    IDLE_GRACE_SECONDS = 1800      # half-window grace for first completion
     completed_refs = _instance_refs_with_completions(store, kind=kind)
     for ref, age_seconds in refs:
         name = ref.split("@", 1)[0]
         consumer_id = f"{kind}-{name}"
         instance_ref = f"local@{name}"
         if consumer_id not in live:
+            if age_seconds < BOOT_GRACE_SECONDS:
+                continue  # still installing, give it time
             provider.delete_instance(ref)
-            _log(f"reaped dead-agent VM {ref} (no fresh capacity broadcast)")
+            _log(
+                f"reaped dead-agent VM {ref} (no fresh capacity broadcast, "
+                f"age={age_seconds:.0f}s > boot grace {BOOT_GRACE_SECONDS}s)"
+            )
             deleted += 1
             continue
         if age_seconds > IDLE_GRACE_SECONDS and instance_ref not in completed_refs:
