@@ -77,7 +77,7 @@ def _dynamic_per_tick_cap(queue_depth: int) -> int:
     base = MAX_SCHEDULE_PER_TICK
     if queue_depth <= base * 2:
         return base
-    return min(150, base + (queue_depth - base * 2) // 4 + 4)
+    return min(25, base + (queue_depth - base * 2) // 4 + 4)  # cap=25 fits 60s tick budget
 
 
 def schedule_queued_jobs(
