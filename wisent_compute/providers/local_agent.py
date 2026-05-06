@@ -33,13 +33,13 @@ def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
         return base
     return base * SPOT_DISCOUNT.get(accel_type, 0.5)
 
-POLL_INTERVAL = 60
+POLL_INTERVAL = 10
 HEARTBEAT_INTERVAL = 300
 # Time to sleep after a successful claim so nvidia-smi can reflect the
 # freshly-spawned subprocess's CUDA allocation before the next iteration
 # decides whether to claim again. Empirically a torch model load starts
 # allocating GPU memory within ~5 seconds of subprocess start.
-SETTLE_AFTER_CLAIM_SECONDS = 20
+SETTLE_AFTER_CLAIM_SECONDS = 5
 VAST_API = "https://console.vast.ai/api/v0"
 
 
