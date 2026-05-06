@@ -234,16 +234,10 @@ def schedule_queued_jobs(
         for key, val in secrets.items():
             script = script.replace(f"${{{key}}}", val)
         instance_name = f"{INSTANCE_PREFIX}-{job.job_id}"
-        switch_to_ondemand = (
-            getattr(job, "preemptible", False)
-            and getattr(job, "preempt_count", 0)
-               >= getattr(job, "max_preempts_before_ondemand", 3)
-        )
-        preemptible_for_call = (
-            getattr(job, "preemptible", False) and not switch_to_ondemand
-        )
-        if switch_to_ondemand:
-            _log(f"{job.job_id}: preempt cap reached ({job.preempt_count}); dispatching on-demand this attempt")
+        # Spot-only policy (matches dispatch/agent.py 0.4.48). Honor
+        # job.preemptible verbatim; do NOT auto-promote to STANDARD
+        # provisioning after N preempts.
+        preemptible_for_call = bool(getattr(job, "preemptible", False))
         ref = provider.create_instance(
             name=instance_name,
             machine_type=job.machine_type,
