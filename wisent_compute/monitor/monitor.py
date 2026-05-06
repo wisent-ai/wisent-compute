@@ -137,7 +137,18 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     #     failure in the claim path).
     BOOT_GRACE_SECONDS = 900       # 15-window grace for startup script + first broadcast
     IDLE_GRACE_SECONDS = 1800      # half-window grace for first completion
-    completed_refs = _instance_refs_with_completions(store, kind=kind)
+    # Build the completed-refs set ONLY if any VM is old enough to need it.
+    # Iterating completed/ at fleet scale (~11k blobs) blows the 60s tick
+    # budget every time, returning 504 and pausing Cloud Scheduler. Cheap
+    # short-circuit: if no VM has crossed IDLE_GRACE_SECONDS, branch B
+    # cannot fire anyway.
+    needs_completions_scan = any(
+        age_seconds > IDLE_GRACE_SECONDS for _, age_seconds in refs
+    )
+    completed_refs = (
+        _instance_refs_with_completions(store, kind=kind)
+        if needs_completions_scan else set()
+    )
     for ref, age_seconds in refs:
         name = ref.split("@", 1)[0]
         consumer_id = f"{kind}-{name}"
