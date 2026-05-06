@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..config import BUCKET, estimate_gpu_memory
 from ..models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
