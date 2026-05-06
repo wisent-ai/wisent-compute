@@ -298,7 +298,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             time.sleep(10)
             continue
 
-        queued = store.list_jobs_priority_first("queue", cap=400)
+        queued = store.list_jobs_priority_first("queue", cap=4000)  # bumped 400->4000: T4 agents need to see further back to find Llama-3.2-1B
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
         # Claim AT MOST one new job per loop iteration. The previous version
         # greedily claimed every job whose declared gpu_mem_gb fit in the
