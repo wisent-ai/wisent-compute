@@ -21,6 +21,27 @@ class GCPProvider(Provider):
     def create_instance(self, name, machine_type, accel_type,
                         boot_disk_gb, image, image_project,
                         startup_script, preemptible: bool = False) -> str | None:
+        # Override per-job stored image if a baked agent image family exists.
+        # The bake_agent_image.sh script publishes images into family
+        # 'wisent-agent' in the local project. When present, every dispatched
+        # VM uses the baked image (which already has wisent-compute +
+        # transformers + datasets pre-installed) instead of the legacy
+        # deeplearning-platform-release base, dropping boot time from
+        # ~5-10 install-rotations to ~30 install-secs.
+        baked_family = "wisent-agent"
+        baked_present = False
+        try:
+            from google.cloud import compute_v1 as _cv1
+            images_client = _cv1.ImagesClient()
+            latest = images_client.get_from_family(
+                project=self.project, family=baked_family,
+            )
+            if latest and latest.name:
+                image = latest.name
+                image_project = self.project
+                baked_present = True
+        except Exception:
+            pass
         zones = MACHINE_TYPE_ZONES.get(machine_type, ZONE_ROTATION)
         for zone in zones:
             try:
