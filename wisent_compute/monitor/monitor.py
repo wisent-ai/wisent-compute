@@ -59,16 +59,23 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
             _log(f"{job_id}: FAILED")
 
         else:
+            # Workstation/local consumers don't live in GCP. instance_ref of
+            # the form "local@<hostname>" can't be probed by provider.instance_exists,
+            # so fall back to heartbeat-only freshness for them. Without this
+            # the monitor requeued every workstation job within a single tick
+            # (alive=False because the GCP lookup of "local" fails), pulling
+            # b19b18b4 out of running/ ~58s after the workstation claimed it.
+            if (ref or "").startswith("local@"):
+                stale = store.heartbeat_stale(job_id, HEARTBEAT_STALE_MINUTES)
+                if stale:
+                    _requeue(store, job, "stale heartbeat (local consumer)")
+                continue
+
             alive = provider.instance_exists(ref)
             lifecycle = provider.instance_lifecycle_state(ref)
             stale = store.heartbeat_stale(job_id, HEARTBEAT_STALE_MINUTES)
 
             if not alive and lifecycle == "TERMINATED" and getattr(job, "preemptible", False):
-                # GCE has TERMINATED a Spot/preemptible VM but the boot disk and
-                # name still exist (lifecycleState=TERMINATED, instance.exists=True
-                # in raw GET, but our instance_exists() returns False because
-                # status isn't RUNNING/STAGING). Treat as preemption: delete +
-                # requeue with preempt_count++ instead of restarts++.
                 _requeue_preempted(store, job, "Spot preempted")
                 provider.delete_instance(ref)
             elif not alive:
