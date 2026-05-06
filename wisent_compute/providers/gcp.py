@@ -146,7 +146,15 @@ class GCPProvider(Provider):
         `wisent-mig-inference-*`, `wisent-mig-images-*`) which never
         broadcast capacity, so the reaper would mass-delete them every tick.
         """
-        refs = []
+        return [r for r, _ in self.list_running_instance_refs_with_age()]
+
+    def list_running_instance_refs_with_age(self) -> list[tuple[str, float]]:
+        """[(name@zone, age_in_seconds), ...] for all RUNNING wisent-agent VMs.
+        age_in_seconds is now - creationTimestamp. Used by the never-worked
+        reaper branch to apply a grace period from VM boot before culling."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        out = []
         request = compute_v1.AggregatedListInstancesRequest(
             project=self.project,
             filter=f"name:{INSTANCE_PREFIX}-agent-*",
@@ -154,6 +162,15 @@ class GCPProvider(Provider):
         for zone_path, response in self.client.aggregated_list(request=request):
             zone = zone_path.split("/")[-1]
             for inst in response.instances or []:
-                if inst.status == "RUNNING":
-                    refs.append(f"{inst.name}@{zone}")
-        return refs
+                if inst.status != "RUNNING":
+                    continue
+                created = getattr(inst, "creation_timestamp", None) or ""
+                age = 0.0
+                if created:
+                    try:
+                        ct = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                        age = (now - ct).total_seconds()
+                    except Exception:
+                        age = 0.0
+                out.append((f"{inst.name}@{zone}", age))
+        return out

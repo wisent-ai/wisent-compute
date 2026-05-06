@@ -113,19 +113,49 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     """
     from ..queue.capacity import read_consumer_capacity
     live = read_consumer_capacity(store)  # consumer_id -> payload, fresh only
-    refs = provider.list_running_instance_refs()
+    refs = provider.list_running_instance_refs_with_age()
     deleted = 0
-    for ref in refs:
+    # Two reap conditions:
+    #   1. dead-agent: VM RUNNING but no fresh capacity broadcast (process crashed)
+    #   2. never-worked: VM RUNNING for >IDLE_GRACE_SECONDS, broadcasting fine,
+    #      but completed/ has zero entries with this instance_ref. The startup
+    #      script may have failed late (after the agent began broadcasting)
+    #      so the agent is alive but cannot actually claim — pure burn.
+    IDLE_GRACE_SECONDS = 1800  # half-window grace from VM creation before reap
+    completed_refs = _instance_refs_with_completions(store, kind=kind)
+    for ref, age_seconds in refs:
         name = ref.split("@", 1)[0]
         consumer_id = f"{kind}-{name}"
-        if consumer_id in live:
+        instance_ref = f"local@{name}"
+        if consumer_id not in live:
+            provider.delete_instance(ref)
+            _log(f"reaped dead-agent VM {ref} (no fresh capacity broadcast)")
+            deleted += 1
             continue
-        provider.delete_instance(ref)
-        _log(f"reaped dead-agent VM {ref} (no fresh capacity broadcast for {consumer_id})")
-        deleted += 1
+        if age_seconds > IDLE_GRACE_SECONDS and instance_ref not in completed_refs:
+            provider.delete_instance(ref)
+            _log(
+                f"reaped never-worked VM {ref} (broadcasting but 0 completions "
+                f"in age={age_seconds:.0f}s, > grace {IDLE_GRACE_SECONDS}s)"
+            )
+            deleted += 1
     if deleted:
         _log(f"reap_dead_agents: deleted {deleted} VM(s)")
     return deleted
+
+
+def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set:
+    """Return set of instance_ref strings that appear in the completed/ bucket.
+    Used to detect VMs that broadcast capacity but never finish a job."""
+    refs = set()
+    try:
+        for j in store.list_jobs("completed"):
+            r = getattr(j, "instance_ref", None)
+            if r:
+                refs.add(r)
+    except Exception:
+        pass
+    return refs
 
 
 def _requeue_preempted(store: JobStorage, job: Job, reason: str):
