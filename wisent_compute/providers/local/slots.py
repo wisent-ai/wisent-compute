@@ -70,6 +70,24 @@ def _upload_output(store: JobStorage, job_id: str, output_dir: str) -> None:
     )
 
 
+def _repo_prelude(job) -> str:
+    """Bash that clones job.repo into a fresh subdir and pip-installs its
+    extras. Returns '' when no repo was requested. Local agents reuse the
+    same /tmp/wc-{job_id} workdir per restart, so we rm -rf the target dir
+    first to keep retries idempotent (otherwise git clone errors with
+    'destination path X already exists')."""
+    repo = getattr(job, "repo", "") or ""
+    if not repo:
+        return ""
+    workdir = (getattr(job, "repo_workdir", "") or "").strip()
+    if not workdir:
+        workdir = repo.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    extras = getattr(job, "repo_extras", "") or ""
+    install = f" && pip install --break-system-packages -e '.[{extras}]'" if extras else ""
+    return (f"rm -rf {workdir} && git clone --depth 1 {repo} {workdir}"
+            f" && cd {workdir}{install} && cd .. && ")
+
+
 def start_slot(store: JobStorage, job, hostname: str, log_fn) -> dict:
     """Spawn a subprocess for `job`, register it in 'running' state, return slot."""
     work_dir = f"/tmp/wc-{job.job_id}"
@@ -80,8 +98,9 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn) -> dict:
     job.instance_ref = f"local@{hostname}"
     store.move_job(job, "queue", "running")
     log_file = open(f"{work_dir}/output/command_output.log", "w")
+    full_command = _repo_prelude(job) + job.command
     proc = subprocess.Popen(
-        job.command, shell=True, stdout=log_file, stderr=subprocess.STDOUT,
+        full_command, shell=True, stdout=log_file, stderr=subprocess.STDOUT,
         cwd=work_dir,
         env={**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1"},
     )
