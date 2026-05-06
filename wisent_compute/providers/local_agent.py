@@ -104,7 +104,7 @@ def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local") -> 
         if m and m.group(1).strip("'\"") in LOCAL_ONLY_MODELS:
             return False
     pinned = getattr(job, "pin_to_provider", False)
-    if pinned and job.provider != "local":
+    if pinned and job.provider != kind:
         return False
     job_accel = job.gpu_type or ""
     matches = (
