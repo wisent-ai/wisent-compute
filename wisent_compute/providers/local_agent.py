@@ -245,6 +245,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     hostname = os.uname().nodename
     consumer_id = f"{kind}-{hostname}"
     slots: list[dict] = []
+    agent_diag: dict = {}
 
     while True:
         t = lookup_self(hostname, source="auto")
@@ -271,7 +272,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
         if vast_active:
             publish_capacity(store, consumer_id, kind, {}, free_vram_gb=0,
-                             total_vram_gb=total_vram_gb)
+                             total_vram_gb=total_vram_gb, diag=dict(agent_diag))
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -291,7 +292,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             free_vram_gb = smi_free
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
         publish_capacity(store, consumer_id, kind, free_slots,
-                         free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb)
+                         free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
             time.sleep(10)
@@ -312,18 +313,32 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         # Now: claim 1, sleep SETTLE_AFTER_CLAIM_SECONDS, re-read smi at top
         # of loop, decide whether the next claim still fits.
         started = 0
+        diag_vram_rejected = 0
+        diag_eligibility_rejected = 0
+        diag_eligible = 0
         for job in queued:
             if hard_slot_cap > 0 and len(slots) >= hard_slot_cap:
                 break
             need = max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))  # live estimator
             if need > free_vram_gb:
+                diag_vram_rejected += 1
                 continue
             if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind):
+                diag_eligibility_rejected += 1
                 continue
+            diag_eligible += 1
             slots.append(start_slot(store, job, hostname, _log))
             free_vram_gb -= need
             started += 1
+            agent_diag["last_started_job_id"] = job.job_id
+            agent_diag["last_started_at"] = datetime.now(timezone.utc).isoformat()
             break
+        agent_diag["queue_scanned"] = len(queued)
+        agent_diag["vram_rejected"] = diag_vram_rejected
+        agent_diag["eligibility_rejected"] = diag_eligibility_rejected
+        agent_diag["eligible_count"] = diag_eligible
+        agent_diag["claimed_this_loop"] = started
+        agent_diag["last_claim_attempt_at"] = datetime.now(timezone.utc).isoformat()
 
         if started > 0:
             # Let nvidia-smi reflect the new subprocess's CUDA allocation

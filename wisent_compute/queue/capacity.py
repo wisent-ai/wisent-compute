@@ -34,6 +34,7 @@ def publish_capacity(
     free_slots: dict[str, int],
     free_vram_gb: int | None = None,
     total_vram_gb: int | None = None,
+    diag: dict | None = None,
 ) -> None:
     """Write this consumer's current capacity snapshot to GCS.
 
@@ -42,6 +43,17 @@ def publish_capacity(
     instead of decrementing a flat per-accel slot counter that ignores the
     job's actual memory footprint. free_slots is kept for backward compat
     with consumers that haven't been upgraded yet.
+
+    diag carries per-tick claim-loop telemetry so a reaper or dashboard can
+    see why a broadcasting agent isn't claiming. Keys:
+      queue_scanned         # of queued jobs the agent inspected this loop
+      vram_rejected         # rejected because need > free_vram_gb
+      eligibility_rejected  # rejected by _job_eligible (incl. LOCAL_ONLY)
+      eligible_count        # passed both gates
+      claimed_this_loop     # actually start_slot()'d this iteration
+      last_started_job_id   # most recent job_id this agent moved to running/
+      last_started_at       # ISO ts of last successful start_slot
+      last_claim_attempt_at # ISO ts of this loop iteration
     """
     payload = {
         "consumer_id": consumer_id,
@@ -53,6 +65,8 @@ def publish_capacity(
         payload["free_vram_gb"] = int(free_vram_gb)
     if total_vram_gb is not None:
         payload["total_vram_gb"] = int(total_vram_gb)
+    if diag is not None:
+        payload["diag"] = diag
     store._upload_text(f"{CAPACITY_PREFIX}{consumer_id}.json", json.dumps(payload))
 
 
