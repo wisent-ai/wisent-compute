@@ -1,0 +1,65 @@
+name: pypi-publish
+
+# Auto-publish wisent-compute to PyPI on every push to main that bumps the
+# version in pyproject.toml. Without this, agent VMs that pip-install
+# wisent-compute on boot keep running stale code (PyPI lagged behind main
+# by several versions on 2026-05-08, causing job 667dea7d to hit a bug
+# that had been fixed in source but not yet published).
+#
+# Idempotent: the "skip if version already on PyPI" guard means this
+# workflow can run on every push without erroring on no-op publishes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "wisent_compute/**"
+  workflow_dispatch:
+
+concurrency:
+  group: wisent-compute-pypi-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: pip install --upgrade build twine
+
+      - name: Read version from pyproject.toml
+        id: ver
+        run: |
+          VERSION=$(grep -oE '^version *= *"[^"]+"' pyproject.toml | head -1 | sed -E 's/version *= *"([^"]+)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Read version: $VERSION"
+
+      - name: Skip if version already published
+        id: check
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          if curl -sf "https://pypi.org/pypi/wisent-compute/${VERSION}/json" >/dev/null; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "wisent-compute ${VERSION} already on PyPI, skipping publish"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+            echo "wisent-compute ${VERSION} NOT on PyPI yet, will publish"
+          fi
+
+      - name: Build wheel
+        if: steps.check.outputs.already == 'false'
+        run: python -m build --wheel
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.already == 'false'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload --non-interactive dist/*.whl
