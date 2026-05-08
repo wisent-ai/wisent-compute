@@ -143,12 +143,20 @@ PLISTEOF
 
 GUI_DOMAIN="gui/$(id -u)"
 
-# launchctl bootout exits non-zero if the service is not loaded; absorb that.
+# Reload the LaunchAgent. `launchctl bootstrap` after `bootout` sometimes
+# returns 5: Input/output error on macOS 26 because the prior process is
+# still tearing down. Fall back to the legacy unload/load pair which
+# handles that race more gracefully.
+reload_launchagent() {
+    local plist_path="$1"; local lbl="$2"
+    if launchctl bootstrap "${GUI_DOMAIN}" "$plist_path" 2>/dev/null; then return 0; fi
+    launchctl unload "$plist_path" 2>/dev/null || true
+    launchctl load "$plist_path"
+}
 launchctl bootout "${GUI_DOMAIN}/${LABEL}" 2>/dev/null || true
-
-launchctl bootstrap "${GUI_DOMAIN}" "$PLIST"
-launchctl enable "${GUI_DOMAIN}/${LABEL}"
-launchctl kickstart -k "${GUI_DOMAIN}/${LABEL}"
+reload_launchagent "$PLIST" "$LABEL"
+launchctl enable "${GUI_DOMAIN}/${LABEL}" 2>/dev/null || true
+launchctl kickstart -k "${GUI_DOMAIN}/${LABEL}" 2>/dev/null || true
 
 # Verify launchd has the service registered. `print` returns the live state.
 if ! launchctl print "${GUI_DOMAIN}/${LABEL}" >/dev/null 2>&1; then
@@ -164,3 +172,80 @@ echo "  wc binary:  ${WC_BIN}"
 echo "  plist:      ${PLIST}"
 echo "  stdout log: ${LOG_OUT}"
 echo "  stderr log: ${LOG_ERR}"
+
+# === Auto-deployer LaunchAgent ===
+# Polls origin/main every 60 s and re-runs this installer when there are
+# new commits. Skipped silently if the github PAT is missing — operator
+# can drop one in later and the next ssh-driven install will set it up.
+PAT_FILE="$HOME/.config/wisent/github_pat"
+DEPLOY_REPO_DIR="$HOME/wisent-compute-deploy"
+AD_LABEL="com.wisent.compute.auto-deployer"
+AD_PLIST="$HOME/Library/LaunchAgents/${AD_LABEL}.plist"
+AD_LOG_OUT="$LOG_DIR/wisent-compute-auto-deployer.out"
+AD_LOG_ERR="$LOG_DIR/wisent-compute-auto-deployer.err"
+
+if [ ! -f "$PAT_FILE" ]; then
+    echo "Auto-deployer SKIPPED: $PAT_FILE missing. Bootstrap is incomplete." >&2
+else
+    if [ ! -d "$DEPLOY_REPO_DIR/.git" ]; then
+        rm -rf "$DEPLOY_REPO_DIR"
+        PAT_VAL=$(cat "$PAT_FILE")
+        git clone --quiet \
+            "https://x-access-token:${PAT_VAL}@github.com/wisent-ai/wisent-compute.git" \
+            "$DEPLOY_REPO_DIR"
+        unset PAT_VAL
+    fi
+
+    AD_TICK="$DEPLOY_REPO_DIR/deploy/auto_deploy_tick.sh"
+    if [ ! -x "$AD_TICK" ]; then
+        echo "FATAL: $AD_TICK missing in clone; auto-deployer cannot start" >&2
+        exit 9
+    fi
+    chmod +x "$AD_TICK"
+
+    cat > "$AD_PLIST" <<ADPLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${AD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${AD_TICK}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${AD_LOG_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${AD_LOG_ERR}</string>
+    <key>WorkingDirectory</key>
+    <string>${DEPLOY_REPO_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>${HOME}</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>REPO_DIR</key>
+        <string>${DEPLOY_REPO_DIR}</string>
+    </dict>
+</dict>
+</plist>
+ADPLISTEOF
+
+    launchctl bootout "${GUI_DOMAIN}/${AD_LABEL}" 2>/dev/null || true
+    reload_launchagent "$AD_PLIST" "$AD_LABEL"
+    launchctl enable "${GUI_DOMAIN}/${AD_LABEL}" 2>/dev/null || true
+    echo "wisent-compute-auto-deployer installed:"
+    echo "  label:      ${AD_LABEL}"
+    echo "  tick:       ${AD_TICK}"
+    echo "  repo:       ${DEPLOY_REPO_DIR}"
+    echo "  interval:   60s"
+    echo "  stdout log: ${AD_LOG_OUT}"
+    echo "  stderr log: ${AD_LOG_ERR}"
+fi
