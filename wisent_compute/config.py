@@ -77,6 +77,15 @@ DEFAULT_PRIORITY = 0
 DEFAULT_PREEMPTIBLE = False
 DEFAULT_ANY_PROVIDER = True
 
+# Dashboard HTTP server bind address + port. Bind to all interfaces so a
+# tailscale serve front-end can reach it; the host is firewalled to the
+# tailnet anyway.
+DASHBOARD_BIND = os.environ.get("WC_DASHBOARD_BIND", "127.0.0.1")
+DASHBOARD_PORT = int(os.environ.get("WC_DASHBOARD_PORT", "8765"))
+DASHBOARD_REFRESH_SECONDS = int(os.environ.get("WC_DASHBOARD_REFRESH_SECONDS", "10"))
+# Capacity blob is "live" if its published_at is within this many seconds.
+DASHBOARD_AGENT_FRESH_SECONDS = int(os.environ.get("WC_DASHBOARD_AGENT_FRESH_SECONDS", "180"))
+
 DEFAULT_IMAGE = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
 DEFAULT_IMAGE_PROJECT = "deeplearning-platform-release"
 DEFAULT_CPU_IMAGE_FAMILY = "ubuntu-2204-lts"

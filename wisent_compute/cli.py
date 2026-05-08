@@ -229,6 +229,22 @@ def coordinator(target, once):
     raise SystemExit(run_coordinator(target=target, once=once))
 
 
+@main.command()
+@click.option("--bind", default=None,
+              help="Bind address. Default WC_DASHBOARD_BIND or 127.0.0.1.")
+@click.option("--port", type=int, default=None,
+              help="Port. Default WC_DASHBOARD_PORT or 8765.")
+def dashboard(bind, port):
+    """Run the read-only HTTP dashboard for the wisent-compute queue.
+
+    Renders queue counts, per-model breakdown, live agent capacity, recent
+    failures, and a throughput-based completion projection at GET / with
+    auto-refresh, and the same data as JSON at GET /api/state.json.
+    """
+    from .dashboard import serve as serve_dashboard
+    serve_dashboard(host=bind, port=port)
+
+
 @main.group()
 def cost():
     """Per-job and per-batch cost reporting from observed wall-times."""

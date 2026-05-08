@@ -249,3 +249,85 @@ ADPLISTEOF
     echo "  stdout log: ${AD_LOG_OUT}"
     echo "  stderr log: ${AD_LOG_ERR}"
 fi
+
+# === Dashboard LaunchAgent ===
+DASH_LABEL="com.wisent.compute.dashboard"
+DASH_PLIST="$HOME/Library/LaunchAgents/${DASH_LABEL}.plist"
+DASH_LOG_OUT="$LOG_DIR/wisent-compute-dashboard.out"
+DASH_LOG_ERR="$LOG_DIR/wisent-compute-dashboard.err"
+DASH_BIND="${WC_DASHBOARD_BIND:-0.0.0.0}"
+DASH_PORT="${WC_DASHBOARD_PORT:-8765}"
+
+cat > "$DASH_PLIST" <<DASHPLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DASH_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${WC_BIN}</string>
+        <string>dashboard</string>
+        <string>--bind</string>
+        <string>${DASH_BIND}</string>
+        <string>--port</string>
+        <string>${DASH_PORT}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GOOGLE_APPLICATION_CREDENTIALS</key>
+        <string>${ADC_PATH}</string>
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>wisent-480400</string>
+        <key>WC_BUCKET</key>
+        <string>wisent-compute</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+        <key>PATH</key>
+        <string>${GCLOUD_BIN_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${VENV}/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${DASH_LOG_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${DASH_LOG_ERR}</string>
+    <key>WorkingDirectory</key>
+    <string>${REPO_ROOT}</string>
+</dict>
+</plist>
+DASHPLISTEOF
+
+launchctl bootout "${GUI_DOMAIN}/${DASH_LABEL}" 2>/dev/null || true
+reload_launchagent "$DASH_PLIST" "$DASH_LABEL"
+launchctl enable "${GUI_DOMAIN}/${DASH_LABEL}" 2>/dev/null || true
+launchctl kickstart -k "${GUI_DOMAIN}/${DASH_LABEL}" 2>/dev/null || true
+
+echo "wisent-compute-dashboard installed:"
+echo "  label:      ${DASH_LABEL}"
+echo "  url:        http://${DASH_BIND}:${DASH_PORT}/"
+echo "  stdout log: ${DASH_LOG_OUT}"
+echo "  stderr log: ${DASH_LOG_ERR}"
+
+# === Tailscale serve front-end (best-effort) ===
+# If the Tailscale CLI is on PATH and the host is logged in, expose the
+# dashboard at https://<hostname>.<tailnet>/ so any tailnet member can
+# reach it. tailscale serve is idempotent; safe to re-run.
+TS_BIN=""
+for cand in /usr/local/bin/tailscale /opt/homebrew/bin/tailscale \
+            /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+    if [ -x "$cand" ]; then TS_BIN="$cand"; break; fi
+done
+if [ -n "$TS_BIN" ] && "$TS_BIN" status >/dev/null 2>&1; then
+    "$TS_BIN" serve --bg --https=443 "http://localhost:${DASH_PORT}" \
+        2>/dev/null || true
+    echo "  tailnet:    https://$(hostname -s).$($TS_BIN status --json 2>/dev/null | grep -oE '\"MagicDNSSuffix\":\"[^\"]+\"' | head -1 | cut -d\\\" -f4)/ (best-effort)"
+fi
