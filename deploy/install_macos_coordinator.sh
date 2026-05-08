@@ -197,7 +197,7 @@ else
     fi
 
     AD_TICK="$DEPLOY_REPO_DIR/deploy/auto_deploy_tick.sh"
-    if [ ! -x "$AD_TICK" ]; then
+    if [ ! -f "$AD_TICK" ]; then
         echo "FATAL: $AD_TICK missing in clone; auto-deployer cannot start" >&2
         exit 9
     fi
