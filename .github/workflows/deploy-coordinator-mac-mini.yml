@@ -1,0 +1,101 @@
+name: deploy-coordinator-mac-mini
+
+# Auto-redeploys the wisent-compute coordinator daemon to the user's mac mini
+# on every push to main that touches the orchestrator code paths. Runs on a
+# GitHub-hosted runner; no agent SSH and no self-hosted runner required.
+#
+# The runner joins the user's tailnet via the tailscale OAuth client so it
+# can resolve charless-mac-mini.tail6443b3.ts.net, then SSHes via Tailscale
+# SSH (no key management). The mini runs deploy/install_macos_coordinator.sh
+# which loads the LaunchAgent.
+#
+# One-time bootstrap (Tailscale admin, not per-deploy):
+#   1. In the Tailscale admin console, create an OAuth client with the
+#      "Devices Write" scope and tag tag:ci-coordinator-deploy. Save the
+#      client_id and secret as repo secrets TS_OAUTH_CLIENT_ID and
+#      TS_OAUTH_SECRET.
+#   2. In the tailnet ACL, allow the tag tag:ci-coordinator-deploy to
+#      ssh-as-user charless on the host with hostname charless-mac-mini.
+#   3. On the mac mini once: gcloud auth application-default login (writes
+#      ~/.config/gcloud/application_default_credentials.json that the
+#      LaunchAgent's GOOGLE_APPLICATION_CREDENTIALS points at).
+# After that, every commit to main that matches the paths filter below
+# triggers an automatic redeploy with no manual steps.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "wisent_compute/coordinator.py"
+      - "wisent_compute/scheduler/**"
+      - "wisent_compute/monitor/**"
+      - "wisent_compute/queue/**"
+      - "wisent_compute/models.py"
+      - "wisent_compute/config.py"
+      - "wisent_compute/cli.py"
+      - "wisent_compute/targets/**"
+      - "deploy/install_macos_coordinator.sh"
+      - "pyproject.toml"
+      - ".github/workflows/deploy-coordinator-mac-mini.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: wisent-compute-coordinator-mac-mini
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      MAC_MINI_HOST: charless-mac-mini.tail6443b3.ts.net
+      MAC_MINI_USER: charless
+      REMOTE_REPO_DIR: /Users/charless/wisent-compute-staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bring up Tailscale on the runner
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-coordinator-deploy
+          version: latest
+
+      - name: Wait for tailnet hostname resolution
+        run: |
+          for i in 1 2 3 4 5; do
+            if tailscale status --peers --json | grep -q "${MAC_MINI_HOST%%.*}"; then
+              echo "Mac mini visible on tailnet"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FATAL: ${MAC_MINI_HOST} not visible on tailnet after 5 retries" >&2
+          tailscale status >&2
+          exit 1
+
+      - name: Rsync repo to mac mini over Tailscale SSH
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new \
+              "${MAC_MINI_USER}@${MAC_MINI_HOST}" \
+              "mkdir -p ${REMOTE_REPO_DIR}"
+          rsync -az --delete --exclude '.git' --exclude '__pycache__' \
+                --exclude '*.egg-info' --exclude '.venv' --exclude 'build' \
+                --exclude 'dist' \
+              -e "ssh -o StrictHostKeyChecking=accept-new" \
+              ./ "${MAC_MINI_USER}@${MAC_MINI_HOST}:${REMOTE_REPO_DIR}/"
+
+      - name: Run installer on mac mini
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new \
+              "${MAC_MINI_USER}@${MAC_MINI_HOST}" \
+              "bash ${REMOTE_REPO_DIR}/deploy/install_macos_coordinator.sh"
+
+      - name: Verify coordinator is alive
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new \
+              "${MAC_MINI_USER}@${MAC_MINI_HOST}" \
+              "launchctl print gui/\$(id -u)/com.wisent.compute.coordinator | sed -n '1,40p'"
