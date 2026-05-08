@@ -119,8 +119,8 @@ def _repo_prelude(job) -> str:
         workdir = repo.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
     extras = getattr(job, "repo_extras", "") or ""
     install = (
-        f" && pip install --break-system-packages --upgrade setuptools wheel"
-        f" && pip install --break-system-packages '.[{extras}]'"
+        f" && pip install --break-system-packages --upgrade pip setuptools wheel"
+        f" && pip install --break-system-packages --no-build-isolation '.[{extras}]'"
     ) if extras else ""
     return (f"rm -rf {workdir} && git clone --depth 1 {repo} {workdir}"
             f" && cd {workdir}{install} && cd .. && ")
