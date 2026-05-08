@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 import time
+import traceback
 from typing import Optional
 
 from .config import BUCKET
@@ -88,6 +89,7 @@ def run(target: Optional[str] = None, once: bool = False) -> int:
             _log(f"tick scheduled={n}")
         except Exception as exc:
             _log(f"tick failed: {exc!r}")
+            _log(traceback.format_exc())
         if once:
             return 0
         time.sleep(interval)

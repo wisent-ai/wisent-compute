@@ -15,7 +15,9 @@ name: deploy-coordinator-mac-mini
 #      client_id and secret as repo secrets TS_OAUTH_CLIENT_ID and
 #      TS_OAUTH_SECRET.
 #   2. In the tailnet ACL, allow the tag tag:ci-coordinator-deploy to
-#      ssh-as-user charless on the host with hostname charless-mac-mini.
+#      ssh-as-user charles on the host with hostname charless-mac-mini
+#      (username on the mini is `charles` — single S — even though the host
+#      name is `charless-mac-mini`).
 #   3. On the mac mini once: gcloud auth application-default login (writes
 #      ~/.config/gcloud/application_default_credentials.json that the
 #      LaunchAgent's GOOGLE_APPLICATION_CREDENTIALS points at).
@@ -50,8 +52,8 @@ jobs:
       contents: read
     env:
       MAC_MINI_HOST: charless-mac-mini.tail6443b3.ts.net
-      MAC_MINI_USER: charless
-      REMOTE_REPO_DIR: /Users/charless/wisent-compute-staging
+      MAC_MINI_USER: charles
+      REMOTE_REPO_DIR: /Users/charles/wisent-compute-staging
     steps:
       - name: Checkout
         uses: actions/checkout@v4

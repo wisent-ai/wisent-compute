@@ -15,24 +15,74 @@ LOG_OUT="$LOG_DIR/wisent-compute-coordinator.out"
 LOG_ERR="$LOG_DIR/wisent-compute-coordinator.err"
 ADC_PATH="$HOME/.config/gcloud/application_default_credentials.json"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "FATAL: python3 not on PATH on $(hostname)" >&2
+# Pick the newest Python ≥3.10 we can find. wisent-compute pyproject.toml
+# requires-python = ">=3.10" so Apple's bundled /usr/bin/python3 (3.9 on
+# macOS 26) is too old. Mac mini install path: /opt/homebrew/bin/python3.12.
+PY=""
+for cand in /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 \
+            /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3.10 \
+            /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
+            /usr/local/bin/python3.11 /usr/local/bin/python3.10; do
+    if [ -x "$cand" ]; then PY="$cand"; break; fi
+done
+if [ -z "$PY" ]; then
+    PY=$(command -v python3 || true)
+fi
+if [ -z "$PY" ]; then
+    echo "FATAL: no python3 found on $(hostname)" >&2
     exit 2
 fi
-PY=$(command -v python3)
+PY_VER=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+case "$PY_VER" in
+    3.10|3.11|3.12|3.13) ;;
+    *) echo "FATAL: $PY is Python $PY_VER but wisent-compute needs >=3.10" >&2; exit 2 ;;
+esac
+echo "Using Python: $PY ($PY_VER)"
 
 if [ ! -f "$ADC_PATH" ]; then
     echo "FATAL: missing GCS application-default credentials at $ADC_PATH." >&2
-    echo "Run 'gcloud auth application-default login' on this host once before deploy." >&2
+    echo "The deploy step must scp the service-account JSON there before invoking this script." >&2
     exit 3
 fi
 
-cd "$REPO_ROOT"
-"$PY" -m pip install --user --upgrade pip
-"$PY" -m pip install --user -e .
+# wisent-compute's queue/storage.py shells out to `gsutil` for ls/cat/cp/rm
+# against gs://wisent-compute. Install Google Cloud SDK if it is not on PATH.
+if ! command -v gsutil >/dev/null 2>&1; then
+    BREW_BIN=""
+    for cand in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        if [ -x "$cand" ]; then BREW_BIN="$cand"; break; fi
+    done
+    if [ -z "$BREW_BIN" ]; then
+        echo "FATAL: gsutil missing and no Homebrew install on this host." >&2
+        exit 6
+    fi
+    echo "Installing google-cloud-sdk via Homebrew (this brings in gsutil + gcloud)"
+    "$BREW_BIN" install --cask google-cloud-sdk
+fi
+GCLOUD_BIN_DIR=""
+for cand in /opt/homebrew/share/google-cloud-sdk/bin /usr/local/share/google-cloud-sdk/bin \
+            /opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin; do
+    if [ -d "$cand" ]; then GCLOUD_BIN_DIR="$cand"; break; fi
+done
+if [ -z "$GCLOUD_BIN_DIR" ]; then
+    echo "FATAL: cannot locate google-cloud-sdk bin/ after install." >&2
+    exit 7
+fi
+echo "Using google-cloud-sdk bin: $GCLOUD_BIN_DIR"
 
-USER_BASE=$("$PY" -m site --user-base)
-WC_BIN="${USER_BASE}/bin/wc"
+cd "$REPO_ROOT"
+
+# Use a dedicated venv to side-step PEP 668's externally-managed-environment
+# guard on Homebrew Python installs. The venv lives at ~/.venvs/wisent-compute
+# and is recreated only if missing, so re-deploys are fast.
+VENV="$HOME/.venvs/wisent-compute"
+if [ ! -d "$VENV" ]; then
+    "$PY" -m venv "$VENV"
+fi
+"$VENV/bin/python" -m pip install --upgrade pip
+"$VENV/bin/python" -m pip install -e .
+
+WC_BIN="$VENV/bin/wc"
 if [ ! -x "$WC_BIN" ]; then
     echo "FATAL: wc binary not found at $WC_BIN after pip install -e ." >&2
     exit 4
@@ -61,12 +111,14 @@ cat > "$PLIST" <<PLISTEOF
     <dict>
         <key>GOOGLE_APPLICATION_CREDENTIALS</key>
         <string>${ADC_PATH}</string>
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>wisent-480400</string>
         <key>WC_BUCKET</key>
         <string>wisent-compute</string>
         <key>HOME</key>
         <string>${HOME}</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${USER_BASE}/bin</string>
+        <string>${GCLOUD_BIN_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${VENV}/bin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

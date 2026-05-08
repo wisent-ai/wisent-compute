@@ -25,7 +25,10 @@ def _has_adc() -> bool:
         from google.cloud import storage as _s
         _s.Client()
         _USE_SDK = True
-    except Exception:
+    except Exception as _adc_exc:
+        import sys as _sys
+        _sys.stderr.write(f"[has_adc] SDK Client() failed: {_adc_exc!r}\n")
+        _sys.stderr.flush()
         _USE_SDK = False
     return _USE_SDK
 
@@ -239,39 +242,34 @@ class JobStorage:
         return out
 
     def list_jobs_fitting(self, prefix: str, *, max_gpu_mem_gb: int, cap: int = 4000) -> list[Job]:
-        """Return queued jobs whose stamped gpu_mem_gb metadata is <= max_gpu_mem_gb.
-        Filters on GCS object metadata (set by write_job) so blobs that can't
-        run on this consumer are skipped without downloading the JSON. Falls
-        back to listing all blobs and filtering in-memory if the SDK isn't
-        available (gsutil-only mode)."""
+        """Priority-aware fitting jobs: queue_priority/ markers first, then FIFO
+        from queue/. Metadata stamping filters non-fitting blobs before download."""
         if not self._sdk_bucket:
             jobs = self.list_jobs(prefix, oldest_first=cap)
             return [j for j in jobs if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb]
+        out: list[Job] = []
+        seen: set[str] = set()
+        if prefix == "queue":
+            for j in self.list_priority_jobs(prefix, top_n=cap):
+                if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb and j.job_id not in seen:
+                    out.append(j); seen.add(j.job_id)
         eligible_paths: list[str] = []
         for blob in self._sdk_bucket.list_blobs(prefix=f"{prefix}/"):
-            if not blob.name.endswith(".json"):
+            jid = blob.name.split("/")[-1].removesuffix(".json")
+            if not blob.name.endswith(".json") or jid in seen:
                 continue
             md = blob.metadata or {}
             mem_str = md.get("gpu_mem_gb")
-            if mem_str is None:
-                # Pre-stamp blob — include it (will be filtered after download)
-                eligible_paths.append(blob.name)
-                continue
             try:
-                if int(mem_str) <= max_gpu_mem_gb:
+                if mem_str is None or int(mem_str) <= max_gpu_mem_gb:
                     eligible_paths.append(blob.name)
             except ValueError:
                 eligible_paths.append(blob.name)
-            if len(eligible_paths) >= cap:
-                break
+            if len(eligible_paths) + len(out) >= cap: break
         from concurrent.futures import ThreadPoolExecutor
-        out: list[Job] = []
-        def _read(path: str) -> Job | None:
-            try:
-                txt = self._download_text(path)
-                return Job.from_json(txt) if txt else None
-            except Exception:
-                return None
+        def _read(path):
+            try: txt = self._download_text(path); return Job.from_json(txt) if txt else None
+            except Exception: return None
         with ThreadPoolExecutor(max_workers=32) as ex:
             for j in ex.map(_read, eligible_paths):
                 if j is not None and int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb:
