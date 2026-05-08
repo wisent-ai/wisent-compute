@@ -317,17 +317,8 @@ echo "  url:        http://${DASH_BIND}:${DASH_PORT}/"
 echo "  stdout log: ${DASH_LOG_OUT}"
 echo "  stderr log: ${DASH_LOG_ERR}"
 
-# === Tailscale serve front-end (best-effort) ===
-# If the Tailscale CLI is on PATH and the host is logged in, expose the
-# dashboard at https://<hostname>.<tailnet>/ so any tailnet member can
-# reach it. tailscale serve is idempotent; safe to re-run.
-TS_BIN=""
-for cand in /usr/local/bin/tailscale /opt/homebrew/bin/tailscale \
-            /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
-    if [ -x "$cand" ]; then TS_BIN="$cand"; break; fi
-done
-if [ -n "$TS_BIN" ] && "$TS_BIN" status >/dev/null 2>&1; then
-    "$TS_BIN" serve --bg --https=443 "http://localhost:${DASH_PORT}" \
-        2>/dev/null || true
-    echo "  tailnet:    https://$(hostname -s).$($TS_BIN status --json 2>/dev/null | grep -oE '\"MagicDNSSuffix\":\"[^\"]+\"' | head -1 | cut -d\\\" -f4)/ (best-effort)"
-fi
+# Dashboard is bound to 0.0.0.0 so any tailnet member can reach it at
+# http://<host>.<tailnet>:<port>/ directly. tailscale serve isn't used —
+# the App Store Tailscale build does not support 'tailscale serve' on
+# macOS, and the direct tailnet hostname:port path is sufficient.
+echo "  tailnet:    http://$(hostname -s).tail6443b3.ts.net:${DASH_PORT}/"

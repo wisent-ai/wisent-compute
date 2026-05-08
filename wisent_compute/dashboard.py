@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
@@ -76,6 +78,24 @@ def _read_capacity_blobs(store: JobStorage) -> list[dict]:
         blobs.append(data)
     blobs.sort(key=lambda d: d.get("published_at") or "", reverse=True)
     return blobs
+
+
+def _fast_counts(store: JobStorage) -> dict[str, int]:
+    """Count blobs per state prefix without downloading job JSONs.
+
+    JobStorage.list_all_jobs() downloads every blob's JSON to construct
+    Job objects — with 13k+ jobs that takes minutes. The dashboard only
+    needs counts up-front, so iterate blob names via the SDK's
+    list_blobs API which is paginated and metadata-only.
+    """
+    out = {"queue": 0, "running": 0, "completed": 0, "failed": 0}
+    if store._sdk_bucket is None:
+        return out
+    for state in out:
+        out[state] = sum(1 for b in store._sdk_bucket.list_blobs(
+            prefix=f"{state}/", fields="items(name),nextPageToken")
+            if b.name.endswith(".json"))
+    return out
 
 
 def _summarize(store: JobStorage) -> dict[str, Any]:
@@ -276,14 +296,66 @@ failed <strong>{counts.get('failed',0)}</strong>
 </body></html>"""
 
 
-class _Handler(BaseHTTPRequestHandler):
-    def _store(self) -> JobStorage:
-        return JobStorage(BUCKET)
+# Background refresh state — populated by a daemon thread and read by the
+# request handlers. The slow path (_summarize) downloads every job blob,
+# so we never run it inline with a request; we serve the last cached
+# snapshot and refresh in the background.
+_CACHE_LOCK = threading.Lock()
+_CACHE_STATE: dict[str, Any] = {
+    "ready": False,
+    "now": None,
+    "bucket": BUCKET,
+    "counts": {"queue": 0, "running": 0, "completed": 0, "failed": 0},
+    "by_model_state": {},
+    "live_agents": [],
+    "stale_agents": [],
+    "recent_failed": [],
+    "completed_recent": [],
+    "throughput": {
+        "avg_wall_seconds_per_completed_job": None,
+        "samples": 0,
+        "live_total_free_slots": 0,
+        "projected_remaining_seconds": None,
+    },
+    "last_refresh_seconds": None,
+    "last_refresh_error": None,
+}
 
+
+def _refresh_loop(interval: int) -> None:
+    """Daemon: refresh the cache every <interval> seconds."""
+    while True:
+        store = JobStorage(BUCKET)
+        try:
+            t0 = time.time()
+            # Fast counts first so the cache is always at least roughly
+            # current even if the slow per-job pass fails or is paused.
+            counts = _fast_counts(store)
+            with _CACHE_LOCK:
+                _CACHE_STATE["counts"].update(counts)
+                _CACHE_STATE["now"] = datetime.now(timezone.utc).isoformat()
+                _CACHE_STATE["ready"] = True
+            # Slow per-job summary. May take a long time on a hot queue.
+            full = _summarize(store)
+            with _CACHE_LOCK:
+                _CACHE_STATE.update(full)
+                _CACHE_STATE["last_refresh_seconds"] = time.time() - t0
+                _CACHE_STATE["last_refresh_error"] = None
+                _CACHE_STATE["ready"] = True
+        except Exception as exc:
+            with _CACHE_LOCK:
+                _CACHE_STATE["last_refresh_error"] = repr(exc)
+            sys.stderr.write(f"[dashboard] refresh failed: {exc!r}\n")
+            sys.stderr.flush()
+        time.sleep(interval)
+
+
+class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 (stdlib API)
         try:
+            with _CACHE_LOCK:
+                state = dict(_CACHE_STATE)
             if self.path == "/api/state.json":
-                state = _summarize(self._store())
                 body = json.dumps(state, default=str).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -292,7 +364,6 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
             if self.path in ("/", "/index.html"):
-                state = _summarize(self._store())
                 body = _render_html(state).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -318,6 +389,10 @@ def serve(host: str | None = None, port: int | None = None) -> None:
     """Run the dashboard HTTP server. Blocks until killed."""
     h = host or DASHBOARD_BIND
     p = port if port is not None else DASHBOARD_PORT
+    refresher = threading.Thread(
+        target=_refresh_loop, args=(DASHBOARD_REFRESH_SECONDS,),
+        daemon=True, name="dashboard-refresh")
+    refresher.start()
     server = HTTPServer((h, p), _Handler)
     sys.stderr.write(f"[dashboard] listening on http://{h}:{p}\n")
     sys.stderr.flush()
