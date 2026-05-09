@@ -360,13 +360,16 @@ else
     # Pull both secrets from GCP Secret Manager and bake them into the
     # plist's EnvironmentVariables. The mac mini already has ADC at
     # $ADC_PATH (the FATAL guard at the top of this script enforces
-    # that), so gcloud auth is implicit.
+    # that). Use the absolute gcloud binary discovered above so the
+    # installer's PATH doesn't matter.
+    GCLOUD_BIN="$GCLOUD_BIN_DIR/gcloud"
+    if [ ! -x "$GCLOUD_BIN" ]; then GCLOUD_BIN=$(command -v gcloud || echo gcloud); fi
     HFR_HF_TOKEN=$(GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
-        gcloud --quiet --project=wisent-480400 \
-        secrets versions access latest --secret=hf-token 2>/dev/null || true)
+        "$GCLOUD_BIN" --quiet --project=wisent-480400 \
+        secrets versions access latest --secret=hf-token 2>>"$LOG_DIR/wisent-hf-refresh-install.err" || true)
     HFR_SBP_TOKEN=$(GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
-        gcloud --quiet --project=wisent-480400 \
-        secrets versions access latest --secret=supabase-access-token 2>/dev/null || true)
+        "$GCLOUD_BIN" --quiet --project=wisent-480400 \
+        secrets versions access latest --secret=supabase-access-token 2>>"$LOG_DIR/wisent-hf-refresh-install.err" || true)
     if [ -z "$HFR_HF_TOKEN" ] || [ -z "$HFR_SBP_TOKEN" ]; then
         echo "HF refresh SKIPPED: could not fetch hf-token/supabase-access-token from GCP Secret Manager." >&2
     else
