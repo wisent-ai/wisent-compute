@@ -460,21 +460,38 @@ fi
 # wisent-compute commit and which LaunchAgents got registered. Reads
 # the deploy clone's HEAD; LaunchAgent presence is a plain file-exists
 # check.
-HOST_SHORT=$(hostname -s)
+HOST_SHORT=$(hostname -s | tr '[:upper:]' '[:lower:]')
 DEPLOY_HEAD=$(cd "$DEPLOY_REPO_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo "?")
 HFR_REPO_HEAD=$(cd "$HFR_REPO_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo "?")
+INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Reflect "is this LaunchAgent registered with launchd RIGHT NOW", not
+# "does the plist file exist on disk" — the latter can be a stale
+# artifact from a previous install (the actual root cause of the
+# self-eviction race investigated 2026-05-09).
+agent_state() {
+    local lbl="$1"
+    if launchctl print "${GUI_DOMAIN}/${lbl}" >/dev/null 2>&1; then
+        echo yes
+    else
+        echo no
+    fi
+}
+COORD_STATE=$(agent_state "$LABEL")
+AD_STATE=$(agent_state "$AD_LABEL")
+DASH_STATE=$(agent_state "$DASH_LABEL")
+HFR_STATE=$(agent_state "$HFR_LABEL")
 BEACON_TMP=$(mktemp)
 cat > "$BEACON_TMP" <<BEACONEOF
 {
   "host": "${HOST_SHORT}",
-  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "installed_at": "${INSTALLED_AT}",
   "wisent_compute_head": "${DEPLOY_HEAD}",
   "wisent_enterprise_head": "${HFR_REPO_HEAD}",
   "agents": {
-    "coordinator":   "$([ -f \"$PLIST\" ] && echo yes || echo no)",
-    "auto_deployer": "$([ -f \"$AD_PLIST\" ] && echo yes || echo no)",
-    "dashboard":     "$([ -f \"$DASH_PLIST\" ] && echo yes || echo no)",
-    "hf_refresh":    "$([ -f \"$HFR_PLIST\" ] && echo yes || echo no)"
+    "coordinator": "${COORD_STATE}",
+    "auto_deployer": "${AD_STATE}",
+    "dashboard": "${DASH_STATE}",
+    "hf_refresh": "${HFR_STATE}"
   }
 }
 BEACONEOF
