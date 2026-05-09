@@ -442,3 +442,35 @@ HFRPLISTEOF
         echo "  stderr log: ${HFR_LOG_ERR}"
     fi
 fi
+
+# === Install status beacon ===
+# Write a JSON beacon to GCS after every install so off-box observers
+# can see whether the auto-deployer has actually picked up the latest
+# wisent-compute commit and which LaunchAgents got registered. Reads
+# the deploy clone's HEAD; LaunchAgent presence is a plain file-exists
+# check.
+HOST_SHORT=$(hostname -s)
+DEPLOY_HEAD=$(cd "$DEPLOY_REPO_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo "?")
+HFR_REPO_HEAD=$(cd "$HFR_REPO_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo "?")
+BEACON_TMP=$(mktemp)
+cat > "$BEACON_TMP" <<BEACONEOF
+{
+  "host": "${HOST_SHORT}",
+  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "wisent_compute_head": "${DEPLOY_HEAD}",
+  "wisent_enterprise_head": "${HFR_REPO_HEAD}",
+  "agents": {
+    "coordinator":   "$([ -f \"$PLIST\" ] && echo yes || echo no)",
+    "auto_deployer": "$([ -f \"$AD_PLIST\" ] && echo yes || echo no)",
+    "dashboard":     "$([ -f \"$DASH_PLIST\" ] && echo yes || echo no)",
+    "hf_refresh":    "$([ -f \"$HFR_PLIST\" ] && echo yes || echo no)"
+  }
+}
+BEACONEOF
+GCLOUD_BIN_FOR_BEACON="$GCLOUD_BIN_DIR/gcloud"
+[ -x "$GCLOUD_BIN_FOR_BEACON" ] || GCLOUD_BIN_FOR_BEACON=$(command -v gcloud || echo gcloud)
+GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
+    "$GCLOUD_BIN_FOR_BEACON" --quiet --project=wisent-480400 storage cp \
+    "$BEACON_TMP" "gs://wisent-compute/install_status/${HOST_SHORT}.json" \
+    >/dev/null 2>&1 || echo "WARN: could not upload install beacon to GCS" >&2
+rm -f "$BEACON_TMP"
