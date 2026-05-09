@@ -369,19 +369,18 @@ else
         exit 10
     fi
 
-    # Pull both secrets from GCP Secret Manager and bake them into the
-    # plist's EnvironmentVariables. The mac mini already has ADC at
-    # $ADC_PATH (the FATAL guard at the top of this script enforces
-    # that). Use the absolute gcloud binary discovered above so the
-    # installer's PATH doesn't matter.
-    GCLOUD_BIN="$GCLOUD_BIN_DIR/gcloud"
-    if [ ! -x "$GCLOUD_BIN" ]; then GCLOUD_BIN=$(command -v gcloud || echo gcloud); fi
-    HFR_HF_TOKEN=$(GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
-        "$GCLOUD_BIN" --quiet --project=wisent-480400 \
-        secrets versions access latest --secret=hf-token 2>>"$LOG_DIR/wisent-hf-refresh-install.err" || true)
-    HFR_SBP_TOKEN=$(GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
-        "$GCLOUD_BIN" --quiet --project=wisent-480400 \
-        secrets versions access latest --secret=supabase-access-token 2>>"$LOG_DIR/wisent-hf-refresh-install.err" || true)
+    # Read both secrets from the same on-box config dir as $PAT_FILE.
+    # gcloud CLI auth on the mac mini is keychain-backed and breaks in
+    # non-interactive contexts (errSecInteractionNotAllowed -25308),
+    # so we don't try to round-trip through GCP Secret Manager from
+    # this script. Operator drops the secret files once; same pattern
+    # as github_pat. Files are 0600 by convention.
+    HFR_HF_TOKEN_FILE="$HOME/.config/wisent/hf_token"
+    HFR_SBP_TOKEN_FILE="$HOME/.config/wisent/supabase_access_token"
+    HFR_HF_TOKEN=""
+    HFR_SBP_TOKEN=""
+    [ -r "$HFR_HF_TOKEN_FILE" ]  && HFR_HF_TOKEN=$(cat "$HFR_HF_TOKEN_FILE")
+    [ -r "$HFR_SBP_TOKEN_FILE" ] && HFR_SBP_TOKEN=$(cat "$HFR_SBP_TOKEN_FILE")
     if [ -z "$HFR_HF_TOKEN" ] || [ -z "$HFR_SBP_TOKEN" ]; then
         echo "HF refresh SKIPPED: could not fetch hf-token/supabase-access-token from GCP Secret Manager." >&2
     else
@@ -479,10 +478,16 @@ cat > "$BEACON_TMP" <<BEACONEOF
   }
 }
 BEACONEOF
-GCLOUD_BIN_FOR_BEACON="$GCLOUD_BIN_DIR/gcloud"
-[ -x "$GCLOUD_BIN_FOR_BEACON" ] || GCLOUD_BIN_FOR_BEACON=$(command -v gcloud || echo gcloud)
-GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
-    "$GCLOUD_BIN_FOR_BEACON" --quiet --project=wisent-480400 storage cp \
-    "$BEACON_TMP" "gs://wisent-compute/install_status/${HOST_SHORT}.json" \
-    >/dev/null 2>&1 || echo "WARN: could not upload install beacon to GCS" >&2
+# wisent-compute already has the google-cloud-storage Python client
+# installed in the venv (it's a wisent-compute dep). Use it for the
+# beacon write — wisent-compute's storage layer handles ADC and
+# doesn't trip the gcloud-CLI keychain interaction issue.
+"$VENV/bin/python" -c "
+import json, sys
+from google.cloud import storage
+data = open('$BEACON_TMP').read()
+client = storage.Client(project='wisent-480400')
+client.bucket('wisent-compute').blob('install_status/${HOST_SHORT}.json').upload_from_string(data, content_type='application/json')
+" 2>>"$LOG_DIR/wisent-hf-refresh-install.err" \
+    || echo "WARN: could not upload install beacon to GCS" >&2
 rm -f "$BEACON_TMP"
