@@ -238,16 +238,28 @@ else
 </plist>
 ADPLISTEOF
 
-    launchctl bootout "${GUI_DOMAIN}/${AD_LABEL}" 2>/dev/null || true
-    reload_launchagent "$AD_PLIST" "$AD_LABEL"
-    launchctl enable "${GUI_DOMAIN}/${AD_LABEL}" 2>/dev/null || true
-    echo "wisent-compute-auto-deployer installed:"
-    echo "  label:      ${AD_LABEL}"
-    echo "  tick:       ${AD_TICK}"
-    echo "  repo:       ${DEPLOY_REPO_DIR}"
-    echo "  interval:   60s"
-    echo "  stdout log: ${AD_LOG_OUT}"
-    echo "  stderr log: ${AD_LOG_ERR}"
+    # Self-eviction guard: when this script runs from inside the
+    # auto-deployer's tick (the common case), `launchctl bootout` of
+    # AD_LABEL kills our own process tree. The matching bootstrap
+    # never runs, the agent unregisters, and no future tick fires.
+    # Detect that case via XPC_SERVICE_NAME (set by launchd for the
+    # current job) and, when self, only refresh the plist on disk —
+    # the running agent keeps running with its current ProgramArguments
+    # until the next reboot or an external bootstrap.
+    if [ "${XPC_SERVICE_NAME:-}" = "${AD_LABEL}" ]; then
+        echo "wisent-compute-auto-deployer plist refreshed (self-tick, skipping reload)"
+    else
+        launchctl bootout "${GUI_DOMAIN}/${AD_LABEL}" 2>/dev/null || true
+        reload_launchagent "$AD_PLIST" "$AD_LABEL"
+        launchctl enable "${GUI_DOMAIN}/${AD_LABEL}" 2>/dev/null || true
+        echo "wisent-compute-auto-deployer installed:"
+        echo "  label:      ${AD_LABEL}"
+        echo "  tick:       ${AD_TICK}"
+        echo "  repo:       ${DEPLOY_REPO_DIR}"
+        echo "  interval:   60s"
+        echo "  stdout log: ${AD_LOG_OUT}"
+        echo "  stderr log: ${AD_LOG_ERR}"
+    fi
 fi
 
 # === Dashboard LaunchAgent ===
