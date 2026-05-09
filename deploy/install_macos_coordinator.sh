@@ -322,3 +322,120 @@ echo "  stderr log: ${DASH_LOG_ERR}"
 # the App Store Tailscale build does not support 'tailscale serve' on
 # macOS, and the direct tailnet hostname:port path is sufficient.
 echo "  tailnet:    http://$(hostname -s).tail6443b3.ts.net:${DASH_PORT}/"
+
+# === wisent-enterprise HF refresh LaunchAgent ===
+# Periodic walk of wisent-ai/activations on Hugging Face that upserts
+# coverage + pair_counts rows into Supabase (read by console.wisent.com
+# /api/jobs/hf-coverage and /api/jobs/hf-pair-counts). Lives on the
+# mac mini, NOT in GitHub Actions (avoids GHA org-wide allowance and
+# shared-IP rate-limit thrashing).
+HFR_LABEL="com.wisent.hf-refresh"
+HFR_PLIST="$HOME/Library/LaunchAgents/${HFR_LABEL}.plist"
+HFR_LOG_OUT="$LOG_DIR/wisent-hf-refresh.out"
+HFR_LOG_ERR="$LOG_DIR/wisent-hf-refresh.err"
+HFR_REPO_DIR="$HOME/wisent-enterprise"
+
+if [ ! -f "$PAT_FILE" ]; then
+    echo "HF refresh SKIPPED: $PAT_FILE missing (needed to clone wisent-enterprise)." >&2
+else
+    if [ ! -d "$HFR_REPO_DIR/.git" ]; then
+        rm -rf "$HFR_REPO_DIR"
+        PAT_VAL=$(cat "$PAT_FILE")
+        git clone --quiet \
+            "https://x-access-token:${PAT_VAL}@github.com/wisent-ai/wisent-enterprise.git" \
+            "$HFR_REPO_DIR"
+        unset PAT_VAL
+    else
+        # Keep the clone fresh on every installer re-run; the wrapper
+        # also pulls per-fire so this is belt-and-suspenders.
+        (cd "$HFR_REPO_DIR" && git fetch --quiet origin main && git reset --quiet --hard origin/main) || true
+    fi
+
+    HFR_WRAPPER="$HFR_REPO_DIR/scripts/run-hf-refresh.sh"
+    if [ ! -x "$HFR_WRAPPER" ]; then
+        echo "FATAL: $HFR_WRAPPER missing or non-executable; HF refresh cannot start" >&2
+        exit 10
+    fi
+
+    # Pull both secrets from GCP Secret Manager and bake them into the
+    # plist's EnvironmentVariables. The mac mini already has ADC at
+    # $ADC_PATH (the FATAL guard at the top of this script enforces
+    # that), so gcloud auth is implicit.
+    HFR_HF_TOKEN=$(GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
+        gcloud --quiet --project=wisent-480400 \
+        secrets versions access latest --secret=hf-token 2>/dev/null || true)
+    HFR_SBP_TOKEN=$(GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
+        gcloud --quiet --project=wisent-480400 \
+        secrets versions access latest --secret=supabase-access-token 2>/dev/null || true)
+    if [ -z "$HFR_HF_TOKEN" ] || [ -z "$HFR_SBP_TOKEN" ]; then
+        echo "HF refresh SKIPPED: could not fetch hf-token/supabase-access-token from GCP Secret Manager." >&2
+    else
+        # Find a node binary that ships with Apple's Homebrew layout.
+        NODE_BIN=""
+        for cand in /opt/homebrew/bin/node /usr/local/bin/node; do
+            if [ -x "$cand" ]; then NODE_BIN="$cand"; break; fi
+        done
+        if [ -z "$NODE_BIN" ]; then
+            echo "FATAL: no node binary found; HF refresh cannot start" >&2
+            exit 11
+        fi
+
+        cat > "$HFR_PLIST" <<HFRPLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${HFR_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${HFR_WRAPPER}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>21600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${HFR_LOG_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${HFR_LOG_ERR}</string>
+    <key>WorkingDirectory</key>
+    <string>${HFR_REPO_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>${HOME}</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NODE_BIN</key>
+        <string>${NODE_BIN}</string>
+        <key>REPO_DIR</key>
+        <string>${HFR_REPO_DIR}</string>
+        <key>HF_TOKEN</key>
+        <string>${HFR_HF_TOKEN}</string>
+        <key>SUPABASE_ACCESS_TOKEN</key>
+        <string>${HFR_SBP_TOKEN}</string>
+    </dict>
+</dict>
+</plist>
+HFRPLISTEOF
+
+        # Restrict the plist file mode so the embedded secrets aren't
+        # world-readable.
+        chmod 600 "$HFR_PLIST"
+
+        launchctl bootout "${GUI_DOMAIN}/${HFR_LABEL}" 2>/dev/null || true
+        reload_launchagent "$HFR_PLIST" "$HFR_LABEL"
+        launchctl enable "${GUI_DOMAIN}/${HFR_LABEL}" 2>/dev/null || true
+        launchctl kickstart -k "${GUI_DOMAIN}/${HFR_LABEL}" 2>/dev/null || true
+
+        echo "wisent-hf-refresh installed:"
+        echo "  label:      ${HFR_LABEL}"
+        echo "  wrapper:    ${HFR_WRAPPER}"
+        echo "  repo:       ${HFR_REPO_DIR}"
+        echo "  interval:   21600s (6h)"
+        echo "  stdout log: ${HFR_LOG_OUT}"
+        echo "  stderr log: ${HFR_LOG_ERR}"
+    fi
+fi
