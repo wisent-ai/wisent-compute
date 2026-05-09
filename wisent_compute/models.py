@@ -22,6 +22,41 @@ GPU_SIZING = {
         40: ("a2-highgpu-1g", "nvidia-tesla-a100"),
         80: ("a2-ultragpu-1g", "nvidia-a100-80gb"),
     },
+    # Azure NCas_T4_v3 (T4 16 GiB) and NC_A100_v4 (A100 80 GiB) are the
+    # supported GPU SKUs. Azure has no native L4 SKU, so the 24 GiB tier
+    # rolls up to the larger NC8as_T4_v3 host (still 1×T4 16 GiB but more
+    # vCPU/RAM than NC4as so the OS doesn't choke on dataset preprocessing).
+    # Anything > 80 GiB lands on the dual-A100 NC48ads SKU.
+    "azure": {
+        16: ("Standard_NC4as_T4_v3", "nvidia-tesla-t4"),
+        24: ("Standard_NC8as_T4_v3", "nvidia-tesla-t4"),
+        40: ("Standard_NC24ads_A100_v4", "nvidia-a100-80gb"),
+        80: ("Standard_NC24ads_A100_v4", "nvidia-a100-80gb"),
+        160: ("Standard_NC48ads_A100_v4", "nvidia-a100-80gb"),
+    },
+}
+
+# Azure VM SKU → (accel_type, count). Used by AzureProvider.list_running_instances
+# to count GPUs from VM size alone (Azure VMs bundle the GPU into the SKU
+# rather than expose it as a separate attached_accelerator like GCE does).
+AZURE_VM_TO_ACCEL = {
+    "Standard_NC4as_T4_v3": ("nvidia-tesla-t4", 1),
+    "Standard_NC8as_T4_v3": ("nvidia-tesla-t4", 1),
+    "Standard_NC16as_T4_v3": ("nvidia-tesla-t4", 1),
+    "Standard_NC64as_T4_v3": ("nvidia-tesla-t4", 4),
+    "Standard_NC24ads_A100_v4": ("nvidia-a100-80gb", 1),
+    "Standard_NC48ads_A100_v4": ("nvidia-a100-80gb", 2),
+    "Standard_NC96ads_A100_v4": ("nvidia-a100-80gb", 4),
+}
+
+# Azure quota family name → accel_type. Used by scheduler/quota.py to map
+# `compute.usage.list(location)` rows. Azure exposes quota at the SKU-family
+# level (one count covers every NC*as_T4_v3 size) so a saturated quota in
+# one family blocks every member SKU regardless of which size we'd pick.
+AZURE_QUOTA_FAMILY_TO_ACCEL = {
+    "standardNCASv3Family": "nvidia-tesla-t4",
+    "standardNCASv4Family": "nvidia-tesla-t4",        # newer T4 family if added
+    "standardNCADSA100v4Family": "nvidia-a100-80gb",
 }
 
 # On-demand $ for the GPU accelerator only. Source: GCP us-central1 list price.
@@ -77,6 +112,22 @@ GPU_TYPE_TO_MACHINE_TYPE = {
     "nvidia-h100-80gb": "a3-highgpu-8g",
 }
 
+# Azure VM SKU → (on_demand_usd_per_hour, spot_usd_per_hour). Unlike GCP,
+# Azure bundles GPU into the SKU price (NC* families bill the entire VM
+# including the attached GPU as a single line item), so cost.py's Azure
+# branch reads this directly instead of summing GPU + bundle.
+# Source: Azure retail prices for eastus, captured 2026-05-08. Override
+# via env if your subscription uses an EA/savings-plan negotiated rate.
+AZURE_VM_HOURLY_RATE_USD = {
+    "Standard_NC4as_T4_v3":      (0.526, 0.105),
+    "Standard_NC8as_T4_v3":      (0.752, 0.150),
+    "Standard_NC16as_T4_v3":     (1.204, 0.241),
+    "Standard_NC64as_T4_v3":     (4.352, 0.870),
+    "Standard_NC24ads_A100_v4":  (3.673, 0.735),
+    "Standard_NC48ads_A100_v4":  (7.346, 1.470),
+    "Standard_NC96ads_A100_v4":  (14.692, 2.940),
+}
+
 
 @dataclass
 class Job:
@@ -98,7 +149,7 @@ class Job:
     last_restart: str | None = None
     image: str = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
     image_project: str = "deeplearning-platform-release"
-    boot_disk_gb: int = 200
+    boot_disk_gb: int = 500
     startup_script_uri: str = ""
     error: str | None = None
     # New routing/cost fields. Default values keep all existing jobs behaving
@@ -127,6 +178,15 @@ class Job:
     repo: str = ""                # https git URL (or git@host:owner/repo.git)
     repo_workdir: str = ""        # subdir name; defaults to repo basename
     repo_extras: str = "train"    # pip-install extras name; "" to skip install
+    # Verification hook. If set, runs as a shell command AFTER the subprocess
+    # exits 0; non-zero exit reverses the COMPLETED → FAILED. Catches the
+    # class of bug where the subprocess swallows errors and exits 0 despite
+    # not having done its work (e.g. wisent's extract_and_upload reports
+    # "5/7 strategies failed" + HF 429 rate-limit errors but exits 0,
+    # marking the job COMPLETED while no usable output was produced).
+    # Confirmed live on 2026-05-06: 20/20 sampled "completed" jobs had this
+    # exact failure pattern. Empty string = skip verify (back-compat).
+    verify_command: str = ""
 
     def __post_init__(self):
         if not self.created_at:

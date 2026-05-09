@@ -20,9 +20,15 @@ from ...models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
 from ...providers.base import Provider
 
 
-_TEMPLATE_PATH = (
-    Path(__file__).parent.parent.parent / "templates" / "startup_gpu_agent.sh"
-)
+_TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
+# Per-provider agent startup-script templates. Each launches `wc agent
+# --kind <provider> --gpu-type <accel> --idle-shutdown` after installing
+# wisent-compute, but with provider-specific bootstrap (gsutil vs azcopy,
+# managed identity vs SA JSON, etc.).
+_TEMPLATES_BY_PROVIDER = {
+    "gcp": "startup_gpu_agent.sh",
+    "azure": "startup_gpu_agent_azure.sh",
+}
 
 
 def _accel_hourly_rate(accel: str, preemptible: bool) -> float:
@@ -54,7 +60,8 @@ def dispatch_agent_vms(
     `accel_dispatched` in-place so the caller's per-tick budgets stay
     consistent with cloud reality.
     """
-    template = _TEMPLATE_PATH.read_text()
+    template_name = _TEMPLATES_BY_PROVIDER.get(provider_name, "startup_gpu_agent.sh")
+    template = (_TEMPLATES_DIR / template_name).read_text()
 
     # Re-derive (machine_type, accel) per job from current GPU_SIZING rather
     # than trust job.machine_type / job.gpu_type, which may be stale (a job
@@ -101,15 +108,16 @@ def dispatch_agent_vms(
         n_to_dispatch = min(len(jobs), quota_left, share_left,
                             per_tick_cap - scheduled)
         biggest = max(jobs, key=lambda j: int(getattr(j, "gpu_mem_gb", 0) or 0))
-        # Spot-only policy: if any job in the bucket was submitted with
-        # preemptible=True the dispatcher creates a Spot VM and stays
-        # on Spot. The previous escalation-to-on-demand path silently
-        # switched the bucket to STANDARD provisioning once any job had
-        # been preempted >=max_preempts_before_ondemand times, costing
-        # ~2x. If the user wants on-demand they should submit without
-        # the --spot flag, not have it inferred.
-        any_preempt = any(getattr(j, "preemptible", False) for j in jobs)
-        preemptible_for_call = any_preempt
+        # No-preemptible policy: per user instruction (2026-05-06), this
+        # codebase is NOT to dispatch Spot/preemptible VMs even when the
+        # job's `preemptible` field is True. Repeated Spot reclaims of
+        # A100-80 capacity in us-central1 caused 8 cloud-agent VMs to be
+        # deleted under instance_termination_action=DELETE in a single
+        # 3-second window (22:21:10-13Z), forcing requeues that burned
+        # restart-budget on misclassified jobs (since fixed in 0.4.55,
+        # but the underlying preemption noise persists). Override the
+        # job-level flag and force every dispatch to STANDARD.
+        preemptible_for_call = False
         for i in range(n_to_dispatch):
             script = template.replace("${ACCEL_TYPE}", accel)
             for key, val in secrets.items():

@@ -42,7 +42,7 @@ def main():
 @main.command()
 @click.argument("command")
 @click.option("--provider", default="gcp",
-              help="Preferred provider (gcp/local). With --any-provider this is just a hint.")
+              help="Preferred provider (gcp/azure/aws/local). With --any-provider this is just a hint.")
 @click.option("--batch", "batch_file", default=None, help="File with commands")
 @click.option("--spot/--no-spot", default=DEFAULT_PREEMPTIBLE,
               help="Dispatch on Spot/Preemptible GPUs (cheaper, can be preempted).")
@@ -184,7 +184,7 @@ def cancel(job_id):
                    "queued job is eligible. Use on ephemeral cloud-VM agents.")
 @click.option("--kind", default="local",
               help='Consumer label in capacity broadcasts: "local" (physical box, '
-                   'default), "gcp" / "aws" / "vast" (ephemeral cloud-agent VM).')
+                   'default), "gcp" / "azure" / "aws" / "vast" (ephemeral cloud-agent VM).')
 def agent(gpu_type, target, auto, idle_shutdown, kind):
     """Run local GPU agent. Polls queue, respects Vast.ai renters."""
     import os as _os

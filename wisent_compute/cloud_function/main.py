@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from google.cloud import pubsub_v1, secretmanager_v1
 
-from wisent_compute.config import PROJECT, BUCKET, ALERTS_TOPIC
+from wisent_compute.config import PROJECT, BUCKET, ALERTS_TOPIC, WC_PROVIDERS
 from wisent_compute.queue.storage import JobStorage
 from wisent_compute.providers import get_provider
 from wisent_compute.monitor import check_running_jobs, reap_dead_agents
@@ -38,20 +38,29 @@ def _load_secrets():
 
 
 def monitor_jobs(request=None):
-    """Main tick: check running, then schedule queued."""
+    """Main tick: per provider in WC_PROVIDERS, check running + reap + schedule."""
     global _publisher
     _log("Tick started")
 
     store = JobStorage(BUCKET)
-    provider = get_provider("gcp")
     if _publisher is None:
         _publisher = pubsub_v1.PublisherClient()
 
-    check_running_jobs(store, provider, _publisher)
-    reaped = reap_dead_agents(store, provider, kind="gcp")
-
     secrets = _load_secrets()
-    scheduled = schedule_queued_jobs(store, provider, "gcp", secrets)
-    _log(f"Tick done: reaped {reaped} dead-agent VMs, scheduled {scheduled}")
+    total_reaped = 0
+    total_scheduled = 0
+    for name in WC_PROVIDERS:
+        try:
+            provider = get_provider(name)
+        except Exception as exc:
+            _log(f"skip {name}: {exc!r}")
+            continue
+        check_running_jobs(store, provider, _publisher)
+        total_reaped += reap_dead_agents(store, provider, kind=name)
+        total_scheduled += schedule_queued_jobs(store, provider, name, secrets)
+    _log(
+        f"Tick done: reaped {total_reaped} dead-agent VMs, "
+        f"scheduled {total_scheduled} (providers={WC_PROVIDERS})"
+    )
 
     return "OK"

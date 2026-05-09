@@ -19,7 +19,7 @@ import time
 import traceback
 from typing import Optional
 
-from .config import BUCKET
+from .config import BUCKET, WC_PROVIDERS
 from .monitor import check_running_jobs
 from .providers import get_provider
 from .queue.storage import JobStorage
@@ -59,11 +59,26 @@ def _bucket_from_state_uri(state_uri: str) -> str:
 
 
 def _run_tick(store: JobStorage, secrets: dict) -> int:
-    """One scheduling cycle. Returns the number of jobs newly scheduled."""
-    provider = get_provider("gcp")
-    check_running_jobs(store, provider, publisher=None)
-    scheduled = schedule_queued_jobs(store, provider, "gcp", secrets)
-    return scheduled
+    """One scheduling cycle across every provider in WC_PROVIDERS.
+
+    Each provider gets its own check_running_jobs + schedule_queued_jobs
+    pass; the queue is shared (state lives in JobStorage), so a
+    `pin_to_provider` job lands wherever its provider field points and an
+    unpinned job is offered to whichever provider claims first. A
+    constructor failure (e.g. AzureProvider when AZURE_SUBSCRIPTION_ID is
+    empty) is logged and skipped so a misconfigured fallback provider
+    never blocks the primary one.
+    """
+    total = 0
+    for name in WC_PROVIDERS:
+        try:
+            provider = get_provider(name)
+        except Exception as exc:
+            _log(f"skip {name}: {exc!r}")
+            continue
+        check_running_jobs(store, provider, publisher=None)
+        total += schedule_queued_jobs(store, provider, name, secrets)
+    return total
 
 
 def run(target: Optional[str] = None, once: bool = False) -> int:

@@ -83,12 +83,16 @@ def read_consumer_capacity(store: JobStorage) -> dict[str, dict]:
     Also deletes long-stale blobs (older than 1h, well past
     CAPACITY_STALE_SECONDS=180s) so the bucket can't accumulate forever.
     Capped per tick so the Cloud Function never spends its budget on GC.
+
+    Backend-agnostic: works against either the GCS SDK or AzureBlobBackend
+    via JobStorage.list_blobs_with_meta. The gsutil-only fallback (no SDK
+    on either side) is unsupported on the dispatcher path.
     """
-    if not store._sdk_bucket:
+    if store._sdk_bucket is None and store._azure_backend is None:
         raise RuntimeError(
-            "read_consumer_capacity requires the GCS SDK bucket. "
-            "JobStorage was constructed without one (gsutil-only mode "
-            "is not supported on the dispatcher path)."
+            "read_consumer_capacity requires either the GCS SDK bucket or "
+            "the Azure Blob backend. JobStorage was constructed without "
+            "either (gsutil-only mode is not supported on the dispatcher path)."
         )
 
     now = datetime.now(timezone.utc)
@@ -96,8 +100,8 @@ def read_consumer_capacity(store: JobStorage) -> dict[str, dict]:
     cutoff_delete = now.timestamp() - 3600  # 1h
 
     out: dict[str, dict] = {}
-    stale_blobs = []
-    for blob in store._sdk_bucket.list_blobs(prefix=CAPACITY_PREFIX):
+    stale_blobs: list = []
+    for blob in store.list_blobs_with_meta(CAPACITY_PREFIX):
         if not blob.name.endswith(".json"):
             continue
         if blob.updated is None:
@@ -108,7 +112,16 @@ def read_consumer_capacity(store: JobStorage) -> dict[str, dict]:
             continue
         if ts < cutoff_fresh:
             continue
-        raw = blob.download_as_text()
+        # Race: an agent can self-delete its own broadcast (or another tick
+        # can sweep stale broadcasts) between list above and download below.
+        # On either backend a 404/NotFound surfaces as a None download
+        # result; drop the blob and continue.
+        try:
+            raw = blob.download_text()
+        except Exception:
+            continue
+        if raw is None:
+            continue
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:

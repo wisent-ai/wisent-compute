@@ -92,6 +92,46 @@ DEFAULT_CPU_IMAGE_FAMILY = "ubuntu-2204-lts"
 DEFAULT_CPU_IMAGE_PROJECT = "ubuntu-os-cloud"
 DEFAULT_BOOT_DISK_GB = 200
 
+# Azure (parallel to GCP). All values resolved from env so the same
+# wisent-compute install can target multiple subscriptions/resource groups
+# without code changes. The provider does NOT create the vnet/subnet/NSG —
+# it expects pre-provisioned infra named below.
+AZURE_SUBSCRIPTION_ID = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+AZURE_RESOURCE_GROUP = os.environ.get("AZURE_RESOURCE_GROUP", "wisent-compute")
+AZURE_LOCATIONS = [r.strip() for r in os.environ.get(
+    "AZURE_LOCATIONS",
+    "eastus,westus3,westus2,northeurope",
+).split(",") if r.strip()]
+AZURE_VNET = os.environ.get("AZURE_VNET", "wisent-compute-vnet")
+AZURE_SUBNET = os.environ.get("AZURE_SUBNET", "wisent-compute-subnet")
+AZURE_NSG = os.environ.get("AZURE_NSG", "wisent-compute-nsg")
+# microsoft-dsvm:ubuntu-hpc:2204:latest ships with NVIDIA driver + CUDA preinstalled,
+# matching deeplearning-platform-release on GCP. Override via AZURE_IMAGE_URN
+# (publisher:offer:sku:version) for a different base image.
+AZURE_IMAGE_URN = os.environ.get(
+    "AZURE_IMAGE_URN",
+    "microsoft-dsvm:ubuntu-hpc:2204:latest",
+)
+AZURE_VM_USERNAME = os.environ.get("AZURE_VM_USERNAME", "wisent")
+# SSH public key for the cloud-init admin user. Required by Azure VM create
+# even when SSH is locked down via NSG; cloud-init will only accept the VM
+# create call if either ssh keys or password auth is configured.
+AZURE_SSH_PUBLIC_KEY = os.environ.get("AZURE_SSH_PUBLIC_KEY", "")
+
+# Multi-provider dispatch. Coordinator and Cloud Function tick iterate this
+# list, calling check_running_jobs / reap_dead_agents / schedule_queued_jobs
+# per provider. A provider whose constructor throws (creds missing) is
+# logged and skipped. Default keeps single-cloud GCP behavior.
+WC_PROVIDERS = [p.strip() for p in os.environ.get("WC_PROVIDERS", "gcp").split(",") if p.strip()]
+
+# Storage backend for the queue. "gcs" (default) keeps the existing
+# gs://wisent-compute path; "azure" routes JobStorage at an Azure Blob
+# container. The two are mutually exclusive — a single JobStorage instance
+# binds to exactly one backend, decided at construction time.
+WC_STORAGE_BACKEND = os.environ.get("WC_STORAGE_BACKEND", "gcs")
+WC_AZURE_STORAGE_ACCOUNT = os.environ.get("WC_AZURE_STORAGE_ACCOUNT", "")
+WC_AZURE_CONTAINER = os.environ.get("WC_AZURE_CONTAINER", "wisent-compute")
+
 
 # Per-model peak-VRAM overrides for models whose actual peak diverges from
 # the params-based heuristic below. Numbers are observed peak GiB during

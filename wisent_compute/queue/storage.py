@@ -76,18 +76,47 @@ class JobStorage:
         self.bucket_name = bucket_name
         self.gs = f"gs://{bucket_name}"
         self._sdk_bucket = None
-        if _has_adc():
+        self._azure_backend = None
+
+        # Storage backend selector. Default "gcs" preserves every existing
+        # call site (gs:// path, _sdk_bucket, gsutil fallback). When set to
+        # "azure" the same JobStorage routes uploads/downloads/listings
+        # through AzureBlobBackend; the gs URI is left dangling but no GCS
+        # call is ever made from this instance.
+        from ..config import (
+            WC_AZURE_CONTAINER,
+            WC_AZURE_STORAGE_ACCOUNT,
+            WC_STORAGE_BACKEND,
+        )
+        if WC_STORAGE_BACKEND == "azure":
+            from .azure_blob import AzureBlobBackend
+            self._azure_backend = AzureBlobBackend(
+                WC_AZURE_STORAGE_ACCOUNT, WC_AZURE_CONTAINER,
+            )
+        elif _has_adc():
             from google.cloud import storage
             client = storage.Client()
             self._sdk_bucket = client.bucket(bucket_name)
 
     @property
     def bucket(self):
+        # Returned only for the GCS path; Azure-backed JobStorage exposes
+        # bucket=None and callers go through the abstract methods below.
         return self._sdk_bucket
 
-    # Internal helpers — use SDK when ADC available (Cloud Function path),
-    # fall back to gsutil subprocess for CLI usage.
+    @property
+    def backend_name(self) -> str:
+        """'azure' or 'gcs' — useful for log lines and conditional branches."""
+        return "azure" if self._azure_backend is not None else "gcs"
+
+    # Internal helpers — three execution paths:
+    #   1. Azure backend (WC_STORAGE_BACKEND=azure): all I/O via Azure SDK.
+    #   2. GCS SDK (ADC available, default Cloud Function path).
+    #   3. gsutil subprocess (CLI usage without ADC).
     def _upload_text(self, blob_path: str, content: str):
+        if self._azure_backend is not None:
+            self._azure_backend.upload_text(blob_path, content)
+            return
         if self._sdk_bucket:
             self._sdk_bucket.blob(blob_path).upload_from_string(content)
             return
@@ -98,6 +127,8 @@ class JobStorage:
         Path(tmp).unlink(missing_ok=True)
 
     def _download_text(self, blob_path: str) -> str | None:
+        if self._azure_backend is not None:
+            return self._azure_backend.download_text(blob_path)
         if self._sdk_bucket:
             blob = self._sdk_bucket.blob(blob_path)
             if not blob.exists():
@@ -106,6 +137,9 @@ class JobStorage:
         return _gsutil_cat(f"{self.gs}/{blob_path}")
 
     def _delete_blob(self, blob_path: str):
+        if self._azure_backend is not None:
+            self._azure_backend.delete(blob_path)
+            return
         if self._sdk_bucket:
             blob = self._sdk_bucket.blob(blob_path)
             if blob.exists():
@@ -115,10 +149,11 @@ class JobStorage:
 
     def _list_paths(self, prefix: str, *, oldest_first: int = 0) -> list[str]:
         """Return blob names under `prefix`. When oldest_first>0, return only
-        that many names sorted by GCS time_created ascending — bounded
+        that many names sorted by creation time ascending — bounded
         listing for hot prefixes (queue/ has 14k+ blobs, fetching all of
-        them every Cloud Function tick blew the 60s timeout). The single
-        list_blobs call already returns blob metadata so sorting is free."""
+        them every Cloud Function tick blew the 60s timeout)."""
+        if self._azure_backend is not None:
+            return self._azure_backend.list_paths(prefix, oldest_first=oldest_first)
         if self._sdk_bucket:
             blobs = list(self._sdk_bucket.list_blobs(prefix=prefix))
             if oldest_first > 0:
@@ -130,13 +165,40 @@ class JobStorage:
             for p in _gsutil_ls(f"{self.gs}/{prefix}")
         ]
 
+    def list_blobs_with_meta(self, prefix: str):
+        """Iterate (name, updated_ts, metadata, download_text(), delete()) for
+        every blob under prefix. Used by capacity.py and list_jobs_fitting
+        to filter on metadata before downloading the full body."""
+        if self._azure_backend is not None:
+            yield from self._azure_backend.list_blobs_with_meta(prefix)
+            return
+        if self._sdk_bucket is None:
+            return
+        from .azure_blob import BlobInfo
+        for blob in self._sdk_bucket.list_blobs(prefix=prefix):
+            # Capture per-iteration so the closure doesn't see a mutating var.
+            blob_obj = blob
+            yield BlobInfo(
+                name=blob_obj.name,
+                updated=blob_obj.updated,
+                metadata=dict(blob_obj.metadata or {}),
+                _download=self._download_text,
+                _delete=lambda name, b=blob_obj: b.delete(),
+            )
+
     def write_job(self, prefix: str, job: Job):
         blob_path = f"{prefix}/{job.job_id}.json"
         self._upload_text(blob_path, job.to_json())
-        if self._sdk_bucket:
+        meta = {
+            "gpu_mem_gb": str(int(getattr(job, "gpu_mem_gb", 0) or 0)),
+            "priority": str(int(getattr(job, "priority", 0) or 0)),
+        }
+        if self._azure_backend is not None:
+            self._azure_backend.set_metadata(blob_path, meta)
+        elif self._sdk_bucket:
             try:
                 blob = self._sdk_bucket.blob(blob_path); blob.reload()
-                blob.metadata = {**(blob.metadata or {}), "gpu_mem_gb": str(int(getattr(job, "gpu_mem_gb", 0) or 0)), "priority": str(int(getattr(job, "priority", 0) or 0))}
+                blob.metadata = {**(blob.metadata or {}), **meta}
                 blob.patch()
             except Exception:
                 pass
@@ -244,7 +306,9 @@ class JobStorage:
     def list_jobs_fitting(self, prefix: str, *, max_gpu_mem_gb: int, cap: int = 4000) -> list[Job]:
         """Priority-aware fitting jobs: queue_priority/ markers first, then FIFO
         from queue/. Metadata stamping filters non-fitting blobs before download."""
-        if not self._sdk_bucket:
+        # gsutil-only mode (no SDK on either side) can't read metadata, so
+        # fall back to downloading all jobs and filtering in Python.
+        if self._azure_backend is None and self._sdk_bucket is None:
             jobs = self.list_jobs(prefix, oldest_first=cap)
             return [j for j in jobs if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb]
         out: list[Job] = []
@@ -254,11 +318,11 @@ class JobStorage:
                 if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb and j.job_id not in seen:
                     out.append(j); seen.add(j.job_id)
         eligible_paths: list[str] = []
-        for blob in self._sdk_bucket.list_blobs(prefix=f"{prefix}/"):
+        for blob in self.list_blobs_with_meta(f"{prefix}/"):
             jid = blob.name.split("/")[-1].removesuffix(".json")
             if not blob.name.endswith(".json") or jid in seen:
                 continue
-            md = blob.metadata or {}
+            md = blob.metadata
             mem_str = md.get("gpu_mem_gb")
             try:
                 if mem_str is None or int(mem_str) <= max_gpu_mem_gb:
@@ -313,8 +377,15 @@ class JobStorage:
         return data.strip().split()[0] if data else None
 
     def heartbeat_stale(self, job_id: str, threshold_minutes: int) -> bool:
+        path = f"status/{job_id}/heartbeat"
+        if self._azure_backend is not None:
+            updated = self._azure_backend.updated_at(path)
+            if updated is None:
+                return False
+            age = (datetime.now(timezone.utc) - updated).total_seconds() / 60
+            return age > threshold_minutes
         if self._sdk_bucket:
-            blob = self._sdk_bucket.blob(f"status/{job_id}/heartbeat")
+            blob = self._sdk_bucket.blob(path)
             if not blob.exists():
                 return False
             blob.reload()

@@ -8,4 +8,7 @@ def get_provider(name: str) -> Provider:
     elif name == "aws":
         from .aws import AWSProvider
         return AWSProvider()
+    elif name == "azure":
+        from .azure import AzureProvider
+        return AzureProvider()
     raise ValueError(f"Unknown provider: {name}")

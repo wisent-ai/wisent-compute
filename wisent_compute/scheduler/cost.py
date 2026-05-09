@@ -17,6 +17,7 @@ from typing import Iterable
 
 from ..config import BUCKET
 from ..models import (
+    AZURE_VM_HOURLY_RATE_USD,
     GPU_HOURLY_RATE_USD, SPOT_DISCOUNT,
     VM_BUNDLE_HOURLY_RATE_USD, GPU_TYPE_TO_MACHINE_TYPE,
     Job,
@@ -43,13 +44,19 @@ def _wall_seconds(job: Job) -> float | None:
 
 
 def _hourly_rate_usd(gpu_type: str, preemptible: bool, machine_type: str = "") -> float:
-    """Total $/hr the project actually pays for one VM (GPU + bundled vCPU + RAM).
+    """Total $/hr the project actually pays for one VM.
 
-    GCP bills the GPU SKU and the A2/N1/G2 Core+Ram SKUs separately, so
-    summing both yields the line-item total a user sees in
-    Cloud Billing. Falls back to GPU_TYPE_TO_MACHINE_TYPE to look up the
-    bundle when machine_type wasn't recorded on the Job.
+    Azure: NC* SKUs bundle the GPU into a single line item, so we read
+    AZURE_VM_HOURLY_RATE_USD directly and skip the GPU+bundle sum.
+
+    GCP: bills the GPU SKU and the A2/N1/G2 Core+Ram SKUs separately, so
+    summing both yields the line-item total a user sees in Cloud Billing.
+    Falls back to GPU_TYPE_TO_MACHINE_TYPE to look up the bundle when
+    machine_type wasn't recorded on the Job.
     """
+    if machine_type and machine_type.startswith("Standard_"):
+        on_demand, spot = AZURE_VM_HOURLY_RATE_USD.get(machine_type, (0.0, 0.0))
+        return spot if preemptible else on_demand
     gpu = GPU_HOURLY_RATE_USD.get(gpu_type, 0.0)
     if preemptible:
         gpu *= SPOT_DISCOUNT.get(gpu_type, 0.5)
@@ -60,10 +67,19 @@ def _hourly_rate_usd(gpu_type: str, preemptible: bool, machine_type: str = "") -
 
 
 def _target_kind(job: Job) -> str:
-    """local | gcp | unknown — based on instance_ref shape."""
+    """local | gcp | azure | aws | unknown.
+
+    instance_ref shape (`name@zone-or-location`) doesn't disambiguate cloud
+    providers, so we trust job.provider when set and fall back to the
+    "anything-but-local@ -> gcp" heuristic for older records that predate
+    multi-provider support.
+    """
     ref = job.instance_ref or ""
     if ref.startswith("local@"):
         return "local"
+    provider = (getattr(job, "provider", "") or "").strip()
+    if provider in ("azure", "aws", "gcp"):
+        return provider
     if ref:
         return "gcp"
     return "unknown"
