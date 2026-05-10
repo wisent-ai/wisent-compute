@@ -454,6 +454,63 @@ HFRPLISTEOF
     fi
 fi
 
+# === Host health beacon LaunchAgent ===
+# Out-of-band 60-second beacon. Captures unit state + disk + log tail.
+# Installed alongside coordinator/auto-deployer/dashboard/hf-refresh
+# so the Vercel HostHealthCard surfaces silent restart loops here too,
+# the same way it does for the RTX workstation via the systemd timer.
+HHB_LABEL="com.wisent.host-health-beacon"
+HHB_PLIST="$HOME/Library/LaunchAgents/${HHB_LABEL}.plist"
+HHB_LOG_OUT="$LOG_DIR/wisent-host-health.out"
+HHB_LOG_ERR="$LOG_DIR/wisent-host-health.err"
+HHB_SCRIPT="$DEPLOY_REPO_DIR/deploy/host_health_beacon_macos.sh"
+
+if [ -f "$HHB_SCRIPT" ]; then
+    cat > "$HHB_PLIST" <<HHBPLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${HHB_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${HHB_SCRIPT}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${HHB_LOG_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${HHB_LOG_ERR}</string>
+    <key>WorkingDirectory</key>
+    <string>${HOME}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>${HOME}</string>
+        <key>PATH</key>
+        <string>${GCLOUD_BIN_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>GOOGLE_APPLICATION_CREDENTIALS</key>
+        <string>${ADC_PATH}</string>
+    </dict>
+</dict>
+</plist>
+HHBPLISTEOF
+
+    launchctl bootout "${GUI_DOMAIN}/${HHB_LABEL}" 2>/dev/null || true
+    reload_launchagent "$HHB_PLIST" "$HHB_LABEL"
+    launchctl enable "${GUI_DOMAIN}/${HHB_LABEL}" 2>/dev/null || true
+    launchctl kickstart -k "${GUI_DOMAIN}/${HHB_LABEL}" 2>/dev/null || true
+    echo "wisent-host-health-beacon installed:"
+    echo "  label:      ${HHB_LABEL}"
+    echo "  script:     ${HHB_SCRIPT}"
+    echo "  interval:   60s"
+fi
+
 # === Install status beacon ===
 # Write a JSON beacon to GCS after every install so off-box observers
 # can see whether the auto-deployer has actually picked up the latest
