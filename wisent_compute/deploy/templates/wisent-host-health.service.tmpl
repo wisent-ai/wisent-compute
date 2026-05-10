@@ -1,0 +1,13 @@
+[Unit]
+Description=Wisent host health beacon (one-shot)
+
+[Service]
+Type=oneshot
+User={USER}
+Group={USER}
+Environment=HOME={HOME}
+Environment=PATH={PATH}
+Environment=GOOGLE_APPLICATION_CREDENTIALS={ADC_PATH}
+Environment=GOOGLE_CLOUD_PROJECT={GCP_PROJECT}
+Environment=WC_HEALTH_UNITS=wisent-agent.service
+ExecStart=/bin/bash {HOME}/host_health_beacon.sh

@@ -118,12 +118,35 @@ render_template "$TEMPLATE_DIR/wisent-upgrade.service.tmpl" /etc/systemd/system/
 echo "[install] rendering /etc/systemd/system/wisent-upgrade.timer"
 render_template "$TEMPLATE_DIR/wisent-upgrade.timer.tmpl" /etc/systemd/system/wisent-upgrade.timer
 
+# Host-health beacon (out-of-band, captures restart loops the
+# capacity-publish heartbeat misses).
+echo "[install] rendering /etc/systemd/system/wisent-host-health.{service,timer}"
+render_template "$TEMPLATE_DIR/wisent-host-health.service.tmpl" /etc/systemd/system/wisent-host-health.service
+render_template "$TEMPLATE_DIR/wisent-host-health.timer.tmpl"   /etc/systemd/system/wisent-host-health.timer
+
+# Drop the beacon script next to the user home so the service unit
+# above can find it. The script ships inside the wisent_compute Python
+# package as deploy/host_health_beacon.sh (see pyproject.toml
+# package-data).
+HHB_SRC=$(sudo -u "$TARGET_USER" python3 -c '
+import os, wisent_compute
+print(os.path.join(os.path.dirname(wisent_compute.__file__), "deploy", "host_health_beacon.sh"))
+')
+if [ -f "$HHB_SRC" ]; then
+    echo "[install] copying $HHB_SRC -> $TARGET_HOME/host_health_beacon.sh"
+    install -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" \
+        "$HHB_SRC" "$TARGET_HOME/host_health_beacon.sh"
+else
+    echo "[install] WARN: host_health_beacon.sh not found at $HHB_SRC; the timer will fail"
+fi
+
 touch /var/log/wisent-agent.log /var/log/wisent-upgrade.log
 chown "$TARGET_USER:$TARGET_USER" /var/log/wisent-agent.log /var/log/wisent-upgrade.log
 
 systemctl daemon-reload
 systemctl enable --now wisent-agent.service
 systemctl enable --now wisent-upgrade.timer
+systemctl enable --now wisent-host-health.timer
 
 sleep 4
 echo

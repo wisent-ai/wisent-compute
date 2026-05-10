@@ -33,4 +33,4 @@ wc = "wisent_compute.cli:main"
 include = ["wisent_compute*"]
 
 [tool.setuptools.package-data]
-wisent_compute = ["templates/*.sh", "targets/*.json", "deploy/templates/*.tmpl"]
+wisent_compute = ["templates/*.sh", "targets/*.json", "deploy/templates/*.tmpl", "deploy/*.sh"]
