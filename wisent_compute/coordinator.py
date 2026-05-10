@@ -21,7 +21,7 @@ import traceback
 from typing import Optional
 
 from .config import BUCKET, WC_PROVIDERS
-from .monitor import check_running_jobs
+from .monitor import check_running_jobs, reap_dead_agents
 from .providers import get_provider
 from .queue.storage import JobStorage
 from .scheduler import schedule_queued_jobs
@@ -78,6 +78,18 @@ def _run_tick(store: JobStorage, secrets: dict) -> int:
             _log(f"skip {name}: {exc!r}")
             continue
         check_running_jobs(store, provider, publisher=None)
+        # Reap orphan VMs (RUNNING in cloud, no fresh capacity broadcast,
+        # no recent completions). cloud_function/main.py already does
+        # this; the local-mac coordinator was missing it, which is why
+        # 37 broken-startup-script VMs accumulated for 24h on
+        # 2026-05-09 -> 2026-05-10. With this call, dead agents and
+        # never-worked VMs get auto-deleted on every tick (60s).
+        try:
+            reaped = reap_dead_agents(store, provider, kind=name)
+            if reaped:
+                _log(f"{name}: reaped {reaped} dead-agent VM(s)")
+        except Exception as exc:
+            _log(f"{name}: reap_dead_agents failed: {exc!r}")
         total += schedule_queued_jobs(store, provider, name, secrets)
     return total
 
