@@ -1,0 +1,11 @@
+[Unit]
+Description=Wisent host health beacon (one-shot)
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/home/ubuntu/.config/gcloud/legacy_credentials/wisent-compute-sa@wisent-480400.iam.gserviceaccount.com/adc.json
+Environment=GOOGLE_CLOUD_PROJECT=wisent-480400
+ExecStart=/usr/bin/bash /home/ubuntu/wisent-compute-deploy/deploy/host_health_beacon.sh
