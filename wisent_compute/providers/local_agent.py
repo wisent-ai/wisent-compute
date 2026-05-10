@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -216,6 +217,19 @@ def _no_eligible_in_queue(store: JobStorage, gpu_type: str, total_vram_gb: int,
     return True
 
 
+
+def _staging_size_gb(d: str) -> float:
+    """Total size of files under d in GB. 0 if dir missing."""
+    import os as _o
+    if not _o.path.isdir(d): return 0.0
+    total = 0
+    for root, _, files in _o.walk(d):
+        for f in files:
+            try: total += _o.path.getsize(_o.path.join(root, f))
+            except OSError: pass
+    return total / (1024**3)
+
+
 def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "local"):
     """Main agent loop. Polls queue, runs jobs when Vast.ai is idle.
 
@@ -238,6 +252,42 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
 
+    # Reap orphan /tmp/wisent_act_* dirs at agent startup. Job subprocesses
+    # rmtree their workdir on clean exit; if the agent is killed mid-job the
+    # workdir leaks. /tmp on the workstation is tmpfs (62 GB cap) — one
+    # leaked 43 GB workdir on 2026-05-07 filled it 100% and caused 700+
+    # ENOSPC failures in 17 hours. BEFORE rmtree-ing, tar the workdir and
+    # upload to gs://<bucket>/orphans/<hostname>/<dirname>.tar.gz so the
+    # operator has crash evidence in GCS for postmortem.
+    import glob, shutil, os as _os, tarfile, tempfile, socket
+    _hn = socket.gethostname()
+    try:
+        _orphan_store = JobStorage(BUCKET)  # JobStorage already imported at top
+    except Exception:
+        _orphan_store = None
+    for _d in glob.glob("/tmp/wisent_act_*"):
+        try:
+            _pid = int(_d.rsplit("_pid", 1)[-1].split("_")[0])
+        except (ValueError, IndexError):
+            continue
+        try:
+            _os.kill(_pid, 0)
+        except OSError:
+            try:
+                if _orphan_store is not None and getattr(_orphan_store, "_sdk_bucket", None) is not None:
+                    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as _tmp:
+                        _tar_path = _tmp.name
+                    with tarfile.open(_tar_path, "w:gz") as _tar:
+                        _tar.add(_d, arcname=_os.path.basename(_d))
+                    _key = f"orphans/{_hn}/{_os.path.basename(_d)}.tar.gz"
+                    _orphan_store._sdk_bucket.blob(_key).upload_from_filename(_tar_path)
+                    _os.unlink(_tar_path)
+                    _log(f"archived orphan {_d} -> gs://{BUCKET}/{_key}")
+            except Exception as _e:
+                _log(f"failed to archive orphan {_d}: {_e}")
+            shutil.rmtree(_d, ignore_errors=True)
+            _log(f"reaped orphan workdir {_d} (pid {_pid} dead)")
+
     initial_env: dict[str, str] = dict(os.environ)
     initial_gpu = gpu_type
 
@@ -246,8 +296,29 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     consumer_id = f"{kind}-{hostname}"
     slots: list[dict] = []
     agent_diag: dict = {}
+    fleet_staging = os.environ.get("WISENT_FLEET_STAGING_DIR", "/tmp/wisent_fleet_staging")
+    last_fleet_flush = time.time()
+    FLEET_FLUSH_INTERVAL = 180  # 3-rotation cadence: 1 HF commit per 3-rotation per agent
+                                # = ~20 commits/hour/agent << 200/hour HF cap
 
     while True:
+        # Periodic batched flush of accumulated activation shards across
+        # ALL completed jobs on this agent. flush_staging_dir uploads the
+        # entire dir as ONE HF commit (api.upload_folder = single commit).
+        # Triggered every FLEET_FLUSH_INTERVAL seconds OR when staging dir
+        # exceeds 5 GB (back-pressure to avoid /tmp fill).
+        if time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL or _staging_size_gb(fleet_staging) > 5:
+            try:
+                from wisent.core.reading.modules.utilities.data.sources.hf.hf_writers import flush_staging_dir
+                if os.path.isdir(fleet_staging) and any(os.scandir(fleet_staging)):
+                    flush_staging_dir(fleet_staging)
+                    import shutil as _sh
+                    _sh.rmtree(fleet_staging, ignore_errors=True)
+                    os.makedirs(fleet_staging, exist_ok=True)
+                    _log(f"flushed fleet staging dir to HF (1 commit)")
+            except Exception as _e:
+                _log(f"fleet staging flush failed: {_e}")
+            last_fleet_flush = time.time()
         t = lookup_self(hostname, source="auto")
         if t and t.kind == "local":
             registry_env = t.env_overrides or {}
@@ -267,9 +338,14 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if t.vram_gb and int(t.vram_gb) != total_vram_gb:
                 _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
                 total_vram_gb = int(t.vram_gb)
-
+        # Advance slots BEFORE drift check so a drained slots list triggers
+        # the in-process upgrade. Earlier the drift continue ran BEFORE
+        # advance_slot, leaving slots full forever.
         vast_active = _vast_has_renter()
         slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
+        from .local.version_check import maybe_drain_or_upgrade as _drain
+        if _drain(slots, _log):
+            time.sleep(POLL_INTERVAL); continue
         if vast_active:
             publish_capacity(store, consumer_id, kind, {}, free_vram_gb=0,
                              total_vram_gb=total_vram_gb, diag=dict(agent_diag))
@@ -290,6 +366,23 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         smi_free = _smi_free_vram_gb()
         if smi_free >= 0 and smi_free < free_vram_gb:
             free_vram_gb = smi_free
+        # Disk-space gate. The agents pip-install + repo-clone + checkpoint
+        # save each need tens of GB of free disk; when $HOME has < 30 GB free
+        # every claimed job dies at install with ENOSPC before any work runs.
+        # Refusing slots in that state lets jobs queue for a healthy agent.
+        try:
+            import shutil as _shutil
+            _free_disk_gb = _shutil.disk_usage(os.path.expanduser("~")).free / (1024 ** 3)
+        except Exception:
+            _free_disk_gb = -1.0
+        agent_diag["free_disk_gb"] = round(_free_disk_gb, 1)
+        if 0 <= _free_disk_gb < 30:
+            _log(f"disk low (~{_free_disk_gb:.1f} GB free in $HOME); refusing slots this tick")
+            publish_capacity(store, consumer_id, kind, {},
+                             free_vram_gb=0, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
+            time.sleep(10)
+            continue
+        free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
         publish_capacity(store, consumer_id, kind, free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
@@ -322,6 +415,18 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             need = max(int(getattr(job, "gpu_mem_gb", 0) or 0), estimate_gpu_memory(getattr(job, "command", "") or ""))  # live estimator
             if need > free_vram_gb:
                 diag_vram_rejected += 1
+                continue
+            # Pre-flight /tmp disk check: a job at need GiB needs roughly that
+            # much in workdir scratch (model load + safetensors). Refuse claim
+            # if /tmp free < 2x need to avoid the ENOSPC cascade that hit the
+            # workstation overnight (700+ failures from one filled tmpfs).
+            try:
+                _tmp_free_gb = shutil.disk_usage("/tmp").free / (1024**3)
+            except Exception:
+                _tmp_free_gb = 9999
+            if _tmp_free_gb < 2 * need:
+                diag_vram_rejected += 1
+                _log(f"refuse {job.job_id}: /tmp free={_tmp_free_gb:.1f}G < 2*need={2*need}G")
                 continue
             if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind):
                 diag_eligibility_rejected += 1
