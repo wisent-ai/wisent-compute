@@ -90,6 +90,18 @@ fi
 
 mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents"
 
+# Read HF_TOKEN from the same on-box file the hf-refresh plist uses,
+# so the coordinator's `secrets` dict can fill the ${HF_TOKEN}
+# placeholder in startup_gpu_agent.sh. Without this every dispatched
+# VM crashes on `set -u` line 50 unbound-variable and sits idle (the
+# 37-orphan accumulation we just cleaned up on 2026-05-10).
+COORD_HF_TOKEN_FILE="$HOME/.config/wisent/hf_token"
+COORD_HF_TOKEN=""
+[ -r "$COORD_HF_TOKEN_FILE" ] && COORD_HF_TOKEN=$(cat "$COORD_HF_TOKEN_FILE")
+if [ -z "$COORD_HF_TOKEN" ]; then
+    echo "WARN: $COORD_HF_TOKEN_FILE missing or empty — coordinator will dispatch VMs that fail their startup script" >&2
+fi
+
 # Compose the LaunchAgent plist. KeepAlive on Crashed=true so the daemon
 # self-revives if it dies; SuccessfulExit=false means a clean exit (e.g.
 # launchctl bootout) will not respawn it.
@@ -119,6 +131,10 @@ cat > "$PLIST" <<PLISTEOF
         <string>${HOME}</string>
         <key>PATH</key>
         <string>${GCLOUD_BIN_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${VENV}/bin</string>
+        <key>HF_TOKEN</key>
+        <string>${COORD_HF_TOKEN}</string>
+        <key>HUGGING_FACE_HUB_TOKEN</key>
+        <string>${COORD_HF_TOKEN}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -140,6 +156,7 @@ cat > "$PLIST" <<PLISTEOF
 </dict>
 </plist>
 PLISTEOF
+chmod 600 "$PLIST"
 
 GUI_DOMAIN="gui/$(id -u)"
 

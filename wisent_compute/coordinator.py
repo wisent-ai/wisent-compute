@@ -14,6 +14,7 @@ queue the agents see.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 import traceback
@@ -97,7 +98,27 @@ def run(target: Optional[str] = None, once: bool = False) -> int:
     interval = max(15, int(coord.interval_seconds))
     _log(f"coordinator '{coord.name}' runtime={coord.runtime} interval={interval}s state={coord.state_uri}")
 
+    # Populate the secrets dict that dispatch_agent_vms uses to fill
+    # ${KEY} placeholders in startup_gpu_agent.sh. Without this, the
+    # rendered script keeps a literal ${HF_TOKEN}; with `set -u` at the
+    # top of the template, line 50 (`export HF_TOKEN="${HF_TOKEN}"`)
+    # crashes on unbound variable, the agent never starts, and the VM
+    # sits idle until manually deleted. We saw 37 such orphan VMs
+    # accumulate over ~24h on 2026-05-09 -> 2026-05-10 because secrets
+    # had been an empty dict here forever.
     secrets: dict = {}
+    for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            secrets[key] = val
+    if "HF_TOKEN" in secrets and "HUGGING_FACE_HUB_TOKEN" not in secrets:
+        secrets["HUGGING_FACE_HUB_TOKEN"] = secrets["HF_TOKEN"]
+    if not secrets.get("HF_TOKEN"):
+        _log(
+            "WARN: HF_TOKEN not in coordinator env; dispatched VMs will "
+            "fail their startup script on `set -u` line 50. Set HF_TOKEN "
+            "in the LaunchAgent's EnvironmentVariables and reload."
+        )
     while True:
         try:
             n = _run_tick(store, secrets)
