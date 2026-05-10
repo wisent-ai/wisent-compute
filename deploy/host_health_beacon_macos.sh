@@ -17,16 +17,13 @@ PROJECT="wisent-480400"
 BUCKET="wisent-compute"
 HOST_SLUG=$(/bin/hostname -s 2>/dev/null | /usr/bin/tr '[:upper:]' '[:lower:]')
 ADC_PATH="${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/application_default_credentials.json}"
-
-# Discover gcloud (homebrew Cask path on macOS).
-GCLOUD_BIN=""
-for cand in /opt/homebrew/share/google-cloud-sdk/bin/gcloud \
-            /usr/local/share/google-cloud-sdk/bin/gcloud \
-            /opt/homebrew/bin/gcloud /usr/local/bin/gcloud \
-            "$(/usr/bin/which gcloud 2>/dev/null)"; do
-    if [ -n "$cand" ] && [ -x "$cand" ]; then GCLOUD_BIN="$cand"; break; fi
-done
-[ -z "$GCLOUD_BIN" ] && exit 1
+# The macOS gcloud CLI tries to write OAuth tokens to the user keychain
+# and crashes from non-interactive launchd contexts with
+# errSecInteractionNotAllowed (-25308). Use the wisent-compute venv's
+# google-cloud-storage Python client directly (it honors ADC via
+# $GOOGLE_APPLICATION_CREDENTIALS without going through keychain).
+VENV_PY="${WC_VENV_PYTHON:-$HOME/.venvs/wisent-compute/bin/python}"
+[ -x "$VENV_PY" ] || exit 1
 
 reported_at=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -88,6 +85,12 @@ cat > "$tmpfile" <<EOF
 EOF
 
 GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" \
-    "$GCLOUD_BIN" --quiet --project="$PROJECT" storage cp \
-    "$tmpfile" "gs://$BUCKET/host_health/${HOST_SLUG}.json" >/dev/null 2>&1
+    "$VENV_PY" - "$tmpfile" "$BUCKET" "host_health/${HOST_SLUG}.json" "$PROJECT" <<'PYEOF' >/dev/null 2>&1
+import sys
+from google.cloud import storage
+src, bucket, blob, project = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+data = open(src, "rb").read()
+client = storage.Client(project=project)
+client.bucket(bucket).blob(blob).upload_from_string(data, content_type="application/json")
+PYEOF
 /bin/rm -f "$tmpfile"
