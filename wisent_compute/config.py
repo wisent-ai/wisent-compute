@@ -215,6 +215,18 @@ def estimate_gpu_memory(command: str) -> int:
     elif re.search(r'modify-weights|optimize-weights|training', command):
         multiplier = 1.5
 
+    # GRPO / RL training memory profile is much heavier than inference or
+    # activation extraction: per training step the trainer holds the model
+    # (bf16 weights), the model gradients (bf16), the optimizer master state
+    # (fp32 Adam momentum + variance = 2x weights in fp32 ≈ 4x fp16 weights),
+    # the reference-model log-probs (another full bf16 forward), AND a KV
+    # cache for num_generations × batch_size rollout sequences during the
+    # reward computation. Empirically a Llama-1B GRPO step OOMs at ~14 GB
+    # on T4. Use 6x weights + 12 GB overhead for any train.train invocation
+    # so 1B routes to the 40 GB A100 tier and 7B+ routes to 80 GB A100.
+    if re.search(r'(^|\s|-m\s+)train\.train\b', command):
+        return round(weights_gb * 6 + 12)
+
     return round((weights_gb + kv_gb + overhead_gb) * multiplier)
 
 
