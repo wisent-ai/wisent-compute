@@ -125,13 +125,40 @@ def run(target: Optional[str] = None, once: bool = False) -> int:
             secrets[key] = val
     if "HF_TOKEN" in secrets and "HUGGING_FACE_HUB_TOKEN" not in secrets:
         secrets["HUGGING_FACE_HUB_TOKEN"] = secrets["HF_TOKEN"]
+    # Supabase Management API token goes to a distinct placeholder
+    # (WC_SUPABASE_TOKEN) so the startup template can use bash empty-
+    # default expansion without conflicting with python's literal-string
+    # substitution. dispatched VMs export SUPABASE_ACCESS_TOKEN in their
+    # env when this is populated.
+    supa = os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip()
+    if supa:
+        secrets["WC_SUPABASE_TOKEN"] = supa
     if not secrets.get("HF_TOKEN"):
         _log(
             "WARN: HF_TOKEN not in coordinator env; dispatched VMs will "
             "fail their startup script on `set -u` line 50. Set HF_TOKEN "
             "in the LaunchAgent's EnvironmentVariables and reload."
         )
+    # Drift-detect + in-process pip-upgrade-and-exec for the coordinator
+    # itself. Agents already have this via version_check.maybe_drain_or_upgrade
+    # but the coordinator had no such loop, so new wisent-compute releases
+    # never reached the running mac-mini coordinator without manual
+    # LaunchAgent restart. Now: each tick, check PyPI versions; if drift
+    # detected, pip install --upgrade and os.execv into the freshly
+    # installed entry point. No systemd dependency.
+    from .providers.local.version_check import detect_drift, pip_upgrade_and_exec
     while True:
+        try:
+            drift = detect_drift()
+        except Exception as exc:
+            _log(f"drift check failed: {exc!r}")
+            drift = {}
+        if drift:
+            _log(f"coordinator drift detected {drift}; pip_upgrade_and_exec")
+            try:
+                pip_upgrade_and_exec(_log)
+            except Exception as exc:
+                _log(f"coordinator upgrade failed: {exc!r}")
         try:
             n = _run_tick(store, secrets)
             _log(f"tick scheduled={n}")

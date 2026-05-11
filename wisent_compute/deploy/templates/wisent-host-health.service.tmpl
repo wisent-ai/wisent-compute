@@ -10,4 +10,5 @@ Environment=PATH={PATH}
 Environment=GOOGLE_APPLICATION_CREDENTIALS={ADC_PATH}
 Environment=GOOGLE_CLOUD_PROJECT={GCP_PROJECT}
 Environment=WC_HEALTH_UNITS=wisent-agent.service
+ExecStartPre=-/bin/sh -c 'BEACON=$(/usr/bin/python3 -c "import wisent_compute, os; print(os.path.join(os.path.dirname(wisent_compute.__file__), \"deploy\", \"host_health_beacon.sh\"))" 2>/dev/null); [ -n "$BEACON" ] && [ -f "$BEACON" ] && /bin/cp "$BEACON" {HOME}/host_health_beacon.sh || true'
 ExecStart=/bin/bash {HOME}/host_health_beacon.sh

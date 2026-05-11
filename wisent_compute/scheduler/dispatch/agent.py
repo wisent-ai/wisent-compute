@@ -137,7 +137,44 @@ def dispatch_agent_vms(
             )
             if ref is None:
                 log_fn(f"Agent VM create failed accel={accel} machine={mt}")
-                continue
+                # Stockout-aware escalation: when create_instance returns
+                # None (zone STOCKOUTs across all configured zones for
+                # this accel), try the next-larger tier from GPU_SIZING.
+                # The job is larger than needed but routes around the
+                # capacity shortage. The same VM tier returns on next
+                # tick if the operator hasn't manually re-routed.
+                from ...models import GPU_SIZING
+                from ...config import lookup_instance_type
+                pmem = int(getattr(biggest, "gpu_mem_gb", 0) or 0)
+                sizing = GPU_SIZING.get(provider_name, {})
+                larger_tiers = sorted([m for m in sizing.keys() if m > pmem])
+                escalated = False
+                for next_mem in larger_tiers:
+                    next_mt, next_accel = sizing[next_mem]
+                    if next_accel == accel and next_mt == mt:
+                        continue
+                    if available.get(next_accel, 0) <= 0:
+                        continue
+                    log_fn(
+                        f"escalating {accel}/{mt} -> {next_accel}/{next_mt} "
+                        f"(stockout on {accel}, next tier mem={next_mem})"
+                    )
+                    ref = provider.create_instance(
+                        name=instance_name,
+                        machine_type=next_mt,
+                        accel_type=next_accel,
+                        boot_disk_gb=biggest.boot_disk_gb,
+                        image=biggest.image,
+                        image_project=biggest.image_project,
+                        startup_script=script,
+                        preemptible=preemptible_for_call,
+                    )
+                    if ref is not None:
+                        accel = next_accel
+                        escalated = True
+                        break
+                if not escalated:
+                    continue
             available[accel] = available.get(accel, 0) - 1
             accel_dispatched[accel] = accel_dispatched.get(accel, 0) + 1
             scheduled += 1

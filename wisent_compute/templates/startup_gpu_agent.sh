@@ -29,7 +29,7 @@ if [ ! -x /opt/wisent-agent/.venv/bin/wc ]; then
     pip install --upgrade wisent-compute wisent wisent-extractors wisent-evaluators wisent-tools \
         lm-eval optuna matplotlib word2number evaluate
     pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
-    pip install --upgrade --force-reinstall 'datasets>=3.0,<4.0' 'huggingface-hub>=0.34.0,<1.0'
+    pip install --upgrade --force-reinstall 'datasets>=2.18,<3.0' 'huggingface-hub>=0.34.0,<1.0'
     pip uninstall -y hf-xet || true
 else
     echo "wisent-agent venv already present (baked image); skipping install"
@@ -37,18 +37,29 @@ else
     source .venv/bin/activate
     # Self-update wisent-compute + wisent + wisent-tools to the latest PyPI.
     # Critical: re-pin transformers and datasets to the same versions the
-    # bake used. Without this, pip's resolver upgrades datasets to 4.x
+    # bake used. Without this, pip's resolver upgrades datasets to 3.x
     # (which dropped dataset-loading scripts) when wisent's deps loosen,
-    # then every script-loaded task (flores.py, gsm8k forks, basque_bench)
-    # crashes with 'Dataset scripts are no longer supported'. Same for
-    # transformers 5.x's incompatible safetensors shard-name handling.
+    # then every script-loaded task (flores.py, gsm8k forks, basque_bench,
+    # Hennara/aexams) crashes with 'Dataset scripts are no longer supported'.
+    # Same for transformers 5.x's incompatible safetensors shard handling.
     pip install --upgrade wisent-compute wisent wisent-tools wisent-extractors wisent-evaluators
     pip install --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
-    pip install --force-reinstall 'datasets>=3.0,<4.0' 'huggingface-hub>=0.34.0,<1.0'
+    pip install --force-reinstall 'datasets>=2.18,<3.0' 'huggingface-hub>=0.34.0,<1.0'
 fi
 
 export HF_TOKEN="${HF_TOKEN}"
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+# Supabase Management API token so wisent-tools extract_and_upload can
+# write Activation rows to the Wisent App project after each per-strategy
+# HF upload. Without it the post-extraction supabase write step logs a
+# skip message and the activation->pair mapping stays unpopulated.
+# Coordinator-provided token. The placeholder is substituted by
+# dispatch_agent_vms when the mac-mini env has SUPABASE_ACCESS_TOKEN set
+# in the coordinator secrets dict. When unsubstituted (literal text
+# remains), bash empty-default substitution keeps it empty so set -u
+# does not crash; the post-extraction supabase write step then exits
+# early when the token is empty.
+export SUPABASE_ACCESS_TOKEN="${WC_SUPABASE_TOKEN:-}"
 export WISENT_DTYPE=auto
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1

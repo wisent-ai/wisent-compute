@@ -23,6 +23,11 @@ pip install --upgrade pip
 # subpackages so wisent.core.utils etc. won't resolve under -e installs).
 pip install --upgrade wisent wisent-extractors wisent-evaluators wisent-tools \
     lm-eval optuna matplotlib word2number evaluate
+# Re-pin datasets to <3.0 so lm-eval tasks that ship a custom loading
+# script (Hennara/aexams, flores.py, gsm8k forks, basque_bench, etc.)
+# can still be loaded — datasets 3.0 dropped loading-script support and
+# any unpinned upgrade silently breaks ~5% of the benchmark catalog.
+pip install --force-reinstall 'datasets>=2.18,<3.0' 'huggingface-hub>=0.34.0,<1.0'
 pip uninstall -y hf-xet || true
 
 # Optional source-repo clone + install. Populated by submit_job when the

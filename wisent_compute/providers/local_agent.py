@@ -330,11 +330,21 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 if str(initial_env.get(k, "")) != str(v)
             }
             if env_delta and not slots:
-                _log(f"Registry env override delta {env_delta}; exit for systemd restart")
-                raise SystemExit(0)
+                _log(f"Registry env override delta {env_delta}; pip_upgrade_and_exec for restart")
+                from .local.version_check import pip_upgrade_and_exec as _upgrade_exec
+                try:
+                    _upgrade_exec(_log)
+                except Exception as _e:
+                    _log(f"in-process re-exec failed ({_e}); falling back to SystemExit(1)")
+                    raise SystemExit(1)
             if t.gpu_type and t.gpu_type != initial_gpu and not slots:
-                _log(f"Registry gpu_type {initial_gpu} -> {t.gpu_type}; exit for restart")
-                raise SystemExit(0)
+                _log(f"Registry gpu_type {initial_gpu} -> {t.gpu_type}; pip_upgrade_and_exec for restart")
+                from .local.version_check import pip_upgrade_and_exec as _upgrade_exec
+                try:
+                    _upgrade_exec(_log)
+                except Exception as _e:
+                    _log(f"in-process re-exec failed ({_e}); falling back to SystemExit(1)")
+                    raise SystemExit(1)
             if t.vram_gb and int(t.vram_gb) != total_vram_gb:
                 _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
                 total_vram_gb = int(t.vram_gb)
@@ -366,18 +376,16 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         smi_free = _smi_free_vram_gb()
         if smi_free >= 0 and smi_free < free_vram_gb:
             free_vram_gb = smi_free
-        # Disk-space gate. The agents pip-install + repo-clone + checkpoint
-        # save each need tens of GB of free disk; when $HOME has < 30 GB free
-        # every claimed job dies at install with ENOSPC before any work runs.
-        # Refusing slots in that state lets jobs queue for a healthy agent.
-        try:
-            import shutil as _shutil
-            _free_disk_gb = _shutil.disk_usage(os.path.expanduser("~")).free / (1024 ** 3)
-        except Exception:
-            _free_disk_gb = -1.0
-        agent_diag["free_disk_gb"] = round(_free_disk_gb, 1)
-        if 0 <= _free_disk_gb < 30:
-            _log(f"disk low (~{_free_disk_gb:.1f} GB free in $HOME); refusing slots this tick")
+        # Disk-space gate. Each jobs pip-install + HF dataset download +
+        # checkpoint save accumulates in ~/.cache/huggingface/hub and
+        # never reaps. On a week-old workstation, ENOSPC kills jobs mid-
+        # pair-generation. gate_and_maybe_evict checks free-disk under
+        # $HOME, evicts the HF cache once if low (often reclaims 20+ GB),
+        # and only refuses slots if still under the threshold afterward.
+        from .local.disk import gate_and_maybe_evict as _disk_gate
+        _refuse_disk, _disk_diag = _disk_gate(_log)
+        agent_diag.update(_disk_diag)
+        if _refuse_disk:
             publish_capacity(store, consumer_id, kind, {},
                              free_vram_gb=0, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
             time.sleep(10)

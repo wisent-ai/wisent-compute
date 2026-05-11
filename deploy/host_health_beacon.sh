@@ -50,6 +50,38 @@ disk_pct="${disk_pct_str%%%}"
 # Avail in GB (rounded down).
 disk_avail_gb=$(( ${disk_avail_kb:-0} / 1024 / 1024 ))
 
+# Self-heal: when disk is 90%+ full AND the wisent-agent unit has been
+# stuck for at least one restart, evict caches before reporting. Without
+# this the agent restart-loops forever on a full disk (the workstation
+# spent 30+ hours in a 3,645-restart loop on 2026-05-09 with pip-upgrade
+# failing on a 46GB HF cache). The eviction targets are non-canonical
+# state: HF datasets/snapshots, wheel cache, wisent corrupt pair-text
+# cache. All are reproducible from the upstream source on next access.
+SELF_HEAL_DISK_PCT_THRESHOLD=90
+HOME_DIR="${HOME:-/home/ubuntu}"
+if [ "${disk_pct:-0}" -ge "$SELF_HEAL_DISK_PCT_THRESHOLD" ]; then
+    # Only run if wisent-agent is NOT actively serving (state != active).
+    primary_unit="${UNITS_TO_WATCH%%,*}"
+    if ! /usr/bin/systemctl is-active "$primary_unit" >/dev/null 2>&1; then
+        for tgt in "$HOME_DIR/.cache/huggingface/hub" \
+                   "$HOME_DIR/.cache/pip" \
+                   "$HOME_DIR/.wisent_cache" \
+                   /root/.cache/huggingface/hub \
+                   /root/.cache/pip; do
+            [ -d "$tgt" ] && /bin/rm -rf "$tgt" 2>/dev/null || true
+        done
+        # Trigger a fresh systemd restart so the agent's pip ExecStartPre
+        # runs on the now-cleaned disk.
+        /usr/bin/systemctl restart "$primary_unit" >/dev/null 2>&1 || true
+        # Re-read disk after eviction so the same beacon tick reports
+        # the post-heal state.
+        disk_line=$(/bin/df -k / 2>/dev/null | /usr/bin/awk 'NR==2 {print $3, $4, $5}')
+        read -r disk_used_kb disk_avail_kb disk_pct_str <<<"$disk_line"
+        disk_pct="${disk_pct_str%%%}"
+        disk_avail_gb=$(( ${disk_avail_kb:-0} / 1024 / 1024 ))
+    fi
+fi
+
 # systemctl unit states (one entry per UNITS_TO_WATCH item, comma-sep).
 units_json=""
 for unit in ${UNITS_TO_WATCH//,/ }; do

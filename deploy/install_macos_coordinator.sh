@@ -102,6 +102,17 @@ if [ -z "$COORD_HF_TOKEN" ]; then
     echo "WARN: $COORD_HF_TOKEN_FILE missing or empty — coordinator will dispatch VMs that fail their startup script" >&2
 fi
 
+# Read SUPABASE_ACCESS_TOKEN so dispatched VMs can write Activation rows
+# back into the Wisent App Supabase project after each per-strategy HF
+# upload. The agent path skips cleanly when this is empty, so a missing
+# file is non-fatal -- HF shards still upload.
+COORD_SUPA_TOKEN_FILE="$HOME/.config/wisent/supabase_access_token"
+COORD_SUPA_TOKEN=""
+[ -r "$COORD_SUPA_TOKEN_FILE" ] && COORD_SUPA_TOKEN=$(cat "$COORD_SUPA_TOKEN_FILE")
+if [ -z "$COORD_SUPA_TOKEN" ]; then
+    echo "INFO: $COORD_SUPA_TOKEN_FILE missing or empty -- VMs will skip supabase activation writes" >&2
+fi
+
 # Compose the LaunchAgent plist. KeepAlive on Crashed=true so the daemon
 # self-revives if it dies; SuccessfulExit=false means a clean exit (e.g.
 # launchctl bootout) will not respawn it.
@@ -135,6 +146,8 @@ cat > "$PLIST" <<PLISTEOF
         <string>${COORD_HF_TOKEN}</string>
         <key>HUGGING_FACE_HUB_TOKEN</key>
         <string>${COORD_HF_TOKEN}</string>
+        <key>SUPABASE_ACCESS_TOKEN</key>
+        <string>${COORD_SUPA_TOKEN}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

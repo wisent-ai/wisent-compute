@@ -31,7 +31,7 @@ pip install --upgrade pip
 pip install --upgrade 'wisent-compute[azure]' wisent wisent-extractors wisent-evaluators wisent-tools \
     lm-eval optuna matplotlib word2number evaluate
 pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
-pip install --upgrade --force-reinstall 'datasets>=3.0,<4.0' 'huggingface-hub>=0.34.0,<1.0'
+pip install --upgrade --force-reinstall 'datasets>=2.18,<3.0' 'huggingface-hub>=0.34.0,<1.0'
 pip uninstall -y hf-xet || true
 
 export HF_TOKEN="${HF_TOKEN}"
