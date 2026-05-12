@@ -217,15 +217,19 @@ def estimate_gpu_memory(command: str) -> int:
 
     # GRPO / RL training memory profile is much heavier than inference or
     # activation extraction: per training step the trainer holds the model
-    # (bf16 weights), the model gradients (bf16), the optimizer master state
-    # (fp32 Adam momentum + variance = 2x weights in fp32 ≈ 4x fp16 weights),
-    # the reference-model log-probs (another full bf16 forward), AND a KV
+    # (bf16 weights), the model gradients (bf16), the optimizer state
+    # (8-bit AdamW from bitsandbytes saves ~10 GB vs fp32 AdamW), the
+    # reference-model log-probs (another full bf16 forward), AND a KV
     # cache for num_generations × batch_size rollout sequences during the
-    # reward computation. Empirically a Llama-1B GRPO step OOMs at ~14 GB
-    # on T4. Use 6x weights + 12 GB overhead for any train.train invocation
-    # so 1B routes to the 40 GB A100 tier and 7B+ routes to 80 GB A100.
+    # reward computation. Tuned empirically:
+    #   1B Llama with adamw_bnb_8bit + grad-checkpoint: OOMs on T4 (15 GB),
+    #     succeeds on L4 (24 GB).
+    #   4B Qwen with same: fits in 40 GB A100 (the RTX PRO 6000 advertises
+    #     a 40 GB A100 slot; only 8 GB weights + ~25 GB rest).
+    # Formula 3x weights + 16 GB overhead lands 1B on L4 (22 GB → 24 tier),
+    # 4B on A100-40 (40 → 40 tier), 7B on A100-80 (37 → 40 or 80 tier).
     if re.search(r'(^|\s|-m\s+)train\.train\b', command):
-        return round(weights_gb * 6 + 12)
+        return round(weights_gb * 3 + 16)
 
     return round((weights_gb + kv_gb + overhead_gb) * multiplier)
 
