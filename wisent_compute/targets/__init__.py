@@ -75,19 +75,32 @@ def _from_dict(d: dict) -> ComputeTarget:
 
 
 def _load_from_gcs() -> dict | None:
-    """Best-effort GCS fetch of the canonical registry. Returns parsed JSON or None."""
+    """Best-effort GCS fetch of the canonical registry via the GCS Python SDK.
+
+    Earlier this shelled out to `gsutil cat`. On systems with a broken
+    gsutil install (e.g. cryptography/pyOpenSSL version mismatch breaking
+    `module 'OpenSSL.crypto' has no attribute 'sign'`), gsutil exits
+    non-zero with a stderr message and the agent crashes with
+    'hostname X not in registry' even though the registry IS in GCS.
+    Confirmed live on 2026-05-08: the workstation's gsutil was broken
+    after a pip upgrade, knocking the agent offline. The GCS SDK is
+    already a hard dependency (google-cloud-storage>=2.18.0); using it
+    directly removes the gsutil binary as a single point of failure.
+    """
     import time
     now = time.time()
     if _GCS_CACHE["data"] is not None and now - float(_GCS_CACHE["ts"]) < _GCS_TTL_SEC:
         return _GCS_CACHE["data"]  # type: ignore[return-value]
     try:
-        import shutil, subprocess
-        gsutil = shutil.which("gsutil") or "gsutil"
-        r = subprocess.run([gsutil, "cat", GCS_REGISTRY_URI],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
+        from google.cloud import storage as _gcs
+        # gs://wisent-compute/registry.json
+        _, rest = GCS_REGISTRY_URI.split("//", 1)
+        bucket_name, blob_name = rest.split("/", 1)
+        client = _gcs.Client()
+        blob = client.bucket(bucket_name).blob(blob_name)
+        if not blob.exists():
             return None
-        data = json.loads(r.stdout)
+        data = json.loads(blob.download_as_text())
     except Exception:
         return None
     _GCS_CACHE["ts"] = now
