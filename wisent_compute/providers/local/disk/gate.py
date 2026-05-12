@@ -21,7 +21,7 @@ import shutil
 from typing import Callable
 
 
-MIN_FREE_DISK_GB = 30
+MIN_FREE_DISK_GB = 15
 
 
 def _free_gb(path: str) -> float:
