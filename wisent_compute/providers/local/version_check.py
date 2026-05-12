@@ -143,18 +143,31 @@ def pip_upgrade_and_exec(log_fn) -> None:
     """
     import os, subprocess, sys
     log_fn(f"pip_upgrade_and_exec: starting upgrade of {_PACKAGES}")
+
+    # venv-aware --user selection. pip rejects --user inside a virtualenv
+    # with "Can not perform a '--user' install. User site-packages are not
+    # visible in this virtualenv." Detect venv via sys.prefix vs
+    # sys.base_prefix (real_prefix is legacy virtualenv); skip --user in
+    # that case so pip installs into the active venv's site-packages.
+    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    in_venv = in_venv or hasattr(sys, "real_prefix")
     pip_args = [sys.executable, "-m", "pip", "install", "--upgrade", *_PACKAGES]
-    if os.geteuid() != 0:
-        # User-mode pip: only --user when not root (root install fails with --user).
+    if os.geteuid() != 0 and not in_venv:
+        # User-mode pip: --user only when not root AND not in a venv.
         pip_args.insert(4, "--user")
     pip_args.append("--break-system-packages")
     res = subprocess.run(pip_args, capture_output=True, text=True)
+    # First-failure self-heal: if pip rejected --user (e.g. a venv detection
+    # gap), retry once WITHOUT --user. Without this hatch the coordinator
+    # gets stuck on a buggy version forever and only operator intervention
+    # can unstick it.
+    if res.returncode != 0 and "--user" in pip_args and "--user" in (res.stderr or ""):
+        log_fn("pip_upgrade_and_exec: --user rejected; retrying without it")
+        pip_args.remove("--user")
+        res = subprocess.run(pip_args, capture_output=True, text=True)
     if res.returncode != 0:
         log_fn(f"pip_upgrade_and_exec: pip install failed rc={res.returncode} "
                f"stderr={(res.stderr or '')[:300]}")
-        # Don't exec into the broken venv; surface failure so caller decides.
         raise RuntimeError(f"pip upgrade failed: rc={res.returncode}")
     log_fn(f"pip_upgrade_and_exec: pip install ok; re-execing {sys.argv}")
-    # Replace this process with the same entrypoint. The next instance picks
-    # up the just-installed code without involving systemd at all.
     os.execv(sys.executable, [sys.executable, *sys.argv])
