@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from ..config import HEARTBEAT_STALE_MINUTES, ALERTS_TOPIC
+from ..config import ALERTS_TOPIC
 from ..models import Job, JobState
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
@@ -61,52 +61,14 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
             _log(f"{job_id}: FAILED")
 
         else:
-            # Workstation/local consumers don't live in GCP. instance_ref of
-            # the form "local@<hostname>" can't be probed by provider.instance_exists,
-            # so fall back to heartbeat-only freshness for them. Without this
-            # the monitor requeued every workstation job within a single tick
-            # (alive=False because the GCP lookup of "local" fails), pulling
-            # b19b18b4 out of running/ ~58s after the workstation claimed it.
             if (ref or "").startswith("local@"):
-                # Workstation liveness: prefer the local agent's CAPACITY
-                # BROADCAST over the per-job heartbeat blob. The local agent
-                # publishes capacity every ~10s of loop iteration via the
-                # GCS SDK directly; if that broadcast is fresh the agent is
-                # alive and so are all of its slots. Earlier code required a
-                # per-job `status/<id>/heartbeat` blob to be fresh too, but
-                # the workstation's `_write_heartbeat` used a fire-and-forget
-                # subprocess gsutil with `capture_output=True` — failures
-                # were silently swallowed and the heartbeat blob was never
-                # written, causing the monitor to requeue the workstation's
-                # running jobs every time the heartbeat-stale window elapsed.
-                # The capacity-broadcast check is read from the same path
-                # the dashboard uses (`read_consumer_capacity`) and depends
-                # on the SDK's blob.upload_from_string which raises rather
-                # than swallows. Confirmed live on 2026-05-06: 0.4.51 had
-                # 11+ "stale heartbeat (local consumer)" requeues per hour
-                # against running workstation jobs that were healthy.
                 hostname = ref[len("local@"):]
                 if _live_consumers_cache is None:
                     from ..queue.capacity import read_consumer_capacity
                     _live_consumers_cache = read_consumer_capacity(store)
-                # Cloud agents (wisent-agent-*) hardcode instance_ref="local@<vmname>"
-                # in slots.py:start_slot but broadcast as `<kind>-<vmname>` where
-                # <kind> matches the provider (gcp/azure/aws). Workstation
-                # broadcasts as `local-<hostname>`. Check every supported prefix
-                # so a fresh capacity from any provider counts as agent-alive.
                 if any(f"{prefix}-{hostname}" in _live_consumers_cache
                        for prefix in ("local", "gcp", "azure", "aws")):
                     continue
-                # Fresh broadcast missing — the agent itself is dead. For
-                # cloud-agent VMs (hostname matches the wisent-agent-* mint
-                # pattern) this is almost always Spot preemption: the VM
-                # was deleted by GCE under instance_termination_action=DELETE,
-                # the agent process went with it, and the broadcast went
-                # stale. Treat that case as a Spot preemption (preempt_count
-                # bump, no restart-budget burn) so the job doesn't tip over
-                # max_restarts after a few preemptions. Cross-check by
-                # consulting the live RUNNING ref list — if the name isn't
-                # there, the VM is gone.
                 is_cloud_agent_name = hostname.startswith("wisent-agent-")
                 if is_cloud_agent_name:
                     if _running_vm_names_cache is None:
@@ -114,26 +76,22 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                             r.split("@", 1)[0]
                             for r, _ in provider.list_running_instance_refs_with_age()
                         }
-                    if hostname not in _running_vm_names_cache and getattr(job, "preemptible", False):
-                        _requeue_preempted(store, job, "Spot preempted (cloud agent gone)")
+                    if hostname not in _running_vm_names_cache:
+                        if getattr(job, "preemptible", False):
+                            _requeue_preempted(store, job, "Spot preempted (cloud agent gone)")
+                        else:
+                            _requeue(store, job, "VM gone (cloud agent missing from fleet)")
                         continue
-                stale = store.heartbeat_stale(job_id, HEARTBEAT_STALE_MINUTES)
-                if stale:
-                    _requeue(store, job, "stale heartbeat (local consumer dead)")
                 continue
 
             alive = provider.instance_exists(ref)
             lifecycle = provider.instance_lifecycle_state(ref)
-            stale = store.heartbeat_stale(job_id, HEARTBEAT_STALE_MINUTES)
 
             if not alive and lifecycle == "TERMINATED" and getattr(job, "preemptible", False):
                 _requeue_preempted(store, job, "Spot preempted")
                 provider.delete_instance(ref)
             elif not alive:
                 _requeue(store, job, f"instance gone (lifecycle={lifecycle})")
-                provider.delete_instance(ref)
-            elif stale:
-                _requeue(store, job, "stale heartbeat")
                 provider.delete_instance(ref)
 
 
@@ -249,6 +207,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
                 f"no fresh job heartbeat either)"
             )
             deleted += 1
+            _requeue_jids_after_reap(store, _jids, f"VM reaped (dead agent, age={age_seconds:.0f}s)")
             continue
         if (age_seconds > IDLE_GRACE_SECONDS
                 and instance_ref not in completed_refs
@@ -260,6 +219,8 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
                 f"> grace {IDLE_GRACE_SECONDS}s)"
             )
             deleted += 1
+            _jids = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
+            _requeue_jids_after_reap(store, _jids, "VM reaped (never-worked)")
     if deleted:
         _log(f"reap_dead_agents: deleted {deleted} VM(s)")
     return deleted
@@ -277,6 +238,24 @@ def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set
     except Exception:
         pass
     return refs
+
+
+def _requeue_jids_after_reap(store: JobStorage, jids, reason: str):
+    if not jids:
+        return
+    try:
+        running = {j.job_id: j for j in store.list_jobs("running")}
+    except Exception as e:
+        _log(f"requeue-after-reap: list_jobs failed: {e}")
+        return
+    for jid in jids:
+        job = running.get(jid)
+        if job is None:
+            continue
+        try:
+            _requeue(store, job, reason)
+        except Exception as e:
+            _log(f"requeue-after-reap {jid} failed: {e}")
 
 
 def _requeue_preempted(store: JobStorage, job: Job, reason: str):
