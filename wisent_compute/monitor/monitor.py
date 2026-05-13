@@ -168,13 +168,10 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     # storm.
     active_refs: set = set()
     if needs_completions_scan:
-        try:
-            for j in store.list_jobs("running"):
-                r = getattr(j, "instance_ref", None)
-                if r:
-                    active_refs.add(r)
-        except Exception:
-            pass
+        for j in store.list_jobs("running"):
+            r = getattr(j, "instance_ref", None)
+            if r:
+                active_refs.add(r)
     # Second signal: per-job heartbeat. Defers the reap when the agent's
     # capacity blob is stale BUT a running job assigned to its VM still
     # has a fresh heartbeat — agent is alive, just starved on its
@@ -230,32 +227,22 @@ def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set
     """Return set of instance_ref strings that appear in the completed/ bucket.
     Used to detect VMs that broadcast capacity but never finish a job."""
     refs = set()
-    try:
-        for j in store.list_jobs("completed"):
-            r = getattr(j, "instance_ref", None)
-            if r:
-                refs.add(r)
-    except Exception:
-        pass
+    for j in store.list_jobs("completed"):
+        r = getattr(j, "instance_ref", None)
+        if r:
+            refs.add(r)
     return refs
 
 
 def _requeue_jids_after_reap(store: JobStorage, jids, reason: str):
     if not jids:
         return
-    try:
-        running = {j.job_id: j for j in store.list_jobs("running")}
-    except Exception as e:
-        _log(f"requeue-after-reap: list_jobs failed: {e}")
-        return
+    running = {j.job_id: j for j in store.list_jobs("running")}
     for jid in jids:
         job = running.get(jid)
         if job is None:
             continue
-        try:
-            _requeue(store, job, reason)
-        except Exception as e:
-            _log(f"requeue-after-reap {jid} failed: {e}")
+        _requeue(store, job, reason)
 
 
 def _requeue_preempted(store: JobStorage, job: Job, reason: str):

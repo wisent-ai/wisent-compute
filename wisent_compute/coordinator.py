@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import sys
 import time
-import traceback
 from typing import Optional
 
 from .config import BUCKET, WC_PROVIDERS
@@ -87,32 +86,16 @@ def _run_tick(store: JobStorage, secrets: dict) -> int:
     empty) is logged and skipped so a misconfigured provider never blocks
     the primary one.
     """
-    try:
-        n_assigned = _assign_jobs_to_agents(store)
-        if n_assigned:
-            _log(f"assignment: matched {n_assigned} queued jobs to agents")
-    except Exception as exc:
-        _log(f"assignment failed: {exc!r}")
+    n_assigned = _assign_jobs_to_agents(store)
+    if n_assigned:
+        _log(f"assignment: matched {n_assigned} queued jobs to agents")
     total = 0
     for name in WC_PROVIDERS:
-        try:
-            provider = get_provider(name)
-        except Exception as exc:
-            _log(f"skip {name}: {exc!r}")
-            continue
+        provider = get_provider(name)
         check_running_jobs(store, provider, publisher=None)
-        # Reap orphan VMs (RUNNING in cloud, no fresh capacity broadcast,
-        # no recent completions). cloud_function/main.py already does
-        # this; the local-mac coordinator was missing it, which is why
-        # 37 broken-startup-script VMs accumulated for 24h on
-        # 2026-05-09 -> 2026-05-10. With this call, dead agents and
-        # never-worked VMs get auto-deleted on every tick (60s).
-        try:
-            reaped = reap_dead_agents(store, provider, kind=name)
-            if reaped:
-                _log(f"{name}: reaped {reaped} dead-agent VM(s)")
-        except Exception as exc:
-            _log(f"{name}: reap_dead_agents failed: {exc!r}")
+        reaped = reap_dead_agents(store, provider, kind=name)
+        if reaped:
+            _log(f"{name}: reaped {reaped} dead-agent VM(s)")
         total += schedule_queued_jobs(store, provider, name, secrets)
     return total
 
@@ -171,23 +154,12 @@ def run(target: Optional[str] = None, once: bool = False) -> int:
     # installed entry point. No systemd dependency.
     from .providers.local.version_check import detect_drift, pip_upgrade_and_exec
     while True:
-        try:
-            drift = detect_drift()
-        except Exception as exc:
-            _log(f"drift check failed: {exc!r}")
-            drift = {}
+        drift = detect_drift()
         if drift:
             _log(f"coordinator drift detected {drift}; pip_upgrade_and_exec")
-            try:
-                pip_upgrade_and_exec(_log)
-            except Exception as exc:
-                _log(f"coordinator upgrade failed: {exc!r}")
-        try:
-            n = _run_tick(store, secrets)
-            _log(f"tick scheduled={n}")
-        except Exception as exc:
-            _log(f"tick failed: {exc!r}")
-            _log(traceback.format_exc())
+            pip_upgrade_and_exec(_log)
+        n = _run_tick(store, secrets)
+        _log(f"tick scheduled={n}")
         if once:
             return 0
         time.sleep(interval)
