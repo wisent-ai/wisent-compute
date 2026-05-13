@@ -59,17 +59,40 @@ def _bucket_from_state_uri(state_uri: str) -> str:
     return state_uri
 
 
+def _assign_jobs_to_agents(store: JobStorage) -> int:
+    """Centralized makespan-minimizing matcher. Runs every coordinator tick.
+
+    Body lives in scheduler/makespan: estimates per-job runtime from
+    completed-job history (TTL-cached), seeds each live agent's
+    projection with its in-flight running/ jobs, then assigns each
+    queued job (sorted longest-runtime-first within priority) to the
+    eligible agent that will finish it earliest under a VRAM-
+    concurrency model. Writes assigned_to back to the queue blob; the
+    agent side (providers/local/helpers/_job_eligible) refuses jobs
+    pinned to a different agent. Priority stays user-controlled — it's
+    a queue-order knob, not a fleet-routing one.
+    """
+    from .scheduler.makespan import assign_jobs
+    return assign_jobs(store, log_fn=_log)
+
+
 def _run_tick(store: JobStorage, secrets: dict) -> int:
     """One scheduling cycle across every provider in WC_PROVIDERS.
 
     Each provider gets its own check_running_jobs + schedule_queued_jobs
     pass; the queue is shared (state lives in JobStorage), so a
-    `pin_to_provider` job lands wherever its provider field points and an
+    pin_to_provider job lands wherever its provider field points and an
     unpinned job is offered to whichever provider claims first. A
     constructor failure (e.g. AzureProvider when AZURE_SUBSCRIPTION_ID is
-    empty) is logged and skipped so a misconfigured fallback provider
-    never blocks the primary one.
+    empty) is logged and skipped so a misconfigured provider never blocks
+    the primary one.
     """
+    try:
+        n_assigned = _assign_jobs_to_agents(store)
+        if n_assigned:
+            _log(f"assignment: matched {n_assigned} queued jobs to agents")
+    except Exception as exc:
+        _log(f"assignment failed: {exc!r}")
     total = 0
     for name in WC_PROVIDERS:
         try:

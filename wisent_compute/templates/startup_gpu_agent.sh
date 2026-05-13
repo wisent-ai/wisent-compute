@@ -30,7 +30,7 @@ if [ ! -x /opt/wisent-agent/.venv/bin/wc ]; then
         lm-eval optuna matplotlib word2number evaluate
     pip install --upgrade --force-reinstall 'transformers>=4.55,<5.0' 'tokenizers>=0.20,<0.22'
     pip install --upgrade --force-reinstall 'datasets>=2.18,<3.0' 'huggingface-hub>=0.34.0,<1.0'
-    pip uninstall -y hf-xet || true
+    if pip show hf-xet >/dev/null 2>&1; then pip uninstall -y hf-xet; fi
 else
     echo "wisent-agent venv already present (baked image); skipping install"
     cd /opt/wisent-agent
@@ -90,8 +90,10 @@ export HF_HUB_DISABLE_TELEMETRY=1
 export HF_HUB_ETAG_TIMEOUT=1
 
 # Pre-warm the small auxiliary models so each claimed job skips the download.
-huggingface-cli download cross-encoder/nli-deberta-v3-small || true
-huggingface-cli download sentence-transformers/all-MiniLM-L6-v2 || true
+# Hard-fail on download error: a VM that can't fetch these will fail every
+# claimed job anyway, so fail fast at startup and let the VM recycle.
+huggingface-cli download cross-encoder/nli-deberta-v3-small
+huggingface-cli download sentence-transformers/all-MiniLM-L6-v2
 
 # Run the agent. --idle-shutdown makes it exit + self-delete the VM when the
 # queue holds nothing this VM can run. No timer, no slot constant — pure
@@ -99,3 +101,21 @@ huggingface-cli download sentence-transformers/all-MiniLM-L6-v2 || true
 .venv/bin/wc agent --kind gcp --gpu-type "${ACCEL_TYPE}" --idle-shutdown
 EXIT=$?
 echo "Agent exited with $EXIT at $(date -u)"
+
+# Always recycle this VM after the agent exits, regardless of status. The
+# agent's own self_terminate() (called from the idle-shutdown path and
+# from the cloud-agent drift handler in version_check.maybe_drain_or_upgrade)
+# normally handles delete cleanly, but if the agent crashed before reaching
+# either path, the VM would stay RUNNING forever as a zombie — that's the
+# exact failure pattern that produced 1778695548-{2,3,5} on 2026-05-13:
+# capacity blob published once at boot, agent silent thereafter, VM still
+# alive. By force-deleting here we make zombification structurally
+# impossible: any path that ends the script ends the VM. The dispatcher
+# creates fresh VMs from the latest PyPI version, so this is also the
+# upgrade path for cloud agents (drift detected -> agent exits -> VM
+# deleted -> dispatcher launches fresh VM with new code).
+INSTANCE_NAME=$(curl -fs -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name)
+INSTANCE_ZONE=$(curl -fs -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}')
+echo "Force-deleting self: $INSTANCE_NAME in $INSTANCE_ZONE (exit was $EXIT)"
+gcloud compute instances delete "$INSTANCE_NAME" --zone="$INSTANCE_ZONE" --quiet &
+exit $EXIT

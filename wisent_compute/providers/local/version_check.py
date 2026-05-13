@@ -91,7 +91,7 @@ def wisent_import_ok() -> tuple[bool, str]:
     return False, (res.stderr or res.stdout or "(no output)").strip()[:400]
 
 
-def maybe_drain_or_upgrade(slots: list, log_fn) -> bool:
+def maybe_drain_or_upgrade(slots: list, log_fn, kind: str = "local") -> bool:
     """Combined drift + venv-integrity handling for the agent main loop.
     Returns True if the caller should `continue` (skip claim path); False
     if no remediation needed.
@@ -104,24 +104,40 @@ def maybe_drain_or_upgrade(slots: list, log_fn) -> bool:
          bad install and accepted+failed 5+ jobs in a row before this
          check existed).
 
-    Caller MUST advance slots BEFORE calling this so a drained slots list
-    triggers the upgrade path. The earlier inline version in local_agent.py
-    accidentally ran continue BEFORE advance_slot, leaving slots full
-    forever and the agent permanently stuck in drain mode.
+    Cloud agents (kind != "local") DO NOT pip-upgrade-and-exec on drift.
+    Reason: `pip install --upgrade` overwrites wisent_compute/*.py while
+    the running interpreter has them mapped; `os.execv` then loads a
+    half-rewritten module tree and aborts with exit 1. The cloud VM
+    stays alive but the agent is dead — exactly the failure mode that
+    produced the zombie 1778695548-{2,3,5} VMs on 2026-05-13 (capacity
+    blob published once at boot, then agent silent, VM still RUNNING).
+    Instead, cloud agents self-terminate on drift; the dispatcher will
+    create a fresh VM whose startup-script pip-installs the new version
+    BEFORE the agent starts — no in-process file race possible.
+
+    Local workstations (kind="local") still pip_upgrade_and_exec
+    because they are long-lived hardware and re-installing is the only
+    way to pick up new releases without a reboot.
+
+    Caller MUST advance slots BEFORE calling this so a drained slots
+    list triggers the remediation path.
     """
     drift = detect_drift()
     ok, err = wisent_import_ok()
     if not drift and ok:
         return False
     if not slots:
+        if kind != "local":
+            log_fn(f"cloud agent {kind} drift={drift} ok={ok}; self-terminate "
+                   f"so dispatcher creates a fresh VM with new version baked in")
+            from .gcp_self import self_terminate
+            self_terminate(log_fn)
+            raise SystemExit(0)
         if not ok:
             log_fn(f"venv broken: {err}; pip_upgrade_and_exec")
         else:
             log_fn(f"drift {drift}; pip_upgrade_and_exec")
-        try:
-            pip_upgrade_and_exec(log_fn)
-        except Exception as e:
-            log_fn(f"upgrade failed: {e}")
+        pip_upgrade_and_exec(log_fn)
     return True
 
 
@@ -157,14 +173,6 @@ def pip_upgrade_and_exec(log_fn) -> None:
         pip_args.insert(4, "--user")
     pip_args.append("--break-system-packages")
     res = subprocess.run(pip_args, capture_output=True, text=True)
-    # First-failure self-heal: if pip rejected --user (e.g. a venv detection
-    # gap), retry once WITHOUT --user. Without this hatch the coordinator
-    # gets stuck on a buggy version forever and only operator intervention
-    # can unstick it.
-    if res.returncode != 0 and "--user" in pip_args and "--user" in (res.stderr or ""):
-        log_fn("pip_upgrade_and_exec: --user rejected; retrying without it")
-        pip_args.remove("--user")
-        res = subprocess.run(pip_args, capture_output=True, text=True)
     if res.returncode != 0:
         log_fn(f"pip_upgrade_and_exec: pip install failed rc={res.returncode} "
                f"stderr={(res.stderr or '')[:300]}")

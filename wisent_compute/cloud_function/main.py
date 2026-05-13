@@ -9,6 +9,7 @@ from wisent_compute.queue.storage import JobStorage
 from wisent_compute.providers import get_provider
 from wisent_compute.monitor import check_running_jobs, reap_dead_agents
 from wisent_compute.scheduler import schedule_queued_jobs
+from wisent_compute.scheduler.makespan import assign_jobs
 
 _publisher = None
 _secrets = None
@@ -38,13 +39,24 @@ def _load_secrets():
 
 
 def monitor_jobs(request=None):
-    """Main tick: per provider in WC_PROVIDERS, check running + reap + schedule."""
+    """Main tick: assign queued jobs to agents (makespan-minimizing matcher),
+    then per provider in WC_PROVIDERS check running + reap + schedule.
+
+    The assign step writes job.assigned_to on every queue blob so the
+    agent-side _job_eligible can refuse jobs pinned to a different agent.
+    Runs FIRST so subsequent schedule_queued_jobs sees the up-to-date
+    routing decisions. Empty live-agent set is a no-op.
+    """
     global _publisher
     _log("Tick started")
 
     store = JobStorage(BUCKET)
     if _publisher is None:
         _publisher = pubsub_v1.PublisherClient()
+
+    n_assigned = assign_jobs(store, log_fn=_log)
+    if n_assigned:
+        _log(f"makespan: rewrote assigned_to on {n_assigned} queue blobs")
 
     secrets = _load_secrets()
     total_reaped = 0
