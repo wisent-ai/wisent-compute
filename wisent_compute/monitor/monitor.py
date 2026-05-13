@@ -217,6 +217,17 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
                     active_refs.add(r)
         except Exception:
             pass
+    # Second signal: per-job heartbeat. Defers the reap when the agent's
+    # capacity blob is stale BUT a running job assigned to its VM still
+    # has a fresh heartbeat — agent is alive, just starved on its
+    # broadcast tick by a training subprocess. Without this guard the
+    # reaper destroys productive VMs (Llama-1B 5k run was reaped 3 times
+    # mid-training on 2026-05-12 because rollout steps exceeded
+    # CAPACITY_STALE_SECONDS).
+    from ..queue.capacity import CAPACITY_STALE_SECONDS as _CAP_STALE
+    from .heartbeat_guard import any_job_heartbeat_fresh, build_ref_to_jids
+    _ref_to_jids = build_ref_to_jids(store)
+    _hb_threshold = 2 * _CAP_STALE
     for ref, age_seconds in refs:
         name = ref.split("@", 1)[0]
         consumer_id = f"{kind}-{name}"
@@ -224,10 +235,18 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
         if consumer_id not in live:
             if age_seconds < BOOT_GRACE_SECONDS:
                 continue  # still installing, give it time
+            _jids = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
+            if any_job_heartbeat_fresh(store, _jids, _hb_threshold):
+                _log(
+                    f"defer reap of {ref}: capacity stale "
+                    f"(age={age_seconds:.0f}s) but job heartbeat fresh for {_jids}"
+                )
+                continue
             provider.delete_instance(ref)
             _log(
                 f"reaped dead-agent VM {ref} (no fresh capacity broadcast, "
-                f"age={age_seconds:.0f}s > boot grace {BOOT_GRACE_SECONDS}s)"
+                f"age={age_seconds:.0f}s > boot grace {BOOT_GRACE_SECONDS}s, "
+                f"no fresh job heartbeat either)"
             )
             deleted += 1
             continue
