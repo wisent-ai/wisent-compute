@@ -75,10 +75,15 @@ def any_job_heartbeat_fresh(
     for jid in jids:
         if not jid:
             continue
-        text = store.read_text(f"status/{jid}/heartbeat")
+        try:
+            text = store._download_text(f"status/{jid}/heartbeat")
+        except Exception:
+            text = None
         if not text:
             continue
         ts = _parse_heartbeat_ts(text)
+        if ts is None:
+            continue
         if now - ts < threshold_seconds:
             return True
     return False
