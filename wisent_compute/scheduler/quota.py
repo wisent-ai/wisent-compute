@@ -37,17 +37,11 @@ def _fetch_quotas_gcp(project: str, regions: list[str]) -> dict[str, int]:
     regions is preserved (a regional API hiccup just omits that region's
     contribution). Uses google-cloud-compute (already a dep).
     """
-    try:
-        from google.cloud import compute_v1
-        client = compute_v1.RegionsClient()
-    except Exception:
-        return {}
+    from google.cloud import compute_v1
+    client = compute_v1.RegionsClient()
     out: dict[str, int] = {}
     for region in regions:
-        try:
-            region_obj = client.get(project=project, region=region)
-        except Exception:
-            continue
+        region_obj = client.get(project=project, region=region)
         for q in region_obj.quotas:
             accel = _GCP_METRIC_TO_ACCEL.get(q.metric)
             if accel:
@@ -68,20 +62,14 @@ def _fetch_quotas_azure(subscription: str, locations: list[str]) -> dict[str, in
     try:
         from azure.identity import DefaultAzureCredential
         from azure.mgmt.compute import ComputeManagementClient
-    except Exception:
-        return {}
+    except ImportError:
+        return {}  # Azure SDK not installed -> Azure provider disabled
     if not subscription:
         return {}
-    try:
-        client = ComputeManagementClient(DefaultAzureCredential(), subscription)
-    except Exception:
-        return {}
+    client = ComputeManagementClient(DefaultAzureCredential(), subscription)
     out: dict[str, int] = {}
     for loc in locations:
-        try:
-            usages = list(client.usage.list(loc))
-        except Exception:
-            continue
+        usages = list(client.usage.list(loc))
         for u in usages:
             family = (u.name.value if u.name else "") or ""
             accel = AZURE_QUOTA_FAMILY_TO_ACCEL.get(family)
@@ -104,9 +92,29 @@ def _fetch_quotas_azure(subscription: str, locations: list[str]) -> dict[str, in
 # get fewer concurrent VMs than this naive count predicts; the scheduler's
 # per-region create_instance failure path (QuotaExceeded) catches that.
 _AZURE_FAMILY_MIN_VCPU = {
-    "standardNCASv3Family": 4,
-    "standardNCASv4Family": 4,
-    "standardNCADSA100v4Family": 24,
+    # Legacy NC (K80/P100/V100): smallest member is NC6 / NC6s_v{2,3} at 6 vCPU.
+    "standardNCFamily": 6, "standardNCSv2Family": 6,
+    "standardNCSv3Family": 6, "standardNCPromoFamily": 6,
+    # T4 (NCasT4_v3): smallest is NC4as_T4_v3.
+    "Standard NCASv3_T4 Family": 4,
+    "standardNCASv3Family": 4, "standardNCASv4Family": 4,
+    # A10 (NCadsA10_v4): smallest is NC8ads_A10_v4.
+    "StandardNCADSA10v4Family": 8,
+    # A100-80 (NCadsA100_v4): smallest is NC24ads_A100_v4.
+    "StandardNCADSA100v4Family": 24,
+    # H100 NVL (NCadsH100_v5): smallest is NC40ads_H100_v5.
+    "StandardNCadsH100v5Family": 40, "StandardNCCads2023Family": 40,
+    # ND-class 8-GPU nodes: ND40rs_v2 / ND96* all start at 40+ vCPU.
+    "standardNDSFamily": 6, "standardNDSv2Family": 40,
+    "standardNDSv3Family": 6,
+    "standard NDAMSv4_A100Family": 96, "Standard NDASv4_A100 Family": 96,
+    "standardNDSH100v5Family": 96, "standardNDISRH200V5Family": 96,
+    "standardNDISRGB200V6NDRFamily": 96, "standardNDISRGB300V6Family": 96,
+    "standardNDISRGB300G5V6Family": 96, "standardNDISv5MI300XFamily": 96,
+    # NV (visualization).
+    "standardNVFamily": 6, "standardNVSv2Family": 6,
+    "standardNVSv3Family": 12, "standardNVSv4Family": 4,
+    "StandardNVADSA10v5Family": 6, "StandardNVadsV710v5Family": 4,
 }
 
 

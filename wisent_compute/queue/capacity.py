@@ -122,19 +122,13 @@ def read_consumer_capacity(store: JobStorage) -> dict[str, dict]:
             continue
         if raw is None:
             continue
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+        payload = json.loads(raw)
         cid = payload.get("consumer_id")
         if cid:
             out[cid] = payload
 
     for blob in stale_blobs[:200]:
-        try:
-            blob.delete()
-        except Exception:
-            pass
+        blob.delete()
     return out
 
 

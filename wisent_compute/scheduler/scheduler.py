@@ -59,10 +59,7 @@ def _backoff_due(job: Job, now_utc: datetime) -> bool:
     last = getattr(job, "last_dispatch_attempt", None)
     if not last:
         return True
-    try:
-        last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-    except ValueError:
-        return True
+    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
     return now_utc - last_dt >= timedelta(minutes=wait_minutes)
 
 
@@ -150,11 +147,7 @@ def schedule_queued_jobs(
     yield_targets: dict[str, str] = {}  # job_id -> consumer_id
     if local_vram_pool:
         from .cost import collect_completed, estimate_wall_time, wall_time_table
-        try:
-            wt_table = wall_time_table(collect_completed(store))
-        except Exception as exc:
-            _log(f"wall_time_table unavailable ({exc}); using heuristic only")
-            wt_table = {}
+        wt_table = wall_time_table(collect_completed(store))
         scored: list[tuple[float, int, Job]] = []
         for j in queued:
             need = int(getattr(j, "gpu_mem_gb", 0) or 0)
@@ -234,10 +227,11 @@ def schedule_queued_jobs(
         for key, val in secrets.items():
             script = script.replace(f"${{{key}}}", val)
         instance_name = f"{INSTANCE_PREFIX}-{job.job_id}"
-        # Spot-only policy (matches dispatch/agent.py 0.4.48). Honor
-        # job.preemptible verbatim; do NOT auto-promote to STANDARD
-        # provisioning after N preempts.
-        preemptible_for_call = bool(getattr(job, "preemptible", False))
+        # No-preemptible policy (matches dispatch/agent.py 0.4.56). Per
+        # user instruction (2026-05-06) the dispatcher does NOT use Spot
+        # /preemptible provisioning even if the job's preemptible field
+        # is True. Force STANDARD on every dispatch.
+        preemptible_for_call = False
         ref = provider.create_instance(
             name=instance_name,
             machine_type=job.machine_type,

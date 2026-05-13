@@ -91,18 +91,14 @@ def _load_from_gcs() -> dict | None:
     now = time.time()
     if _GCS_CACHE["data"] is not None and now - float(_GCS_CACHE["ts"]) < _GCS_TTL_SEC:
         return _GCS_CACHE["data"]  # type: ignore[return-value]
-    try:
-        from google.cloud import storage as _gcs
-        # gs://wisent-compute/registry.json
-        _, rest = GCS_REGISTRY_URI.split("//", 1)
-        bucket_name, blob_name = rest.split("/", 1)
-        client = _gcs.Client()
-        blob = client.bucket(bucket_name).blob(blob_name)
-        if not blob.exists():
-            return None
-        data = json.loads(blob.download_as_text())
-    except Exception:
+    from google.cloud import storage as _gcs
+    _, rest = GCS_REGISTRY_URI.split("//", 1)
+    bucket_name, blob_name = rest.split("/", 1)
+    client = _gcs.Client()
+    blob = client.bucket(bucket_name).blob(blob_name)
+    if not blob.exists():
         return None
+    data = json.loads(blob.download_as_text())
     _GCS_CACHE["ts"] = now
     _GCS_CACHE["data"] = data
     return data

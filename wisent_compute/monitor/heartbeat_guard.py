@@ -57,12 +57,9 @@ def _parse_heartbeat_ts(text: str) -> float | None:
         raw = f"{head}.{frac_digits}{tz}"
     if "+" not in raw and not raw.endswith("Z"):
         raw = raw + "+00:00"
-    try:
-        from datetime import datetime
-        dt = datetime.fromisoformat(raw)
-        return dt.timestamp()
-    except Exception:
-        return None
+    from datetime import datetime
+    dt = datetime.fromisoformat(raw)
+    return dt.timestamp()
 
 
 def any_job_heartbeat_fresh(
@@ -78,15 +75,10 @@ def any_job_heartbeat_fresh(
     for jid in jids:
         if not jid:
             continue
-        try:
-            text = store.read_text(f"status/{jid}/heartbeat")
-        except Exception:
-            text = None
+        text = store.read_text(f"status/{jid}/heartbeat")
         if not text:
             continue
         ts = _parse_heartbeat_ts(text)
-        if ts is None:
-            continue
         if now - ts < threshold_seconds:
             return True
     return False
@@ -98,10 +90,7 @@ def build_ref_to_jids(store) -> dict:
     heartbeat freshness check.
     """
     out: dict = {}
-    try:
-        running = store.list_jobs("running")
-    except Exception:
-        return out
+    running = store.list_jobs("running")
     for j in running:
         ref = getattr(j, "instance_ref", None)
         jid = getattr(j, "job_id", None)
