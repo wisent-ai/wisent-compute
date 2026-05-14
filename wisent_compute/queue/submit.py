@@ -62,16 +62,12 @@ def submit_batch(commands: list[str], **kwargs) -> int:
             submit_job(cmd, **kwargs)
         return len(commands)
     done = 0
-    errors = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(submit_job, cmd, **kwargs) for cmd in commands]
         for fut in as_completed(futures):
+            fut.result()
             done += 1
-            try:
-                fut.result()
-            except Exception:
-                errors += 1
-    return done - errors
+    return done
 
 
 def submit_job(
@@ -180,12 +176,14 @@ def _submit_via_gcs(
         "REPO_BLOCK": _render_repo_block(repo, repo_workdir, repo_extras),
     })
 
+    import platform
     submitter = os.environ.get("USER", "") or os.environ.get("LOGNAME", "")
-    try:
-        host = os.uname().nodename
-    except AttributeError:
-        host = ""
+    host = platform.node()  # cross-platform replacement for os.uname().nodename
 
+    # priority stays user-controlled. Makespan-optimization happens in
+    # the coordinator's centralized matcher (see _assign_jobs_to_agents
+    # in coordinator.py), not by mutating the priority field at submit
+    # time.
     job = Job(
         job_id=job_id,
         command=command,

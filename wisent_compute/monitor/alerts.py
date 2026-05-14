@@ -19,11 +19,8 @@ def _slack(message: str):
         return
     payload = json.dumps({"text": message}).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req)
-        _log("Slack sent")
-    except Exception as e:
-        _log(f"Slack failed: {e}")
+    urllib.request.urlopen(req)
+    _log("Slack sent")
 
 
 def _telegram(message: str):
@@ -34,11 +31,8 @@ def _telegram(message: str):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps({"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req)
-        _log("Telegram sent")
-    except Exception as e:
-        _log(f"Telegram failed: {e}")
+    urllib.request.urlopen(req)
+    _log("Telegram sent")
 
 
 def _email(subject: str, body: str):
@@ -58,21 +52,15 @@ def _email(subject: str, body: str):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     })
-    try:
-        urllib.request.urlopen(req)
-        _log("Email sent")
-    except Exception as e:
-        _log(f"Email failed: {e}")
+    urllib.request.urlopen(req)
+    _log("Email sent")
 
 
 def _pubsub(publisher, topic: str, message: str):
     if not publisher or not topic:
         return
-    try:
-        publisher.publish(topic, message.encode("utf-8"))
-        _log("Pub/Sub sent")
-    except Exception as e:
-        _log(f"Pub/Sub failed: {e}")
+    publisher.publish(topic, message.encode("utf-8"))
+    _log("Pub/Sub sent")
 
 
 def send_alert(publisher, topic: str, message: str, subject: str = ""):

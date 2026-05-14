@@ -41,20 +41,15 @@ def _parse_command(cmd: str) -> tuple[str, str]:
     return model, task
 
 
-def fetch_hf_done_prefixes() -> set[str] | None:
+def fetch_hf_done_prefixes() -> set[str]:
     """Set of unique 'activations/<safe_model>/<task>/<strategy>/' prefixes.
 
-    Returns None when the HF SDK is unreachable so the scheduler can carry on
-    without the optimisation rather than dropping into a blocking failure.
+    HF SDK is a hard dependency of wisent-compute; an HF outage crashes
+    the scheduler so the operator sees it instead of silently scheduling
+    duplicate extraction work over jobs already on HF.
     """
-    try:
-        from huggingface_hub import HfApi
-    except Exception:
-        return None
-    try:
-        files = list(HfApi().list_repo_files(repo_id=HF_REPO_ID, repo_type=HF_REPO_TYPE))
-    except Exception:
-        return None
+    from huggingface_hub import HfApi
+    files = list(HfApi().list_repo_files(repo_id=HF_REPO_ID, repo_type=HF_REPO_TYPE))
     prefixes: set[str] = set()
     for f in files:
         parts = f.split("/")
@@ -79,8 +74,7 @@ def is_job_already_done(command: str, prefixes: set[str]) -> bool:
 def filter_already_done(queued, store, now_utc, log_fn):
     """Move every queued job whose results are already on HF straight to
     completed, returning the surviving still-to-run list. log_fn receives
-    a single summary line. Errors during HF fetch are non-fatal — the
-    scheduler keeps dispatching the unfiltered queue."""
+    a single summary line."""
     from ..models import JobState
     prefixes = fetch_hf_done_prefixes()
     if not prefixes:

@@ -151,31 +151,22 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn) -> dict:
              "WISENT_FLEET_STAGING_DIR": fleet_staging},
     )
     log_fn(f"Started job {job.job_id}: {job.command[:60]}")
-    try:
-        _write_heartbeat(store, job.job_id)
-        last_hb = time.time()
-    except Exception as e:
-        # SDK upload can fail on transient auth/network. Don't crash the
-        # slot — log and let advance_slot retry on its 60s cadence. We
-        # set last_hb to 0 so the next advance_slot tick attempts a fresh
-        # write immediately rather than waiting HEARTBEAT_INTERVAL.
-        log_fn(f"Initial heartbeat write failed for {job.job_id}: {e}; will retry")
-        last_hb = 0.0
+    _write_heartbeat(store, job.job_id)
+    last_hb = time.time()
     return {"proc": proc, "job": job, "log_file": log_file,
             "last_hb": last_hb, "paused": False}
 
 
 def _tail_log(path: str, max_bytes: int = 4096) -> str:
-    """Last max_bytes of the per-job log; '' if missing/empty."""
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - max_bytes))
-            data = f.read()
-        return data.decode("utf-8", errors="replace").strip()
-    except Exception:
+    """Last max_bytes of the per-job log; '' if missing."""
+    if not Path(path).exists():
         return ""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - max_bytes))
+        data = f.read()
+    return data.decode("utf-8", errors="replace").strip()
 
 
 def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bool:
@@ -219,22 +210,14 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # command_output.log uploads. Confirmed live on 2026-05-06: 3
         # gpt-oss-20b "completions" had zero-byte logs despite the
         # subprocess running.
-        try:
-            slot["log_file"].flush()
-            slot["log_file"].close()
-        except Exception:
-            pass
+        slot["log_file"].flush()
+        slot["log_file"].close()
         status = "COMPLETED" if ret == 0 else f"FAILED exit={ret}"
         _write_status(store, job.job_id, status)
-        output_dir = f"/tmp/wc-{job.job_id}/output"
-        log_path = f"{output_dir}/command_output.log"
-        if Path(output_dir).exists():
-            try:
-                _upload_output(store, job.job_id, output_dir)
-            except Exception as e:
-                log_fn(f"output upload failed for {job.job_id}: {e}")
         state = JobState.COMPLETED if ret == 0 else JobState.FAILED
         job.state = state.value
+        output_dir = f"/tmp/wc-{job.job_id}/output"
+        log_path = f"{output_dir}/command_output.log"
         ts = datetime.now(timezone.utc).isoformat()
         if ret == 0:
             job.completed_at = ts
@@ -242,31 +225,25 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
             job.failed_at = ts
             tail = _tail_log(log_path)
             job.error = verify_err or tail or f"exit={ret} (no stdout/stderr captured)"
+        # Durable state transition FIRST so a subsequent upload failure
+        # doesn't leave the slot orphaned in running/. _upload_output now
+        # raises on real SDK errors; a missing output_dir is a normal
+        # happy-path case (job wrote nothing).
         store.move_job(job, "running", state.value)
+        if Path(output_dir).exists():
+            _upload_output(store, job.job_id, output_dir)
         # log_file already flushed+closed above before _upload_output
         log_fn(f"Job {job.job_id} {state.value}")
         return False
     now = time.time()
     if not slot["paused"] and now - slot["last_hb"] > HEARTBEAT_INTERVAL:
-        try:
-            _write_heartbeat(store, job.job_id)
-            # Stream the in-progress command_output.log to GCS on each heartbeat.
-            # Without this, a job killed mid-run leaves its log on the workstation
-            # /tmp dir and the operator has zero crash evidence in GCS — they only
-            # see the truncated `error` field. Confirmed live on 2026-05-07: 700+
-            # ENOSPC failures had no GCS log, only the agent's exit-1 stub.
-            try:
-                _log_path = f"/tmp/wc-{job.job_id}/output/command_output.log"
-                if store._sdk_bucket is not None and Path(_log_path).exists():
-                    _blob = store._sdk_bucket.blob(f"status/{job.job_id}/output/command_output.log")
-                    _blob.upload_from_filename(_log_path)
-            except Exception:
-                pass
-            slot["last_hb"] = now
-        except Exception as e:
-            # Surface the failure (was previously swallowed by gsutil
-            # capture_output=True) but keep the slot alive — the next tick
-            # will retry. Don't bump last_hb, so we retry every loop until
-            # success rather than waiting another HEARTBEAT_INTERVAL.
-            log_fn(f"Heartbeat write failed for {job.job_id}: {e}")
+        _write_heartbeat(store, job.job_id)
+        # Stream the in-progress command_output.log to GCS on each heartbeat.
+        # Without this, a job killed mid-run leaves its log on the workstation
+        # /tmp dir and the operator has zero crash evidence in GCS.
+        _log_path = f"/tmp/wc-{job.job_id}/output/command_output.log"
+        if store._sdk_bucket is not None and Path(_log_path).exists():
+            _blob = store._sdk_bucket.blob(f"status/{job.job_id}/output/command_output.log")
+            _blob.upload_from_filename(_log_path)
+        slot["last_hb"] = now
     return True

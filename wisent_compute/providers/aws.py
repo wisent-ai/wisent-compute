@@ -67,18 +67,25 @@ class AWSProvider(Provider):
         return None
 
     def delete_instance(self, instance_ref: str):
+        from botocore.exceptions import ClientError
         try:
             self.ec2.terminate_instances(InstanceIds=[instance_ref])
-        except Exception:
-            pass
+        except ClientError as exc:
+            # InvalidInstanceID.NotFound is the desired terminal state.
+            # Anything else propagates.
+            if exc.response.get("Error", {}).get("Code") != "InvalidInstanceID.NotFound":
+                raise
 
     def instance_exists(self, instance_ref: str) -> bool:
+        from botocore.exceptions import ClientError
         try:
             r = self.ec2.describe_instances(InstanceIds=[instance_ref])
-            state = r["Reservations"][0]["Instances"][0]["State"]["Name"]
-            return state in ("running", "pending")
-        except Exception:
-            return False
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "InvalidInstanceID.NotFound":
+                return False
+            raise
+        state = r["Reservations"][0]["Instances"][0]["State"]["Name"]
+        return state in ("running", "pending")
 
     def list_running_instances(self) -> dict[str, int]:
         counts = {}

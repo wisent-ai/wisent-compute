@@ -31,10 +31,7 @@ def _read_sentinel(store) -> dict:
     raw = store._download_text(_SENTINEL_PATH)
     if not raw:
         return {"cursor": "", "done": False}
-    try:
-        return json.loads(raw)
-    except Exception:
-        return {"cursor": "", "done": False}
+    return json.loads(raw)
 
 
 def _write_sentinel(store, *, cursor: str, done: bool) -> None:
@@ -78,10 +75,7 @@ def backfill_priority_markers(store, *, batch: int = BACKFILL_BATCH) -> bool:
     for body in bodies:
         if not body:
             continue
-        try:
-            job = Job.from_json(body)
-        except Exception:
-            continue
+        job = Job.from_json(body)
         if int(getattr(job, "priority", 0) or 0) <= 0:
             continue
         if job.job_id in have:

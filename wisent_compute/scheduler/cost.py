@@ -28,10 +28,7 @@ from ..queue.storage import JobStorage
 def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
         return None
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return None
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
 def _wall_seconds(job: Job) -> float | None:

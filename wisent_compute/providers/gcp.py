@@ -28,27 +28,42 @@ class GCPProvider(Provider):
         # transformers + datasets pre-installed) instead of the legacy
         # deeplearning-platform-release base, dropping boot time from
         # ~5-10 install-rotations to ~30 install-secs.
+        from google.api_core.exceptions import NotFound as _NotFound
         baked_family = "wisent-agent"
         baked_present = False
+        from google.cloud import compute_v1 as _cv1
+        images_client = _cv1.ImagesClient()
         try:
-            from google.cloud import compute_v1 as _cv1
-            images_client = _cv1.ImagesClient()
             latest = images_client.get_from_family(
                 project=self.project, family=baked_family,
             )
-            if latest and latest.name:
-                image = latest.name
-                image_project = self.project
-                baked_present = True
-        except Exception:
-            pass
+        except _NotFound:
+            # No baked image family published yet -> use the per-job image
+            # argument unchanged. Any other error propagates.
+            latest = None
+        if latest and latest.name:
+            image = latest.name
+            image_project = self.project
+            baked_present = True
         zones = MACHINE_TYPE_ZONES.get(machine_type, ZONE_ROTATION)
+        # Track regions with confirmed QUOTA_EXCEEDED this call. GCP enforces
+        # GPU quota at the regional level, so a 403 in one zone means every
+        # other zone in the same region will also fail. Without this short-
+        # circuit the loop wastes ~10 wall-seconds per zone-retry inside the
+        # 60s Cloud Function tick budget — saturated T4 quota in us-central1
+        # alone burned 30+ seconds of every tick today, causing 504s.
+        skip_regions: set[str] = set()
         for zone in zones:
+            region = "-".join(zone.split("-")[:2])
+            if region in skip_regions:
+                continue
             try:
-                # Delete any existing terminated instance with same name
+                # Delete any existing terminated instance with same name.
+                # NotFound is the desired terminal state; anything else propagates.
+                from google.api_core.exceptions import NotFound as _NotFound
                 try:
                     self.client.delete(project=self.project, zone=zone, instance=name)
-                except Exception:
+                except _NotFound:
                     pass
 
                 disk = compute_v1.AttachedDisk(
@@ -112,35 +127,43 @@ class GCPProvider(Provider):
                 _log(f"Created {name}@{zone} preemptible={preemptible}")
                 return f"{name}@{zone}"
             except Exception as e:
-                if "already exists" in str(e):
+                msg = str(e)
+                if "already exists" in msg:
                     return f"{name}@{zone}"
                 _log(f"Failed in {zone}: {e}")
+                if "QUOTA_EXCEEDED" in msg:
+                    skip_regions.add(region)
                 continue
         return None
 
     def delete_instance(self, instance_ref: str):
+        from google.api_core.exceptions import NotFound
         name, zone = instance_ref.split("@")
         try:
             self.client.delete(project=self.project, zone=zone, instance=name)
-        except Exception:
-            pass
+        except NotFound:
+            # Idempotent: already-deleted instance is the desired terminal
+            # state. Any other API error propagates so the caller sees it.
+            return
 
     def instance_exists(self, instance_ref: str) -> bool:
+        from google.api_core.exceptions import NotFound
         name, zone = instance_ref.split("@")
         try:
             inst = self.client.get(project=self.project, zone=zone, instance=name)
-            return inst.status in ("RUNNING", "STAGING", "PROVISIONING")
-        except Exception:
+        except NotFound:
             return False
+        return inst.status in ("RUNNING", "STAGING", "PROVISIONING")
 
     def instance_lifecycle_state(self, instance_ref: str) -> str | None:
         """Return raw GCE status: RUNNING/TERMINATED/STOPPED/STAGING/etc."""
+        from google.api_core.exceptions import NotFound
         name, zone = instance_ref.split("@")
         try:
             inst = self.client.get(project=self.project, zone=zone, instance=name)
-            return inst.status
-        except Exception:
+        except NotFound:
             return None
+        return inst.status
 
     def list_running_instances(self) -> dict[str, int]:
         counts = {}
@@ -188,10 +211,7 @@ class GCPProvider(Provider):
                 created = getattr(inst, "creation_timestamp", None) or ""
                 age = 0.0
                 if created:
-                    try:
-                        ct = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                        age = (now - ct).total_seconds()
-                    except Exception:
-                        age = 0.0
+                    ct = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    age = (now - ct).total_seconds()
                 out.append((f"{inst.name}@{zone}", age))
         return out
