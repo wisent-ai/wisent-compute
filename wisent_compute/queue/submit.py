@@ -83,6 +83,13 @@ def submit_job(
     repo: str = "",
     repo_workdir: str = "",
     repo_extras: str = "train",
+    gpu_type: str = "",
+    vram_gb: int = 0,
+    machine_type: str = "",
+    pre_command: str = "",
+    apt_packages: list | None = None,
+    output_uri: str = "",
+    verify_command: str = "",
 ) -> Job:
     """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
@@ -95,6 +102,9 @@ def submit_job(
         pin_to_provider=pin_to_provider,
         priority=priority,
         repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
+        gpu_type=gpu_type, vram_gb=vram_gb, machine_type=machine_type,
+        pre_command=pre_command, apt_packages=apt_packages or [],
+        output_uri=output_uri, verify_command=verify_command,
     )
 
 
@@ -151,17 +161,66 @@ def _submit_via_gcs(
     repo: str = "",
     repo_workdir: str = "",
     repo_extras: str = "train",
+    gpu_type: str = "",
+    vram_gb: int = 0,
+    machine_type: str = "",
+    pre_command: str = "",
+    apt_packages: list | None = None,
+    output_uri: str = "",
+    verify_command: str = "",
 ) -> Job:
-    """Submit directly to GCS queue (no API server needed)."""
+    """Submit directly to GCS queue (no API server needed).
+
+    Sizing precedence (each layer overrides the previous):
+      1. estimate_gpu_memory(command) — model-name regex on the command,
+         the wisent-eval default. Falls back to 0 (CPU) if nothing matches.
+      2. vram_gb argument — caller-declared VRAM requirement. Skips the
+         regex when set, picks SKU via lookup_instance_type.
+      3. gpu_type argument — caller-pinned accelerator label
+         (e.g. "nvidia-l4"). Resolves to its tier's machine_type from
+         GPU_SIZING when machine_type is not also explicit.
+      4. machine_type argument — caller-pinned GCE machine type, taken
+         verbatim. Use this for non-cataloged SKUs.
+    """
     from .storage import JobStorage
+    from ..models import GPU_SIZING
     bucket = bucket or BUCKET
     job_id = _generate_job_id()
-    gpu_mem = estimate_gpu_memory(command)
-    machine_type, accel_type = lookup_instance_type(provider, gpu_mem)
+    apt_packages = apt_packages or []
 
-    if gpu_mem == 0:
+    caller_asked_for_gpu = bool(gpu_type or vram_gb or machine_type)
+    if vram_gb > 0:
+        gpu_mem = vram_gb
+    else:
+        gpu_mem = estimate_gpu_memory(command)
+
+    if not caller_asked_for_gpu and gpu_mem == 0:
+        # CPU path — no GPU requirements, no regex hit. Same as pre-0.4.122.
         machine_type = "e2-standard-8"
         accel_type = ""
+    else:
+        inferred_machine, inferred_accel = lookup_instance_type(provider, gpu_mem)
+        accel_type = gpu_type or inferred_accel
+        if machine_type:
+            pass  # caller-pinned, take verbatim
+        elif gpu_type and not vram_gb:
+            # Caller pinned the accelerator but not the size — pick the
+            # machine_type from GPU_SIZING by matching accel label.
+            sizing = GPU_SIZING.get(provider, {})
+            match = next(
+                ((mt, mem) for mem, (mt, ac) in sizing.items() if ac == gpu_type),
+                None,
+            )
+            if match:
+                machine_type, _ = match
+                if not gpu_mem:
+                    gpu_mem = next(
+                        mem for mem, (mt, ac) in sizing.items() if ac == gpu_type
+                    )
+            else:
+                machine_type = inferred_machine
+        else:
+            machine_type = inferred_machine
 
     hf_token = os.environ.get("HF_TOKEN", "")
     gh_token = os.environ.get("GH_TOKEN", "")
@@ -202,6 +261,10 @@ def _submit_via_gcs(
         submitted_from=host,
         submitted_via="cli",
         repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
+        pre_command=pre_command,
+        apt_packages=apt_packages,
+        output_uri=output_uri,
+        verify_command=verify_command,
     )
 
     store = JobStorage(bucket)
