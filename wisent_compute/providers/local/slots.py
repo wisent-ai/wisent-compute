@@ -126,6 +126,48 @@ def _repo_prelude(job) -> str:
             f" && cd {workdir}{install} && cd .. && ")
 
 
+def _pre_command_prelude(job) -> str:
+    """Caller-declared shell snippet placed before job.command. Runs in
+    the SAME bash shell as the command (joined with `&&` so a non-zero
+    exit in the prelude fails fast), so `export FOO=bar` reaches the
+    subprocess. Returns '' when no prelude was requested."""
+    pre = (getattr(job, "pre_command", "") or "").strip()
+    if not pre:
+        return ""
+    # Strip trailing semicolons so the user's snippet composes cleanly
+    # with the `&&` join. Multi-statement preludes (`a; b; c`) still work.
+    return pre.rstrip(";").rstrip() + " && "
+
+
+def _mirror_to_output_uri(store: JobStorage, job, log_fn) -> None:
+    """Copy /tmp/wc-<job_id>/output/* to job.output_uri (e.g.
+    gs://other-bucket/path/). Additive — the canonical
+    status/<id>/output/ upload via _upload_output already ran.
+
+    Uses gsutil for cross-bucket portability (job.output_uri may point
+    at a bucket the SDK-cached client wasn't constructed for). Failures
+    are logged but do NOT reverse the COMPLETED state — the canonical
+    output is already in GCS and the caller can re-mirror manually.
+    """
+    uri = (getattr(job, "output_uri", "") or "").strip()
+    if not uri:
+        return
+    output_dir = f"/tmp/wc-{job.job_id}/output"
+    if not Path(output_dir).exists():
+        return
+    res = subprocess.run(
+        [_gsutil_bin(), "-m", "cp", "-r", f"{output_dir}/.", uri],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        log_fn(
+            f"output_uri mirror failed for {job.job_id} -> {uri}: "
+            f"rc={res.returncode} err={(res.stderr or res.stdout)[:200]}"
+        )
+    else:
+        log_fn(f"output_uri mirror ok: {job.job_id} -> {uri}")
+
+
 def start_slot(store: JobStorage, job, hostname: str, log_fn) -> dict:
     """Spawn a subprocess for `job`, register it in 'running' state, return slot."""
     work_dir = f"/tmp/wc-{job.job_id}"
@@ -136,7 +178,7 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn) -> dict:
     job.instance_ref = f"local@{hostname}"
     store.move_job(job, "queue", "running")
     log_file = open(f"{work_dir}/output/command_output.log", "w")
-    full_command = _repo_prelude(job) + job.command
+    full_command = _repo_prelude(job) + _pre_command_prelude(job) + job.command
     # WISENT_FLEET_STAGING_DIR points at a persistent agent-owned staging
     # dir. wisent's upload_extracted_activations writes shards there and
     # SKIPS the per-job flush. The agent flushes the whole dir periodically
@@ -232,6 +274,11 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         store.move_job(job, "running", state.value)
         if Path(output_dir).exists():
             _upload_output(store, job.job_id, output_dir)
+        # Mirror to job.output_uri if set. Runs for both COMPLETED and
+        # FAILED so debugging logs and partial artifacts also land at
+        # the caller's project URI. Failure here is logged, not raised
+        # — canonical status/<id>/output/ is already written.
+        _mirror_to_output_uri(store, job, log_fn)
         # log_file already flushed+closed above before _upload_output
         log_fn(f"Job {job.job_id} {state.value}")
         return False
