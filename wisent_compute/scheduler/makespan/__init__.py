@@ -42,20 +42,32 @@ def _extract_model_task(command: str) -> tuple[str, str]:
 def _build_history(store: JobStorage, log_fn: Callable[[str], None]) -> dict[tuple[str, str], float]:
     """Mean runtime in seconds per (model, task), from completed/ blobs.
 
-    Reads at most COMPLETED_SAMPLE_CAP blobs ordered by GCS-default
-    iteration (alphabetical job_id, which is random hex — effectively a
-    uniform sample). Skips jobs without started_at/completed_at.
+    Reads at most COMPLETED_SAMPLE_CAP blobs in parallel via a
+    ThreadPoolExecutor. Sequential per-blob downloads at ~50-100ms each
+    are too slow for the Cloud Function's 540s timeout when the cap is
+    in the thousands; parallelism brings the wall time down to seconds.
     """
+    from concurrent.futures import ThreadPoolExecutor
     bucket = getattr(store, "_sdk_bucket", None)
     if bucket is None:
         return {}
-    by_key: dict[tuple[str, str], list[float]] = {}
-    scanned = 0
+    blobs = []
     for blob in bucket.list_blobs(prefix="completed/"):
-        if scanned >= COMPLETED_SAMPLE_CAP:
+        blobs.append(blob)
+        if len(blobs) >= COMPLETED_SAMPLE_CAP:
             break
-        scanned += 1
-        doc = json.loads(blob.download_as_text())
+    if not blobs:
+        return {}
+
+    def _fetch(blob):
+        return blob.download_as_text()
+
+    with ThreadPoolExecutor(max_workers=32) as ex:
+        texts = list(ex.map(_fetch, blobs))
+
+    by_key: dict[tuple[str, str], list[float]] = {}
+    for text in texts:
+        doc = json.loads(text)
         st = doc.get("started_at")
         ct = doc.get("completed_at")
         if not st or not ct:
@@ -71,7 +83,7 @@ def _build_history(store: JobStorage, log_fn: Callable[[str], None]) -> dict[tup
             continue
         by_key.setdefault((model, task), []).append(elapsed)
     out = {k: sum(v) / len(v) for k, v in by_key.items() if v}
-    log_fn(f"makespan: history rebuilt from {scanned} completed/ blobs, {len(out)} (model,task) keys")
+    log_fn(f"makespan: history rebuilt from {len(blobs)} completed/ blobs, {len(out)} (model,task) keys")
     return out
 
 
