@@ -103,6 +103,39 @@ def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
     return freed
 
 
+def _top_consumers() -> list[dict]:
+    """du --max-depth=1 across $HOME, /var, /opt, /tmp; top 15 by size.
+
+    Used by the diag dump when the agent has to refuse slots due to
+    disk pressure, so the operator can see exactly which paths are
+    filling the disk without needing to SSH in.
+    """
+    import subprocess
+    paths = [os.path.expanduser("~"), "/var", "/opt", "/tmp"]
+    rows: list[tuple[int, str]] = []
+    for p in paths:
+        if not os.path.isdir(p):
+            continue
+        try:
+            r = subprocess.run(
+                ["du", "--max-depth=1", "--block-size=1M", p],
+                capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            return []
+        for line in r.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            try:
+                size_mb = int(parts[0])
+            except ValueError:
+                continue
+            rows.append((size_mb, parts[1]))
+    rows.sort(reverse=True)
+    return [{"size_mb": s, "path": p} for s, p in rows[:15]]
+
+
 def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
     """Returns (refuse_slots_this_tick, diag_updates).
 
@@ -112,6 +145,10 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
       2. Evicting secondary caches (pip wheels, apt archives, wisent
          cache, HF cache root, HF datasets cache) when HF eviction
          freed 0 GB but disk is still tight
+
+    When we still refuse after both eviction passes, diag includes a
+    `top_disk_consumers` list of the biggest paths so the operator can
+    see what is filling the disk without needing to SSH in.
     """
     home = os.path.expanduser("~")
     free_gb = _free_gb(home)
@@ -128,8 +165,6 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
         free_gb = after
         diag["free_disk_gb"] = round(free_gb, 1)
         diag["hf_cache_evicted_gb"] = round(actual_reclaimed, 1)
-        # Second-tier eviction when HF cache yielded nothing but disk
-        # is still under the threshold. Targets are all reproducible.
         if free_gb < MIN_FREE_DISK_GB and actual_reclaimed < 1.0:
             secondary = _evict_secondary_caches(log_fn)
             after2 = _free_gb(home)
@@ -142,4 +177,5 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
             f"disk still low (~{free_gb:.1f} GB free in $HOME) after "
             f"eviction; refusing slots this tick"
         )
+        diag["top_disk_consumers"] = _top_consumers()
     return refuse, diag
