@@ -44,7 +44,16 @@ def _evict_complete_hf_revisions(log_fn: Callable[[str], None]) -> float:
     snapshots. HF SDK errors propagate so the operator sees them.
     """
     from huggingface_hub import scan_cache_dir
-    info = scan_cache_dir()
+    from huggingface_hub.errors import CacheNotFound
+    try:
+        info = scan_cache_dir()
+    except CacheNotFound:
+        # Documented absent-cache state: ~/.cache/huggingface/hub does
+        # not exist yet, so there is literally nothing to evict. Return
+        # 0 reclaimed rather than crashing the entire agent loop on a
+        # state that is expected on a fresh host.
+        log_fn("HF cache absent (~/.cache/huggingface/hub not found); 0 GB reclaimed")
+        return 0.0
     revisions = []
     for repo in info.repos:
         for rev in repo.revisions:
