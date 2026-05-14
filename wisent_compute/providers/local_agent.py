@@ -215,7 +215,12 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 diag_eligibility_rejected += 1
                 continue
             diag_eligible += 1
-            slots.append(start_slot(store, job, hostname, _log))
+            new_slot = start_slot(store, job, hostname, _log, kind=kind)
+            if new_slot is None:
+                # apt-install refused or failed; job stays in queue/ for
+                # another (cloud-kind or registry-fixed) agent to claim.
+                continue
+            slots.append(new_slot)
             free_vram_gb -= need
             started += 1
             agent_diag["last_started_job_id"] = job.job_id

@@ -139,6 +139,41 @@ def _pre_command_prelude(job) -> str:
     return pre.rstrip(";").rstrip() + " && "
 
 
+def _install_apt_packages(job, kind: str, log_fn) -> bool:
+    """Install job.apt_packages via sudo apt-get on cloud-kind agents.
+
+    Returns True on success (or no-op when no packages were requested),
+    False on failure. Caller should refuse to start the slot when this
+    returns False so the job stays queued for retry instead of running
+    against missing system deps and failing with a confusing error.
+
+    Refuses on kind='local' (physical operator workstation) — the
+    operator owns what's installed on their box, and silent
+    sudo-apt-installs from queued jobs are a footgun. Cloud VMs
+    (kind='gcp'/'azure'/'aws') run with passwordless sudo by default
+    on the deeplearning-platform image, so apt-install Just Works.
+    """
+    pkgs = list(getattr(job, "apt_packages", []) or [])
+    if not pkgs:
+        return True
+    if kind == "local":
+        log_fn(
+            f"refuse {job.job_id}: apt_packages={pkgs} requested but agent "
+            f"kind=local; install manually or submit to a cloud-kind agent"
+        )
+        return False
+    cmd = ["sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends", *pkgs]
+    log_fn(f"apt-install for {job.job_id}: {' '.join(pkgs)}")
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        log_fn(
+            f"apt-install FAILED for {job.job_id}: rc={res.returncode} "
+            f"err={(res.stderr or res.stdout)[:200]}"
+        )
+        return False
+    return True
+
+
 def _mirror_to_output_uri(store: JobStorage, job, log_fn) -> None:
     """Copy /tmp/wc-<job_id>/output/* to job.output_uri (e.g.
     gs://other-bucket/path/). Additive — the canonical
@@ -168,8 +203,15 @@ def _mirror_to_output_uri(store: JobStorage, job, log_fn) -> None:
         log_fn(f"output_uri mirror ok: {job.job_id} -> {uri}")
 
 
-def start_slot(store: JobStorage, job, hostname: str, log_fn) -> dict:
-    """Spawn a subprocess for `job`, register it in 'running' state, return slot."""
+def start_slot(store: JobStorage, job, hostname: str, log_fn,
+               kind: str = "local") -> dict | None:
+    """Spawn a subprocess for `job`, register it in 'running' state, return slot.
+
+    Returns None when apt-install (job.apt_packages) refuses or fails —
+    the caller should leave the job in queue/ for another agent to claim.
+    """
+    if not _install_apt_packages(job, kind, log_fn):
+        return None
     work_dir = f"/tmp/wc-{job.job_id}"
     os.makedirs(f"{work_dir}/output", exist_ok=True)
     _write_status(store, job.job_id, f"RUNNING {datetime.now(timezone.utc).isoformat()}")
