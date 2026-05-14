@@ -226,4 +226,24 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
             f"eviction; refusing slots this tick"
         )
         diag["top_disk_consumers"] = _top_consumers()
+        # Surface which stale-training-dir candidates we found and what
+        # their newest-mtime age is, so the operator can see whether the
+        # mtime gate is correctly identifying reclaimable dirs versus
+        # incorrectly flagging an active writer.
+        import time as _time
+        now = _time.time()
+        candidates_diag = []
+        import glob as _glob
+        home = os.path.expanduser("~")
+        for path in _glob.glob(os.path.join(home, "wisent_*")) + _glob.glob(os.path.join(home, "wisent-*")):
+            if not os.path.isdir(path):
+                continue
+            newest = _newest_mtime_in_tree(path)
+            age = int(now - newest) if newest > 0 else None
+            candidates_diag.append({
+                "path": path,
+                "newest_mtime_age_s": age,
+                "eligible_for_eviction": age is None or age > STALE_TRAINING_MAX_AGE_S,
+            })
+        diag["training_dir_candidates"] = candidates_diag
     return refuse, diag
