@@ -81,12 +81,54 @@ def main():
 @click.option("--verify", "verify_command", default="",
               help="Shell command that must exit 0 after the job succeeds; non-zero "
                    "reverses COMPLETED->FAILED. Catches silent-success failure modes.")
+@click.option("--profile", "profile_name", default="",
+              help="Apply a named profile from wisent_compute/profiles/ (or "
+                   "$WC_PROFILES_DIR). CLI flags override profile fields. "
+                   "Run `wcomp profiles` to list available profiles.")
 def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider, priority,
            repo, repo_workdir, repo_extras,
            gpu_type, vram_gb, machine_type,
-           pre_command, apt_packages, output_uri, verify_command):
+           pre_command, apt_packages, output_uri, verify_command,
+           profile_name):
     """Submit a job (or batch) to the queue."""
     apt_list = [p.strip() for p in apt_packages.split(",") if p.strip()]
+
+    # Profile merge — CLI args win on conflict. The submit_job kwargs
+    # dict is built from the Click values (which all have known defaults),
+    # then merge_into_kwargs adopts profile fields wherever the CLI
+    # value matches the wisent-compute default.
+    if profile_name:
+        from .profiles import load_profile, merge_into_kwargs
+        try:
+            prof = load_profile(profile_name)
+        except FileNotFoundError as e:
+            raise click.ClickException(str(e))
+        cli_kwargs = {
+            "gpu_type": gpu_type, "vram_gb": vram_gb, "machine_type": machine_type,
+            "apt_packages": apt_list, "pre_command": pre_command,
+            "repo": repo, "repo_workdir": repo_workdir, "repo_extras": repo_extras,
+            "output_uri": output_uri, "verify_command": verify_command,
+            "priority": priority, "preemptible": spot,
+            "max_cost_per_hour_usd": max_cost_per_hour,
+            "provider": provider, "pin_to_provider": not any_provider,
+        }
+        merged = merge_into_kwargs(prof, cli_kwargs)
+        gpu_type = merged["gpu_type"]
+        vram_gb = merged["vram_gb"]
+        machine_type = merged["machine_type"]
+        apt_list = merged["apt_packages"]
+        pre_command = merged["pre_command"]
+        repo = merged["repo"]
+        repo_workdir = merged["repo_workdir"]
+        repo_extras = merged["repo_extras"]
+        output_uri = merged["output_uri"]
+        verify_command = merged["verify_command"]
+        priority = merged["priority"]
+        spot = merged["preemptible"]
+        max_cost_per_hour = merged["max_cost_per_hour_usd"]
+        provider = merged["provider"]
+        any_provider = not merged["pin_to_provider"]
+        click.echo(f"Profile '{profile_name}' applied: {prof.get('description', '')[:80]}")
     commands = []
     if batch_file:
         with open(batch_file) as f:
@@ -279,6 +321,31 @@ def dashboard(bind, port):
     """
     from .dashboard import serve as serve_dashboard
     serve_dashboard(host=bind, port=port)
+
+
+@main.command()
+@click.argument("name", required=False)
+def profiles(name):
+    """List available submit profiles, or show one profile's JSON."""
+    from .profiles import list_profiles, load_profile
+    if name:
+        try:
+            p = load_profile(name)
+        except FileNotFoundError as e:
+            raise click.ClickException(str(e))
+        click.echo(json.dumps(p, indent=2))
+        return
+    names = list_profiles()
+    if not names:
+        click.echo("(no profiles found)")
+        return
+    for n in names:
+        try:
+            p = load_profile(n)
+            desc = (p.get("description") or "").split(".")[0][:90]
+            click.echo(f"{n:<24} {desc}")
+        except Exception as e:
+            click.echo(f"{n:<24} (load error: {e})")
 
 
 @main.group()
