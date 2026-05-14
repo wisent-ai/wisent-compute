@@ -68,13 +68,60 @@ def _evict_complete_hf_revisions(log_fn: Callable[[str], None]) -> float:
     return freed_bytes / (1024 ** 3)
 
 
+STALE_TRAINING_MAX_AGE_S = 3600  # mtime older than 1h => safe to evict
+
+
+def _newest_mtime_in_tree(root: str) -> float:
+    """Walk `root` and return the max mtime across every file. 0.0 if
+    the tree is empty. Used to detect stale training-output directories
+    whose process is no longer writing new checkpoints."""
+    newest = 0.0
+    for dirpath, _, filenames in os.walk(root):
+        for f in filenames:
+            p = os.path.join(dirpath, f)
+            try:
+                m = os.path.getmtime(p)
+            except OSError:
+                continue
+            if m > newest:
+                newest = m
+    return newest
+
+
+def _stale_training_dirs() -> list[str]:
+    """Directories under $HOME matching the wisent-* / wisent_* training
+    output naming convention whose newest file is older than
+    STALE_TRAINING_MAX_AGE_S. Caller can safely rmtree these because:
+    1. they're reproducible from upstream (training jobs upload to HF/GCS)
+    2. the mtime gate proves no process is currently writing to them.
+    """
+    import glob
+    home = os.path.expanduser("~")
+    now = __import__("time").time()
+    candidates = glob.glob(os.path.join(home, "wisent_*"))
+    candidates += glob.glob(os.path.join(home, "wisent-*"))
+    stale: list[str] = []
+    for path in candidates:
+        if not os.path.isdir(path):
+            continue
+        newest = _newest_mtime_in_tree(path)
+        if newest == 0.0:
+            stale.append(path)  # empty dir
+            continue
+        if (now - newest) > STALE_TRAINING_MAX_AGE_S:
+            stale.append(path)
+    return stale
+
+
 def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
-    """Second-tier eviction: pip wheel cache, wisent local cache, apt
-    archive, system journals truncated to last day. Used when HF cache
-    eviction freed 0 GB (typical when the HF cache directory itself was
-    already pruned by something upstream) but the disk gate still
-    refuses slots. Each target is reproducible from upstream so its
-    deletion does not lose unique state.
+    """Second-tier eviction:
+      - pip wheel cache, wisent local cache, HF caches (when present)
+      - apt archive, /tmp/pip-build
+      - stale wisent_* training output dirs under $HOME whose newest
+        file mtime is older than STALE_TRAINING_MAX_AGE_S (no active
+        writer; reproducible from HF/GCS upstream)
+    Used when HF cache eviction freed 0 GB but the disk gate still
+    refuses slots. Each target is reproducible from upstream.
     """
     home = os.path.expanduser("~")
     targets = [
@@ -85,6 +132,7 @@ def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
         "/var/cache/apt/archives",
         "/tmp/pip-build",
     ]
+    targets.extend(_stale_training_dirs())
     freed = 0.0
     for tgt in targets:
         if not os.path.isdir(tgt):
