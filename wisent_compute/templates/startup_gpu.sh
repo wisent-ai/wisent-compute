@@ -10,6 +10,12 @@ done
 
 apt-get update
 apt-get install -y python3-venv python3-pip git ca-certificates curl gnupg
+# Caller-declared apt packages from job.apt_packages. Empty (no-op) when
+# no extras were requested. Whitespace-separated list of package names;
+# resolved at submit time by _render_template substitution.
+if [ -n "${APT_PACKAGES}" ]; then
+    apt-get install -y --no-install-recommends ${APT_PACKAGES}
+fi
 
 WORK=/opt/wisent-run
 rm -rf $WORK
@@ -53,6 +59,12 @@ echo "RUNNING $(date -u +%Y-%m-%dT%H:%M:%SZ)" | gsutil cp - "gs://${STATUS_BUCKE
 export WISENT_DTYPE=auto
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
+# Caller-declared shell prelude from job.pre_command. Runs in the SAME
+# shell as the command (sourced, not exec'd) so it can `export` env vars
+# the command will see — e.g. LD_LIBRARY_PATH=$(...) for cu128/cu129
+# cuBLAS reconciliation on the deeplearning-platform image. Empty when
+# no prelude was requested.
+${PRE_COMMAND}
 echo "Running: ${COMMAND}"
 eval "${COMMAND}" 2>&1 | tee /home/ubuntu/output/command_output.log
 EXIT_CODE=$?
@@ -70,6 +82,12 @@ gsutil -m cp -r /home/ubuntu/output/* "gs://${STATUS_BUCKET}/status/${JOB_ID}/ou
 # tempfile work_dir, so reviewers can find them at the same status path.
 if [ -d /tmp/wisent_activations_work ]; then
     gsutil -m cp -r /tmp/wisent_activations_work/* "gs://${STATUS_BUCKET}/status/${JOB_ID}/output/" || true
+fi
+# Caller-declared additional output mirror from job.output_uri. Empty
+# when no extra destination was requested. This is additive — the
+# canonical status/<id>/output/ path above is always written.
+if [ -n "${OUTPUT_URI}" ]; then
+    gsutil -m cp -r /home/ubuntu/output/* "${OUTPUT_URI}" || true
 fi
 
 echo "Job finished with exit code $EXIT_CODE at $(date)"

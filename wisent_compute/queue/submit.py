@@ -233,6 +233,9 @@ def _submit_via_gcs(
         "GH_TOKEN": gh_token,
         "WISENT_VERSION": os.environ.get("WISENT_VERSION", "latest"),
         "REPO_BLOCK": _render_repo_block(repo, repo_workdir, repo_extras),
+        "PRE_COMMAND": pre_command,
+        "APT_PACKAGES": " ".join(apt_packages),
+        "OUTPUT_URI": output_uri,
     })
 
     import platform
