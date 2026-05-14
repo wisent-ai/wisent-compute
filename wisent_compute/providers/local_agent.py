@@ -39,6 +39,16 @@ HEARTBEAT_INTERVAL = 300
 # decides whether to claim again. Empirically a torch model load starts
 # allocating GPU memory within ~5 seconds of subprocess start.
 SETTLE_AFTER_CLAIM_SECONDS = 5
+# Hard VRAM safety buffer at admission. The agent refuses to claim a
+# job if accepting it would leave less than this margin between
+# declared total VRAM use and the GPU's physical capacity. Catches the
+# class of failure where neighbor processes' actual peak exceeds their
+# declared gpu_mem_gb (estimate_gpu_memory has been observed to
+# under-call by 5-10 GB on 7-8B activation extraction workloads). The
+# buffer is independent of the per-job multipliers because it's the
+# LAST line of defense — if the per-job estimate is wrong, this catches
+# it before the n+1th job OOMs the entire VM.
+VRAM_SAFETY_BUFFER_GB = 8
 
 
 def _log(msg):
@@ -205,13 +215,28 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if need > free_vram_gb:
                 diag_vram_rejected += 1
                 continue
+            # Hard safety buffer: even if `need <= free_vram_gb` (bookkeeping
+            # + smi_free check both passed), refuse to claim if total declared
+            # use after admission would leave less than VRAM_SAFETY_BUFFER_GB
+            # of GPU capacity. Catches under-estimated neighbor jobs whose
+            # actual peak exceeds their declared gpu_mem_gb. Without this,
+            # an agent with `slots=[26GB-decl-but-32GB-actual, 26GB-decl-but-
+            # 32GB-actual]` looks like 28 GB free in bookkeeping (80-26-26),
+            # admits a 22 GB job, and the 3rd CUDA load races into a wall.
+            projected_used = sum(_slot_vram(s) for s in slots) + need
+            if projected_used > total_vram_gb - VRAM_SAFETY_BUFFER_GB:
+                diag_vram_rejected += 1
+                agent_diag["last_buffer_reject_job_id"] = job.job_id
+                agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()
+                continue
             _tmp_free_gb = shutil.disk_usage("/tmp").free / (1024**3)
             if _tmp_free_gb < WORKDIR_SCRATCH_GB:
                 diag_vram_rejected += 1
                 _log(f"refuse {job.job_id}: /tmp free={_tmp_free_gb:.1f}G < workdir_scratch={WORKDIR_SCRATCH_GB}G")
                 continue
             if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind,
-                                  consumer_id=consumer_id):
+                                  consumer_id=consumer_id,
+                                  active_slot_count=len(slots)):
                 diag_eligibility_rejected += 1
                 continue
             diag_eligible += 1
@@ -240,7 +265,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         if started == 0:
             if idle_shutdown and not slots and _no_eligible_in_queue(
                 store, gpu_type, total_vram_gb, free_vram_gb, kind=kind,
-                consumer_id=consumer_id,
+                consumer_id=consumer_id, active_slot_count=len(slots),
             ):
                 _log("idle_shutdown: no slots + no eligible queued jobs; exiting")
                 from .local.gcp_self import self_terminate

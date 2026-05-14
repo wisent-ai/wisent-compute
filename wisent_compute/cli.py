@@ -82,6 +82,11 @@ def main():
 @click.option("--verify", "verify_command", default="",
               help="Shell command that must exit 0 after the job succeeds; non-zero "
                    "reverses COMPLETED->FAILED. Catches silent-success failure modes.")
+@click.option("--exclusive", is_flag=True, default=False,
+              help="Claim the WHOLE GPU. Agent only claims this job on an "
+                   "empty slot and refuses to admit any other job while it runs. "
+                   "Use for diffusion training / full-finetunes whose peak VRAM "
+                   "can't be safely co-tenanted.")
 @click.option("--profile", "profile_name", default="",
               help="Apply a named profile from wisent_compute/profiles/ (or "
                    "$WC_PROFILES_DIR). CLI flags override profile fields. "
@@ -90,6 +95,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
            repo, repo_workdir, repo_extras,
            gpu_type, vram_gb, machine_type,
            pre_command, apt_packages, output_uri, verify_command,
+           exclusive,
            profile_name):
     """Submit a job (or batch) to the queue."""
     apt_list = [p.strip() for p in apt_packages.split(",") if p.strip()]
@@ -109,6 +115,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
             "apt_packages": apt_list, "pre_command": pre_command,
             "repo": repo, "repo_workdir": repo_workdir, "repo_extras": repo_extras,
             "output_uri": output_uri, "verify_command": verify_command,
+            "exclusive": exclusive,
             "priority": priority, "preemptible": spot,
             "max_cost_per_hour_usd": max_cost_per_hour,
             "provider": provider, "pin_to_provider": not any_provider,
@@ -124,6 +131,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         repo_extras = merged["repo_extras"]
         output_uri = merged["output_uri"]
         verify_command = merged["verify_command"]
+        exclusive = merged["exclusive"]
         priority = merged["priority"]
         spot = merged["preemptible"]
         max_cost_per_hour = merged["max_cost_per_hour_usd"]
@@ -146,6 +154,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         gpu_type=gpu_type, vram_gb=vram_gb, machine_type=machine_type,
         pre_command=pre_command, apt_packages=apt_list,
         output_uri=output_uri, verify_command=verify_command,
+        exclusive=exclusive,
     )
     click.echo(f"  submitted {n}/{len(commands)} jobs")
     mode = "API" if _api_key() else "GCS"
@@ -195,7 +204,8 @@ _STATES = ("running", "queue", "completed", "failed")
 
 
 def _print_job_row(job, state):
-    cmd = job.command[:42] + "..." if len(job.command) > 42 else job.command
+    cmd_one_line = " ".join(job.command.split())
+    cmd = cmd_one_line[:42] + "..." if len(cmd_one_line) > 42 else cmd_one_line
     who = (f"{getattr(job, 'submitted_by', '') or '?'}@{(getattr(job, 'submitted_from', '') or '')[:12]}")[:22]
     click.echo(f"{job.job_id:<12} {state:<10} {job.gpu_type or 'cpu':<18} {who:<22} {cmd}")
 

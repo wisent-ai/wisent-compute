@@ -126,16 +126,23 @@ def _compat_accel_types(local_vram_gb: int) -> list[str]:
 
 
 def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
-                   consumer_id: str = "") -> bool:
+                   consumer_id: str = "", active_slot_count: int = 0) -> bool:
     """Local-agent claim rules.
 
     NEW (0.4.100): if job.assigned_to was set by the centralized
     coordinator matcher, only the agent whose consumer_id matches may
     claim. Empty assigned_to means unassigned and any-eligible-agent may
     claim (pre-0.4.100 back-compat).
+
+    NEW (0.4.131): job.exclusive=True is only eligible on an agent
+    with zero active slots. Caller passes its current slot count via
+    active_slot_count so this filter runs at the agent-side claim loop
+    without needing the slot dict here.
     """
     assigned = getattr(job, "assigned_to", "") or ""
     if assigned and consumer_id and assigned != consumer_id:
+        return False
+    if bool(getattr(job, "exclusive", False)) and active_slot_count > 0:
         return False
     from ....config import LOCAL_ONLY_MODELS
     import re as _re
@@ -181,10 +188,18 @@ def _build_capacity_dict(gpu_type: str, free_vram_gb: int,
 
 
 def _slot_is_exclusive(slot: dict) -> bool:
+    job = slot.get("job")
+    # Per-job opt-in: Job.exclusive=True takes precedence over the
+    # regex-on-command path. Used for workloads (e.g. Z-Image LoRA
+    # training, SDXL full finetune) whose peak VRAM is hard to bound
+    # from the command string alone, but which the submitter has
+    # tagged exclusive at submit time.
+    if bool(getattr(job, "exclusive", False)):
+        return True
     from ....config import EXCLUSIVE_MODELS
     import re
     m = re.search(r"--model\s+(\S+)",
-                   getattr(slot.get("job"), "command", "") or "")
+                   getattr(job, "command", "") or "")
     return bool(m and m.group(1).strip("'\"") in EXCLUSIVE_MODELS)
 
 
@@ -199,7 +214,8 @@ def _slot_vram(slot: dict) -> int:
 def _no_eligible_in_queue(store: JobStorage, gpu_type: str,
                            total_vram_gb: int, free_vram_gb: int,
                            kind: str = "local",
-                           consumer_id: str = "") -> bool:
+                           consumer_id: str = "",
+                           active_slot_count: int = 0) -> bool:
     """True when no queued job fits + is eligible for this consumer."""
     queued = store.list_jobs("queue")
     for job in queued:
@@ -210,7 +226,8 @@ def _no_eligible_in_queue(store: JobStorage, gpu_type: str,
         if need > free_vram_gb:
             continue
         if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind,
-                              consumer_id=consumer_id):
+                              consumer_id=consumer_id,
+                              active_slot_count=active_slot_count):
             continue
         return False
     return True

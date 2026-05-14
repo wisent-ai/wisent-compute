@@ -207,11 +207,22 @@ def estimate_gpu_memory(command: str) -> int:
 
     weights_gb = params_b * 2 / quant_factor
     kv_gb = weights_gb * 0.3
-    overhead_gb = 8
+    # Bumped 8 -> 12 (2026-05-14): observed peak vs estimate gap of ~5-7 GB
+    # on Qwen3-8B / Llama-3.1-8B activation-extraction runs. CUDA allocator
+    # fragmentation + transformers' attention scratch + nccl staging all
+    # eat headroom not captured by weights+kv. Under-estimating neighbors'
+    # peak caused co-tenancy OOM on job 4b0411a1 (A100-80GB: 32+32+22 GB
+    # actual, but agent's bookkeeping admitted as 26+26+22 = 74 / 80).
+    overhead_gb = 12
 
     multiplier = 1.0
     if re.search(r'get-activations|generate-vector', command):
-        multiplier = 1.2
+        # Bumped 1.2 -> 1.4 (2026-05-14): activation extraction layers
+        # the entire residual stream through to disk, with hidden-state
+        # buffers held in VRAM longer than the multiplier=1.2 assumed.
+        # Observed peak/declared ratio ~1.32-1.38 on the workstation
+        # fleet; 1.4 leaves 5% guard.
+        multiplier = 1.4
     elif re.search(r'modify-weights|optimize-weights|training', command):
         multiplier = 1.5
 

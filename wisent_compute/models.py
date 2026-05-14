@@ -115,6 +115,15 @@ class Job:
     # (e.g. gs://wisent-images-bucket/Jakubs-lora/run01_2026-05-14/)
     # without the job command itself having to gsutil cp them.
     output_uri: str = ""
+    # Exclusive GPU use. When True, the agent only claims this job if it
+    # has zero other active slots, AND refuses to claim any other job
+    # while this one runs. Use for workloads that can't survive co-tenancy
+    # — large diffusion training (Z-Image, SDXL), full-finetunes, anything
+    # whose peak VRAM is hard to predict from on-disk model size. Catches
+    # the TOCTOU race where neighbor processes ramp up CUDA allocations
+    # AFTER admission and starve us mid-load. Generalizes EXCLUSIVE_MODELS
+    # (config.py:166) to per-job rather than regex-on-command.
+    exclusive: bool = False
 
     def __post_init__(self):
         if not self.created_at:
