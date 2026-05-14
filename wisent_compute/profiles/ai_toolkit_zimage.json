@@ -1,0 +1,10 @@
+{
+  "description": "Z-Image Turbo LoRA training via Ostris ai-toolkit. Pinned to L4 (24 GB) because (a) Z-Image-Turbo + training adapter v1 + rank-32 LoRA fits in <24 GB at batch=1 bf16 grad-checkpoint, and (b) RTX Pro 6000 is denied on the wisent-480400 project. Apt list covers cv2 (libgl1, libglib2.0-0) + git-lfs for HF model pulls + build-essential for any pip wheel that lacks a binary. pre_command sets LD_LIBRARY_PATH to torch's bundled cu128 cuBLAS — without this the system cu129 libs win at load time and the first inference call crashes with `Invalid handle. Cannot load symbol cublasLtCreate`. See docs/zimage-lora-handoff.md in wisent-content-platform for the full runbook.",
+  "gpu_type": "nvidia-l4",
+  "vram_gb": 22,
+  "apt": ["libgl1", "libglib2.0-0", "git-lfs", "build-essential"],
+  "pre_command": "TORCH_NVDIR=$(python3 -c \"import os,nvidia; print(os.path.dirname(nvidia.__file__))\"); export LD_LIBRARY_PATH=$(ls -d $TORCH_NVDIR/*/lib 2>/dev/null | paste -sd:):$LD_LIBRARY_PATH",
+  "repo": "https://github.com/ostris/ai-toolkit.git",
+  "repo_workdir": "ai-toolkit",
+  "repo_extras": ""
+}
