@@ -58,9 +58,35 @@ def main():
 @click.option("--repo", default="", help="Optional git URL to clone before running command (no auth).")
 @click.option("--repo-workdir", default="", help="Override cloned-repo dir; default = repo basename.")
 @click.option("--repo-extras", default="train", help="pip extras to install on the clone; empty skips install.")
+@click.option("--gpu-type", default="",
+              help="Pin the accelerator label (e.g. 'nvidia-l4', 'nvidia-a100-80gb'). "
+                   "Skips the --model regex inference. Resolves machine_type from "
+                   "GPU_SIZING unless --machine-type is also passed.")
+@click.option("--vram-gb", type=int, default=0,
+              help="Caller-declared VRAM (GB). Picks the smallest SKU whose tier >= this value. "
+                   "Skips the --model regex inference.")
+@click.option("--machine-type", default="",
+              help="Pin the GCE/Azure machine type verbatim (e.g. 'g2-standard-8'). "
+                   "Use for SKUs not in the wisent-compute catalog.")
+@click.option("--pre-command", "pre_command", default="",
+              help="Shell snippet placed before the command in the SAME bash shell. "
+                   "Use to export env vars (LD_LIBRARY_PATH, CUDA_VISIBLE_DEVICES, etc.) "
+                   "that the command will see.")
+@click.option("--apt", "apt_packages", default="",
+              help="Comma-separated apt package list. Installed via sudo apt-get on "
+                   "cloud-kind agents only — local-kind agents refuse the job for safety.")
+@click.option("--output-uri", "output_uri", default="",
+              help="Additional gs:// destination for job output. Additive — canonical "
+                   "status/<id>/output/ path is always written too.")
+@click.option("--verify", "verify_command", default="",
+              help="Shell command that must exit 0 after the job succeeds; non-zero "
+                   "reverses COMPLETED->FAILED. Catches silent-success failure modes.")
 def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider, priority,
-           repo, repo_workdir, repo_extras):
+           repo, repo_workdir, repo_extras,
+           gpu_type, vram_gb, machine_type,
+           pre_command, apt_packages, output_uri, verify_command):
     """Submit a job (or batch) to the queue."""
+    apt_list = [p.strip() for p in apt_packages.split(",") if p.strip()]
     commands = []
     if batch_file:
         with open(batch_file) as f:
@@ -74,6 +100,9 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         preemptible=spot, max_cost_per_hour_usd=max_cost_per_hour,
         pin_to_provider=not any_provider, priority=priority,
         repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
+        gpu_type=gpu_type, vram_gb=vram_gb, machine_type=machine_type,
+        pre_command=pre_command, apt_packages=apt_list,
+        output_uri=output_uri, verify_command=verify_command,
     )
     click.echo(f"  submitted {n}/{len(commands)} jobs")
     mode = "API" if _api_key() else "GCS"
@@ -82,6 +111,13 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
     if max_cost_per_hour > 0: flags.append(f"cap=${max_cost_per_hour:.2f}/hr")
     if not any_provider: flags.append(f"pinned={provider}")
     if priority: flags.append(f"priority={priority}")
+    if gpu_type: flags.append(f"gpu={gpu_type}")
+    if vram_gb: flags.append(f"vram={vram_gb}G")
+    if machine_type: flags.append(f"mt={machine_type}")
+    if apt_list: flags.append(f"apt={','.join(apt_list)}")
+    if pre_command: flags.append("pre_cmd")
+    if output_uri: flags.append(f"out={output_uri}")
+    if verify_command: flags.append("verify")
     flag_str = (" [" + ", ".join(flags) + "]") if flags else ""
     click.echo(f"\nSubmitted {len(commands)} job(s) via {mode}{flag_str}. Batch: {batch_id}")
 
