@@ -59,14 +59,26 @@ def _build_history(store: JobStorage, log_fn: Callable[[str], None]) -> dict[tup
     if not blobs:
         return {}
 
+    from google.api_core.exceptions import NotFound
+
     def _fetch(blob):
-        return blob.download_as_text()
+        # TOCTOU race: list_blobs returns a name, then move_job (completed
+        # -> failed when verify_command rc != 0, or manual cleanup) deletes
+        # the blob before we get here. Return None so the loop below skips
+        # that entry. Only NotFound is caught -- any other GCS error
+        # propagates so the tick fails visibly on a real problem.
+        try:
+            return blob.download_as_text()
+        except NotFound:
+            return None
 
     with ThreadPoolExecutor(max_workers=32) as ex:
         texts = list(ex.map(_fetch, blobs))
 
     by_key: dict[tuple[str, str], list[float]] = {}
     for text in texts:
+        if text is None:
+            continue
         doc = json.loads(text)
         st = doc.get("started_at")
         ct = doc.get("completed_at")
@@ -114,21 +126,24 @@ def _estimate_runtime(job, history: dict[tuple[str, str], float]) -> float | Non
 
 
 def _live_agents(store: JobStorage, now: dt.datetime) -> dict[str, dict]:
+    from google.api_core.exceptions import NotFound
     bucket = getattr(store, "_sdk_bucket", None)
     if bucket is None:
         return {}
     agents: dict[str, dict] = {}
     for blob in bucket.list_blobs(prefix="capacity/"):
-        doc = json.loads(blob.download_as_text())
+        try:  # capacity blobs can vanish between list and download
+            text = blob.download_as_text()
+        except NotFound:
+            continue
+        doc = json.loads(text)
         cid = doc.get("consumer_id") or ""
         pub = doc.get("published_at") or ""
         age = (now - dt.datetime.fromisoformat(pub.replace("Z", "+00:00"))).total_seconds()
         if age > HEARTBEAT_TTL_S:
             continue
-        agents[cid] = {
-            "total_vram_gb": int(doc.get("total_vram_gb") or 0),
-            "active_slots": [],  # list of (finish_offset_seconds, vram_gb)
-        }
+        agents[cid] = {"total_vram_gb": int(doc.get("total_vram_gb") or 0),
+                       "active_slots": []}
     return agents
 
 
@@ -143,18 +158,19 @@ def _seed_running_jobs(store: JobStorage, agents: dict[str, dict],
     bucket = getattr(store, "_sdk_bucket", None)
     if bucket is None:
         return
-    # Map every live agent's hostname to its consumer_id.
+    # consumer_id is "<kind>-<hostname>" (queue/capacity.publish_capacity).
     host_to_cid: dict[str, str] = {}
     for cid in agents:
-        # consumer_id format is "<kind>-<hostname>"; the hostname is
-        # everything after the first '-'. Capacity-broadcast keys use
-        # the same convention (see queue/capacity.py: publish_capacity
-        # writes "consumer_id": f"{kind}-{hostname}").
         parts = cid.split("-", 1)
         if len(parts) == 2:
             host_to_cid[parts[1]] = cid
+    from google.api_core.exceptions import NotFound as _NotFound2
     for blob in bucket.list_blobs(prefix="running/"):
-        doc = json.loads(blob.download_as_text())
+        try:  # running blob can be moved to completed/failed mid-tick
+            text = blob.download_as_text()
+        except _NotFound2:
+            continue
+        doc = json.loads(text)
         iref = doc.get("instance_ref") or ""
         m = _INSTANCE_HOST_RE.match(iref)
         if not m:
