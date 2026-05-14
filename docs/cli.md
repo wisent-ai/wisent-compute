@@ -16,12 +16,41 @@ Submit a job (or a batch) to the GCS-backed queue.
 | `wc submit --any-provider` | Default. Any consumer with capacity may claim. |
 | `wc submit --pin-provider` | Only the requested `--provider` may claim. |
 | `wc submit --provider gcp\|local` | Hint for which provider should pick the job up. With `--any-provider` this is just a hint. |
+| `wc submit --gpu-type STR` | Pin the accelerator label (`nvidia-l4`, `nvidia-a100-80gb`, ...). Skips the `--model X.YB` regex inference. Machine type resolved from `GPU_SIZING` unless `--machine-type` is also passed. |
+| `wc submit --vram-gb N` | Caller-declared VRAM requirement. Picks the smallest tier in `GPU_SIZING` whose memory >= N. Use this when the job's command has no `--model` substring (any non-wisent workload). |
+| `wc submit --machine-type STR` | Pin the GCE/Azure machine type verbatim (`g2-standard-8`, `Standard_NC8ads_A10_v4`, ...). For SKUs not in the catalog. |
+| `wc submit --pre-command STR` | Shell snippet placed before the command in the same bash shell — `export FOO=...` reaches the subprocess. Joined via `&&` so a non-zero exit in the prelude aborts the job. |
+| `wc submit --apt PKG[,PKG...]` | Apt packages installed via `sudo -n apt-get install -y --no-install-recommends` before the subprocess spawns. Cloud-kind agents only; local-kind agents refuse the job. |
+| `wc submit --output-uri gs://...` | Additional destination mirrored to after job completion. Additive — `status/<id>/output/` is always written too. |
+| `wc submit --verify STR` | Post-success shell command. Non-zero exit reverses `COMPLETED → FAILED`. Catches silent-success failure modes (e.g. wisent's `extract_and_upload` reporting "5/7 strategies failed" but exiting 0). |
 
 Submitter-side env: `HF_TOKEN`, `GH_TOKEN` are read from the submitter's
 environment and baked into the per-job startup script that the cloud
 agent renders at boot. `COMPUTE_API_KEY` (if set) routes the submission
 through the `compute.wisent.com` HTTPS API instead of writing GCS
 directly.
+
+**Sizing precedence** (each layer overrides the previous):
+
+1. `estimate_gpu_memory(command)` — model-name regex on the command, the wisent-eval default.
+2. `--vram-gb N` — caller-declared VRAM, skips the regex.
+3. `--gpu-type STR` — pinned accelerator, picks machine_type from the catalog.
+4. `--machine-type STR` — pinned machine type verbatim.
+
+If none of the GPU flags are set AND no `--model X.YB` matches, the job lands on `e2-standard-8` (CPU).
+
+**Example** (Z-Image LoRA training on a fresh L4 with ai-toolkit deps):
+
+```bash
+wcomp submit \
+  --gpu-type nvidia-l4 --vram-gb 22 \
+  --apt libgl1,git-lfs,build-essential,libglib2.0-0 \
+  --repo https://github.com/ostris/ai-toolkit.git --repo-workdir ai-toolkit --repo-extras "" \
+  --pre-command 'TORCH_NVDIR=$(python3 -c "import os,nvidia; print(os.path.dirname(nvidia.__file__))"); export LD_LIBRARY_PATH=$(ls -d $TORCH_NVDIR/*/lib|paste -sd:):$LD_LIBRARY_PATH' \
+  --output-uri "gs://wisent-images-bucket/Jakubs-lora/zimage_lora_run03_$(date +%F)/" \
+  --verify 'gsutil -q stat gs://wisent-images-bucket/Jakubs-lora/zimage_lora_run03_*/checkpoints/zimage_lora_run03.safetensors' \
+  "cd ai-toolkit && python run.py /opt/zimage-lora/configs/run.yaml"
+```
 
 ## `wc status [filter]`
 
