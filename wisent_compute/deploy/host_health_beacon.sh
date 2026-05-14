@@ -57,7 +57,7 @@ disk_avail_gb=$(( ${disk_avail_kb:-0} / 1024 / 1024 ))
 # failing on a 46GB HF cache). The eviction targets are non-canonical
 # state: HF datasets/snapshots, wheel cache, wisent corrupt pair-text
 # cache. All are reproducible from the upstream source on next access.
-SELF_HEAL_DISK_PCT_THRESHOLD=90
+SELF_HEAL_DISK_PCT_THRESHOLD=85
 HOME_DIR="${HOME:-/home/ubuntu}"
 if [ "${disk_pct:-0}" -ge "$SELF_HEAL_DISK_PCT_THRESHOLD" ]; then
     # Only run if wisent-agent is NOT actively serving (state != active).
@@ -110,6 +110,32 @@ for p in ${LOG_PATHS//,/ }; do
 done
 [ -z "$last_log" ] && last_log='""'
 
+# Top disk consumers under $HOME and /var, capped to 10 each, so the
+# operator can see what is filling the disk without needing to SSH in.
+# Only computed when disk is tight (>80%); avoids running du on every
+# beacon tick on a healthy host.
+top_consumers='[]'
+if [ "${disk_pct:-0}" -ge 80 ]; then
+    top_consumers=$(
+        {
+            /usr/bin/du -h --max-depth=1 "$HOME_DIR" 2>/dev/null
+            /usr/bin/du -h --max-depth=1 /var 2>/dev/null
+            /usr/bin/du -h --max-depth=1 /opt 2>/dev/null
+            /usr/bin/du -h --max-depth=1 /tmp 2>/dev/null
+        } | /usr/bin/sort -hr | /usr/bin/head -n 20 \
+          | /usr/bin/python3 -c '
+import json, sys
+out = []
+for line in sys.stdin:
+    parts = line.strip().split(None, 1)
+    if len(parts) == 2:
+        out.append({"size": parts[0], "path": parts[1]})
+print(json.dumps(out))
+' 2>/dev/null
+    )
+    [ -z "$top_consumers" ] && top_consumers='[]'
+fi
+
 tmpfile=$(/usr/bin/mktemp)
 cat > "$tmpfile" <<EOF
 {
@@ -118,6 +144,7 @@ cat > "$tmpfile" <<EOF
   "disk_pct": ${disk_pct:-0},
   "disk_avail_gb": ${disk_avail_gb:-0},
   "units": {${units_json}},
+  "top_consumers": ${top_consumers},
   "last_log": ${last_log}
 }
 EOF
