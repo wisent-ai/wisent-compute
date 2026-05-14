@@ -63,12 +63,14 @@ def dispatch_agent_vms(
     template_name = _TEMPLATES_BY_PROVIDER.get(provider_name, "startup_gpu_agent.sh")
     template = (_TEMPLATES_DIR / template_name).read_text()
 
-    # Re-derive (machine_type, accel) per job from current GPU_SIZING rather
-    # than trust job.machine_type / job.gpu_type, which may be stale (a job
-    # submitted before a GPU_SIZING tier swap would still carry the old VM
-    # spec — e.g. a2-highgpu-2g + nvidia-tesla-a100 for 60GB jobs that GCP
+    # Bucket key is (accel, mt). Default: derive from current GPU_SIZING
+    # via lookup_instance_type — protects against stale job-level machine
+    # specs (e.g. a2-highgpu-2g + nvidia-tesla-a100 for 60GB jobs that GCP
     # rejects with 'Invalid accelerator specs for accelerator optimized
-    # instances').
+    # instances'). Override: caller-pinned job.machine_type wins so users
+    # who need a specific host (g2-standard-8 for 32 GB RAM on an L4 job)
+    # don't get silently downgraded back to the default-tier g2-standard-4
+    # (16 GB RAM, repeated host-OOM source for diffusion training).
     from ...config import lookup_instance_type
     buckets: dict[tuple[str, str], list] = {}
     for j in queued:
@@ -81,9 +83,12 @@ def dispatch_agent_vms(
         gpu_mem = int(getattr(j, "gpu_mem_gb", 0) or 0)
         if gpu_mem <= 0:
             continue
-        mt, accel = lookup_instance_type(provider_name, gpu_mem)
-        if not (accel and mt):
+        default_mt, default_accel = lookup_instance_type(provider_name, gpu_mem)
+        if not (default_accel and default_mt):
             continue
+        # Caller-pinned overrides — fall back to catalog if either is empty.
+        mt = (getattr(j, "machine_type", "") or default_mt).strip() or default_mt
+        accel = (getattr(j, "gpu_type", "") or default_accel).strip() or default_accel
         cap = getattr(j, "max_cost_per_hour_usd", 0.0) or 0.0
         if cap > 0 and accel:
             preempt = getattr(j, "preemptible", False)
