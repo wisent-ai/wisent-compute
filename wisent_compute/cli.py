@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 import urllib.error
@@ -189,18 +190,40 @@ def _status_api(filter_id):
     click.echo(f"\n{len(instances)} instance(s)")
 
 
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+_STATES = ("running", "queue", "completed", "failed")
+
+
+def _print_job_row(job, state):
+    cmd = job.command[:42] + "..." if len(job.command) > 42 else job.command
+    who = (f"{getattr(job, 'submitted_by', '') or '?'}@{(getattr(job, 'submitted_from', '') or '')[:12]}")[:22]
+    click.echo(f"{job.job_id:<12} {state:<10} {job.gpu_type or 'cpu':<18} {who:<22} {cmd}")
+
+
 def _status_gcs(filter_id):
     store = JobStorage(BUCKET)
-    all_jobs = store.list_all_jobs()
     click.echo(f"{'JOB ID':<12} {'STATE':<10} {'GPU':<18} {'SUBMITTED_BY':<22} {'COMMAND'}")
     click.echo("-" * 110)
-    for state in ("running", "queue", "completed", "failed"):
+
+    # Fast path: filter looks like a job_id — 4 parallel direct reads, no listing.
+    if filter_id and _JOB_ID_RE.match(filter_id):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda s: (s, store.read_job(s, filter_id)), _STATES))
+        found = [(s, j) for s, j in results if j is not None]
+        for state, job in found:
+            _print_job_row(job, state)
+        if not found:
+            click.echo(f"(no job with id {filter_id})")
+        return
+
+    # Slow path: no filter, or filter is a batch_id — must scan all blobs.
+    all_jobs = store.list_all_jobs()
+    for state in _STATES:
         for job in all_jobs[state]:
             if filter_id and filter_id not in (job.job_id, job.batch_id):
                 continue
-            cmd = job.command[:42] + "..." if len(job.command) > 42 else job.command
-            who = (f"{getattr(job, 'submitted_by', '') or '?'}@{(getattr(job, 'submitted_from', '') or '')[:12]}")[:22]
-            click.echo(f"{job.job_id:<12} {state:<10} {job.gpu_type or 'cpu':<18} {who:<22} {cmd}")
+            _print_job_row(job, state)
     counts = {k: len(v) for k, v in all_jobs.items()}
     click.echo(f"\n{counts['running']} running, {counts['queue']} queued, "
                f"{counts['completed']} completed, {counts['failed']} failed")
