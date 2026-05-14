@@ -100,6 +100,21 @@ class Job:
     # is what lets the scheduler optimize for total time-to-finish
     # rather than VRAM balance.
     runtime_seconds_estimate: float = 0.0
+    # Shell snippet prefixed to job.command at agent runtime. Runs in the
+    # same bash invocation so it can `export` env vars that affect the
+    # subprocess (e.g. LD_LIBRARY_PATH for cu128/cu129 cuBLAS reconciliation
+    # on DLVM images). Empty = no prelude.
+    pre_command: str = ""
+    # Apt packages to install on the agent VM before spawning the subprocess.
+    # Applied on cloud-kind agents only (gcp/azure/aws); local-kind agents
+    # refuse the job to avoid surprise installs on operator workstations.
+    apt_packages: list = field(default_factory=list)
+    # Additional GCS URI to mirror job output to after completion. Default
+    # location at gs://$WC_BUCKET/status/<id>/output/ is always written;
+    # this is an additive sync so artifacts can land in a project bucket
+    # (e.g. gs://wisent-images-bucket/Jakubs-lora/run01_2026-05-14/)
+    # without the job command itself having to gsutil cp them.
+    output_uri: str = ""
 
     def __post_init__(self):
         if not self.created_at:
