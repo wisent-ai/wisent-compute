@@ -52,6 +52,46 @@ wcomp submit \
   "cd ai-toolkit && python run.py /opt/zimage-lora/configs/run.yaml"
 ```
 
+Or, collapsed via a profile (see `wc profiles` below):
+
+```bash
+wcomp submit --profile ai_toolkit_zimage \
+  --output-uri "gs://wisent-images-bucket/Jakubs-lora/zimage_lora_run03_$(date +%F)/" \
+  "cd ai-toolkit && python run.py /opt/zimage-lora/configs/run.yaml"
+```
+
+## `wc profiles`
+
+| Subcommand | Behavior |
+|---|---|
+| `wc profiles` | List available profiles with one-line descriptions. |
+| `wc profiles NAME` | Print the profile's resolved JSON. |
+
+A profile is a JSON file under `wisent_compute/profiles/` (bundled with
+the wheel) or `$WC_PROFILES_DIR/` (operator-local override). It bundles
+the `wc submit` flags for a recurring workflow — `gpu_type`, `vram_gb`,
+`apt`, `pre_command`, `repo`, `repo_workdir`, `repo_extras`,
+`output_uri`, `verify`, `priority`, `spot`, `max_cost_per_hour`,
+`provider`, `pin_provider`. Every field is optional.
+
+Discovery order:
+
+1. `$WC_PROFILES_DIR/<name>.json` — operator-local; first hit wins.
+2. `wisent_compute/profiles/<name>.json` — bundled with the package.
+
+**Merge rule:** CLI flags always win. A kwarg that equals the
+wisent-compute default (empty string / 0 / False / [] / "train" for
+`repo_extras`) counts as "unspecified by CLI" and adopts the profile's
+value. To override a profile field, pass the explicit flag.
+
+**Bundled profiles:**
+
+| Profile | What it sets up |
+|---|---|
+| `ai_toolkit_zimage` | Z-Image Turbo LoRA training via Ostris ai-toolkit. L4 (22 GB request), apt deps for cv2 + git-lfs + build tools, cu128/cu129 cuBLAS `LD_LIBRARY_PATH` fix as `pre_command`, ai-toolkit repo clone. |
+
+To add a new bundled profile: drop a JSON file in `wisent_compute/profiles/` and bump the package version. To add an operator-local profile without a release: `WC_PROFILES_DIR=/path/to/profiles wcomp submit --profile mything ...`.
+
 ## `wc status [filter]`
 
 Tab-separated table of queue / running / completed / failed jobs. With
