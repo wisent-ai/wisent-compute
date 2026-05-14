@@ -183,11 +183,18 @@ def _seed_running_jobs(store: JobStorage, agents: dict[str, dict],
             runtime_seconds_estimate = doc.get("runtime_seconds_estimate", 0)
         est = _estimate_runtime(_Shim(), history)
         if est is None:
-            raise RuntimeError(
-                f"makespan: running {doc.get('job_id')} has no runtime "
-                f"estimate (no (model,task) history and no explicit "
-                f"runtime_seconds_estimate); set it at submit time"
+            # Running job has no (model, task) parseable from its command
+            # (the canonical case is an admin/maintenance command like
+            # `pip install --upgrade ...` that runs through the queue but
+            # is not an extraction job). The matcher can't predict its
+            # finish time, so we don't seed an active slot for it. The
+            # job's actual VRAM usage is enforced by smi_free at claim
+            # time on the agent side anyway.
+            log_fn(
+                f"makespan: skip running {doc.get('job_id')} for seeding "
+                f"(no (model,task) parseable from command)"
             )
+            continue
         remaining = max(0.0, est - max(0.0, elapsed))
         vram = int(doc.get("gpu_mem_gb") or 0)
         agents[cid]["active_slots"].append((remaining, vram))
