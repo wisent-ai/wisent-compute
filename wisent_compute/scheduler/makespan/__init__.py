@@ -133,7 +133,8 @@ def _live_agents(store: JobStorage, now: dt.datetime) -> dict[str, dict]:
 
 
 def _seed_running_jobs(store: JobStorage, agents: dict[str, dict],
-                       now: dt.datetime, history: dict) -> None:
+                       now: dt.datetime, history: dict,
+                       log_fn: Callable[[str], None]) -> None:
     """For each running/ blob, locate the executing agent (by hostname
     in instance_ref) and add an active_slot covering its remaining
     runtime. Without this, a freshly-claimed long job looks invisible
@@ -247,7 +248,7 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
     agents = _live_agents(store, now)
     if not agents:
         return 0
-    _seed_running_jobs(store, agents, now, history)
+    _seed_running_jobs(store, agents, now, history, log_fn)
     queued = list(store.list_jobs("queue"))
     schedulable: list[tuple[int, float, object]] = []
     skipped = 0
