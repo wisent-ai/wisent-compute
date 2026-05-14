@@ -55,21 +55,15 @@ def _build_history(store: JobStorage, log_fn: Callable[[str], None]) -> dict[tup
         if scanned >= COMPLETED_SAMPLE_CAP:
             break
         scanned += 1
-        try:
-            doc = json.loads(blob.download_as_text())
-        except Exception:
-            continue
+        doc = json.loads(blob.download_as_text())
         st = doc.get("started_at")
         ct = doc.get("completed_at")
         if not st or not ct:
             continue
-        try:
-            elapsed = (
-                dt.datetime.fromisoformat(ct.replace("Z", "+00:00"))
-                - dt.datetime.fromisoformat(st.replace("Z", "+00:00"))
-            ).total_seconds()
-        except Exception:
-            continue
+        elapsed = (
+            dt.datetime.fromisoformat(ct.replace("Z", "+00:00"))
+            - dt.datetime.fromisoformat(st.replace("Z", "+00:00"))
+        ).total_seconds()
         if elapsed <= 0:
             continue
         model, task = _extract_model_task(doc.get("command") or "")
@@ -113,16 +107,10 @@ def _live_agents(store: JobStorage, now: dt.datetime) -> dict[str, dict]:
         return {}
     agents: dict[str, dict] = {}
     for blob in bucket.list_blobs(prefix="capacity/"):
-        try:
-            doc = json.loads(blob.download_as_text())
-        except Exception:
-            continue
+        doc = json.loads(blob.download_as_text())
         cid = doc.get("consumer_id") or ""
         pub = doc.get("published_at") or ""
-        try:
-            age = (now - dt.datetime.fromisoformat(pub.replace("Z", "+00:00"))).total_seconds()
-        except Exception:
-            continue
+        age = (now - dt.datetime.fromisoformat(pub.replace("Z", "+00:00"))).total_seconds()
         if age > HEARTBEAT_TTL_S:
             continue
         agents[cid] = {

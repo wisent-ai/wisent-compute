@@ -114,12 +114,11 @@ def read_consumer_capacity(store: JobStorage) -> dict[str, dict]:
             continue
         # Race: an agent can self-delete its own broadcast (or another tick
         # can sweep stale broadcasts) between list above and download below.
-        # On either backend a 404/NotFound surfaces as a None download
-        # result; drop the blob and continue.
-        try:
-            raw = blob.download_text()
-        except Exception:
-            continue
+        # Both backends translate the 404 into a None return so the
+        # missing-blob case is the only one we drop; any other error
+        # propagates to the caller so transient SDK/network failures stay
+        # visible.
+        raw = blob.download_text()
         if raw is None:
             continue
         payload = json.loads(raw)

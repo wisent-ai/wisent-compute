@@ -38,13 +38,10 @@ def _pypi_latest(pkg: str) -> str | None:
     cached = _CACHE.get(pkg)
     if cached and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
         return cached[1]
-    try:
-        with urllib.request.urlopen(
-            f"https://pypi.org/pypi/{pkg}/json",
-        ) as resp:
-            data = json.loads(resp.read())
-    except Exception:
-        return None
+    with urllib.request.urlopen(
+        f"https://pypi.org/pypi/{pkg}/json",
+    ) as resp:
+        data = json.loads(resp.read())
     releases = data.get("releases") or {}
     if not releases:
         return None
@@ -79,13 +76,10 @@ def wisent_import_ok() -> tuple[bool, str]:
     claiming jobs that will fail their first `python -m wisent...` line.
     """
     import subprocess, sys
-    try:
-        res = subprocess.run(
-            [sys.executable, "-c", "import wisent; import wisent_compute"],
-            capture_output=True, text=True,
-        )
-    except Exception as e:
-        return False, f"smoke subprocess error: {e}"
+    res = subprocess.run(
+        [sys.executable, "-c", "import wisent; import wisent_compute"],
+        capture_output=True, text=True,
+    )
     if res.returncode == 0:
         return True, ""
     return False, (res.stderr or res.stdout or "(no output)").strip()[:400]

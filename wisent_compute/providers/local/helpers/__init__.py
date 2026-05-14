@@ -37,23 +37,26 @@ def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
 
 
 def _vast_has_renter() -> bool:
-    """Check if any Vast.ai instance is currently rented on this machine."""
+    """Check if any Vast.ai instance is currently rented on this machine.
+
+    No exception swallow: a failed API call would otherwise be silently
+    treated as 'no renter' and the agent would claim jobs on top of a
+    paid Vast.ai renter, wasting both the renter's GPU time and ours.
+    Caller must crash visibly so the operator notices Vast.ai outage.
+    """
     api_key = os.environ.get("VAST_API_KEY", "").strip()
     if not api_key:
         return False
-    try:
-        req = urllib.request.Request(
-            f"{VAST_API}/instances?owner=me",
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        resp = urllib.request.urlopen(req)
-        instances = json.loads(resp.read())
-        return any(
-            i.get("actual_status") == "running"
-            for i in instances.get("instances", [])
-        )
-    except Exception:
-        return False
+    req = urllib.request.Request(
+        f"{VAST_API}/instances?owner=me",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    resp = urllib.request.urlopen(req)
+    instances = json.loads(resp.read())
+    return any(
+        i.get("actual_status") == "running"
+        for i in instances.get("instances", [])
+    )
 
 
 def _detect_gpu_type() -> str:

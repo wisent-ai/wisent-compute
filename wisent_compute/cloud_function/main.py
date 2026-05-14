@@ -27,14 +27,11 @@ def _load_secrets():
     client = secretmanager_v1.SecretManagerServiceClient()
     _secrets = {}
     for name in ("wisent-hf-token", "wisent-gh-token"):
-        try:
-            r = client.access_secret_version(request={
-                "name": f"projects/{PROJECT}/secrets/{name}/versions/latest"
-            })
-            key = name.replace("wisent-", "").replace("-", "_").upper()
-            _secrets[key] = r.payload.data.decode("utf-8")
-        except Exception:
-            pass
+        r = client.access_secret_version(request={
+            "name": f"projects/{PROJECT}/secrets/{name}/versions/latest"
+        })
+        key = name.replace("wisent-", "").replace("-", "_").upper()
+        _secrets[key] = r.payload.data.decode("utf-8")
     return _secrets
 
 
@@ -62,11 +59,7 @@ def monitor_jobs(request=None):
     total_reaped = 0
     total_scheduled = 0
     for name in WC_PROVIDERS:
-        try:
-            provider = get_provider(name)
-        except Exception as exc:
-            _log(f"skip {name}: {exc!r}")
-            continue
+        provider = get_provider(name)
         check_running_jobs(store, provider, _publisher)
         total_reaped += reap_dead_agents(store, provider, kind=name)
         total_scheduled += schedule_queued_jobs(store, provider, name, secrets)
