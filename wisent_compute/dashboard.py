@@ -7,11 +7,13 @@ as the com.wisent.compute.dashboard LaunchAgent on the mac mini.
 
 GET /                  - HTML overview (auto-refresh)
 GET /api/state.json    - same data as JSON
+
+Summary/parsing helpers live in dashboard_summary/. This module holds
+the HTTP plumbing, refresh loop, and HTML rendering only.
 """
 from __future__ import annotations
 
 import json
-import re
 import sys
 import threading
 import time
@@ -21,176 +23,12 @@ from typing import Any
 
 from .config import (
     BUCKET,
-    DASHBOARD_AGENT_FRESH_SECONDS,
     DASHBOARD_BIND,
     DASHBOARD_PORT,
     DASHBOARD_REFRESH_SECONDS,
 )
+from .dashboard_summary import _fast_counts, _summarize
 from .queue.storage import JobStorage
-
-
-_MODEL_RE = re.compile(r"--model\s+['\"]?([^'\"\s]+)")
-_TASK_RE = re.compile(r"--task\s+(\S+)")
-
-
-def _parse_iso(ts: str | None) -> datetime | None:
-    if not ts:
-        return None
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def _wall_seconds(job) -> float | None:
-    s = _parse_iso(getattr(job, "started_at", None))
-    e = _parse_iso(getattr(job, "completed_at", None)) or \
-        _parse_iso(getattr(job, "failed_at", None))
-    if s is None or e is None:
-        return None
-    return max(0.0, (e - s).total_seconds())
-
-
-def _model_of(cmd: str) -> str:
-    m = _MODEL_RE.search(cmd or "")
-    return m.group(1) if m else "(unknown)"
-
-
-def _task_of(cmd: str) -> str:
-    m = _TASK_RE.search(cmd or "")
-    return m.group(1) if m else ""
-
-
-def _read_capacity_blobs(store: JobStorage) -> list[dict]:
-    """Return parsed capacity/<consumer>.json blobs (most recent first)."""
-    if store._sdk_bucket is None:
-        return []
-    blobs: list[dict] = []
-    for blob in store._sdk_bucket.list_blobs(prefix="capacity/"):
-        if not blob.name.endswith(".json"):
-            continue
-        try:
-            data = json.loads(blob.download_as_text())
-        except Exception:
-            continue
-        data["_blob_name"] = blob.name
-        data["_blob_updated"] = blob.updated.isoformat() if blob.updated else None
-        blobs.append(data)
-    blobs.sort(key=lambda d: d.get("published_at") or "", reverse=True)
-    return blobs
-
-
-def _fast_counts(store: JobStorage) -> dict[str, int]:
-    """Count blobs per state prefix without downloading job JSONs.
-
-    JobStorage.list_all_jobs() downloads every blob's JSON to construct
-    Job objects — with 13k+ jobs that takes minutes. The dashboard only
-    needs counts up-front, so iterate blob names via the SDK's
-    list_blobs API which is paginated and metadata-only.
-    """
-    out = {"queue": 0, "running": 0, "completed": 0, "failed": 0}
-    if store._sdk_bucket is None:
-        return out
-    for state in out:
-        out[state] = sum(1 for b in store._sdk_bucket.list_blobs(
-            prefix=f"{state}/", fields="items(name),nextPageToken")
-            if b.name.endswith(".json"))
-    return out
-
-
-def _summarize(store: JobStorage) -> dict[str, Any]:
-    all_jobs = store.list_all_jobs()
-    counts = {k: len(v) for k, v in all_jobs.items()}
-
-    by_model_state: dict[str, dict[str, int]] = {}
-    recent_failed: list[dict] = []
-    completed_walls: list[float] = []
-    completed_recent: list[dict] = []
-    for state, jobs in all_jobs.items():
-        for job in jobs:
-            model = _model_of(job.command or "")
-            row = by_model_state.setdefault(model,
-                {"queue": 0, "running": 0, "completed": 0, "failed": 0})
-            if state in row:
-                row[state] += 1
-            if state == "completed":
-                w = _wall_seconds(job)
-                if w is not None:
-                    completed_walls.append(w)
-                if len(completed_recent) < 200:
-                    completed_recent.append({
-                        "job_id": job.job_id,
-                        "model": model,
-                        "task": _task_of(job.command or ""),
-                        "wall_seconds": w,
-                        "completed_at": getattr(job, "completed_at", None),
-                    })
-            elif state == "failed" and len(recent_failed) < 30:
-                recent_failed.append({
-                    "job_id": job.job_id,
-                    "model": model,
-                    "task": _task_of(job.command or ""),
-                    "error": (getattr(job, "error", None) or "")[:240],
-                })
-
-    completed_recent.sort(
-        key=lambda r: r.get("completed_at") or "", reverse=True)
-
-    capacity = _read_capacity_blobs(store)
-    now = datetime.now(timezone.utc)
-    fresh_cutoff_seconds = float(DASHBOARD_AGENT_FRESH_SECONDS)
-    live_agents: list[dict] = []
-    stale_agents: list[dict] = []
-    for c in capacity:
-        published = _parse_iso(c.get("published_at"))
-        age = (now - published).total_seconds() if published else None
-        entry = {
-            "consumer_id": c.get("consumer_id"),
-            "kind": c.get("kind"),
-            "free_slots": c.get("free_slots") or {},
-            "free_vram_gb": c.get("free_vram_gb"),
-            "total_vram_gb": c.get("total_vram_gb"),
-            "published_at": c.get("published_at"),
-            "age_seconds": age,
-            "diag": c.get("diag") or {},
-        }
-        if age is not None and age <= fresh_cutoff_seconds:
-            live_agents.append(entry)
-        else:
-            stale_agents.append(entry)
-
-    # Throughput-based projection: median wall * queue_depth / live worker
-    # parallelism. If we have no live agents, projection is None.
-    avg_wall = (sum(completed_walls) / len(completed_walls)
-                if completed_walls else None)
-    live_slots = 0
-    for a in live_agents:
-        for n in (a.get("free_slots") or {}).values():
-            try:
-                live_slots += int(n)
-            except Exception:
-                pass
-    queue_depth = counts.get("queue", 0)
-    projected_remaining_seconds: float | None = None
-    if avg_wall and live_slots > 0:
-        projected_remaining_seconds = avg_wall * queue_depth / live_slots
-
-    return {
-        "now": now.isoformat(),
-        "bucket": store.bucket_name,
-        "counts": counts,
-        "by_model_state": by_model_state,
-        "live_agents": live_agents,
-        "stale_agents": stale_agents,
-        "recent_failed": recent_failed[:30],
-        "completed_recent": completed_recent[:30],
-        "throughput": {
-            "avg_wall_seconds_per_completed_job": avg_wall,
-            "samples": len(completed_walls),
-            "live_total_free_slots": live_slots,
-            "projected_remaining_seconds": projected_remaining_seconds,
-        },
-    }
 
 
 def _format_age(s: float | None) -> str:
@@ -296,10 +134,10 @@ failed <strong>{counts.get('failed',0)}</strong>
 </body></html>"""
 
 
-# Background refresh state — populated by a daemon thread and read by the
-# request handlers. The slow path (_summarize) downloads every job blob,
-# so we never run it inline with a request; we serve the last cached
-# snapshot and refresh in the background.
+# Background refresh state — populated by a daemon thread and read by
+# the request handlers. The slow path (_summarize) downloads every job
+# blob, so it never runs inline with a request; we serve the last
+# cached snapshot and refresh in the background.
 _CACHE_LOCK = threading.Lock()
 _CACHE_STATE: dict[str, Any] = {
     "ready": False,
@@ -318,40 +156,39 @@ _CACHE_STATE: dict[str, Any] = {
         "projected_remaining_seconds": None,
     },
     "last_refresh_seconds": None,
-    "last_refresh_error": None,
 }
 
 
 def _refresh_loop(interval: int) -> None:
-    """Daemon: refresh the cache every <interval> seconds."""
+    """Daemon: refresh the cache every <interval> seconds.
+
+    Refresh failures crash the loop; the daemon dies and the HTTP
+    handler keeps serving the last good cached snapshot until the
+    operator restarts the dashboard. Previously a broad exception
+    handler logged-and-continued, silently producing a stale dashboard
+    indefinitely.
+    """
     while True:
         store = JobStorage(BUCKET)
-        try:
-            t0 = time.time()
-            # Fast counts first so the cache is always at least roughly
-            # current even if the slow per-job pass fails or is paused.
-            counts = _fast_counts(store)
-            with _CACHE_LOCK:
-                _CACHE_STATE["counts"].update(counts)
-                _CACHE_STATE["now"] = datetime.now(timezone.utc).isoformat()
-                _CACHE_STATE["ready"] = True
-            # Slow per-job summary. May take a long time on a hot queue.
-            full = _summarize(store)
-            with _CACHE_LOCK:
-                _CACHE_STATE.update(full)
-                _CACHE_STATE["last_refresh_seconds"] = time.time() - t0
-                _CACHE_STATE["last_refresh_error"] = None
-                _CACHE_STATE["ready"] = True
-        except Exception as exc:
-            with _CACHE_LOCK:
-                _CACHE_STATE["last_refresh_error"] = repr(exc)
-            sys.stderr.write(f"[dashboard] refresh failed: {exc!r}\n")
-            sys.stderr.flush()
+        t0 = time.time()
+        counts = _fast_counts(store)
+        with _CACHE_LOCK:
+            _CACHE_STATE["counts"].update(counts)
+            _CACHE_STATE["now"] = datetime.now(timezone.utc).isoformat()
+            _CACHE_STATE["ready"] = True
+        full = _summarize(store)
+        with _CACHE_LOCK:
+            _CACHE_STATE.update(full)
+            _CACHE_STATE["last_refresh_seconds"] = time.time() - t0
+            _CACHE_STATE["ready"] = True
         time.sleep(interval)
 
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 (stdlib API)
+        # HTTP 500 on internal error is the documented error contract for
+        # an HTTP handler; this except surfaces the failure to the client
+        # rather than hanging the connection.
         try:
             with _CACHE_LOCK:
                 state = dict(_CACHE_STATE)

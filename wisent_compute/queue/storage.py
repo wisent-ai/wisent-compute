@@ -1,6 +1,8 @@
 """GCS storage operations for job queue.
 
 Uses gsutil subprocess for CLI (gcloud auth), Python SDK for Cloud Function (ADC).
+Job-listing logic lives in queue/listing/ (priority markers, fitting,
+priority-then-FIFO). JobStorage methods on this class are thin delegates.
 """
 from __future__ import annotations
 
@@ -78,11 +80,6 @@ class JobStorage:
         self._sdk_bucket = None
         self._azure_backend = None
 
-        # Storage backend selector. Default "gcs" preserves every existing
-        # call site (gs:// path, _sdk_bucket, gsutil fallback). When set to
-        # "azure" the same JobStorage routes uploads/downloads/listings
-        # through AzureBlobBackend; the gs URI is left dangling but no GCS
-        # call is ever made from this instance.
         from ..config import (
             WC_AZURE_CONTAINER,
             WC_AZURE_STORAGE_ACCOUNT,
@@ -100,8 +97,6 @@ class JobStorage:
 
     @property
     def bucket(self):
-        # Returned only for the GCS path; Azure-backed JobStorage exposes
-        # bucket=None and callers go through the abstract methods below.
         return self._sdk_bucket
 
     @property
@@ -150,8 +145,7 @@ class JobStorage:
     def _list_paths(self, prefix: str, *, oldest_first: int = 0) -> list[str]:
         """Return blob names under `prefix`. When oldest_first>0, return only
         that many names sorted by creation time ascending — bounded
-        listing for hot prefixes (queue/ has 14k+ blobs, fetching all of
-        them every Cloud Function tick blew the 60s timeout)."""
+        listing for hot prefixes (queue/ has 14k+ blobs)."""
         if self._azure_backend is not None:
             return self._azure_backend.list_paths(prefix, oldest_first=oldest_first)
         if self._sdk_bucket:
@@ -176,7 +170,6 @@ class JobStorage:
             return
         from .azure_blob import BlobInfo
         for blob in self._sdk_bucket.list_blobs(prefix=prefix):
-            # Capture per-iteration so the closure doesn't see a mutating var.
             blob_obj = blob
             yield BlobInfo(
                 name=blob_obj.name,
@@ -196,18 +189,24 @@ class JobStorage:
         if self._azure_backend is not None:
             self._azure_backend.set_metadata(blob_path, meta)
         elif self._sdk_bucket:
-            try:
-                blob = self._sdk_bucket.blob(blob_path); blob.reload()
-                blob.metadata = {**(blob.metadata or {}), **meta}
-                blob.patch()
-            except Exception:
-                pass
+            blob = self._sdk_bucket.blob(blob_path); blob.reload()
+            blob.metadata = {**(blob.metadata or {}), **meta}
+            blob.patch()
         if prefix == "queue" and int(getattr(job, "priority", 0) or 0) > 0:
             self.write_priority_marker(job)
 
     def read_job(self, prefix: str, job_id: str) -> Job | None:
         data = self._download_text(f"{prefix}/{job_id}.json")
         return Job.from_json(data) if data else None
+
+    def update_priority(self, job_id: str, prefix: str, new_priority: int) -> bool:
+        """Rewrite a queued job priority in-place."""
+        job = self.read_job(prefix, job_id)
+        if job is None:
+            return False
+        job.priority = int(new_priority)
+        self.write_job(prefix, job)
+        return True
 
     def delete_job(self, prefix: str, job_id: str):
         self._delete_blob(f"{prefix}/{job_id}.json")
@@ -220,151 +219,33 @@ class JobStorage:
         if from_prefix == "queue":
             self.delete_priority_marker(job.job_id)
 
-    def _priority_key(self, job: Job) -> str:
-        """Sortable name component: lower = higher real priority + older."""
-        prio = max(0, min(99999999, int(getattr(job, "priority", 0) or 0)))
-        inv = 99999999 - prio
-        ts = ""
-        ca = getattr(job, "created_at", None)
-        if ca is not None:
-            ts = ca.isoformat() if hasattr(ca, "isoformat") else str(ca)
-        return f"{inv:08d}-{ts}"
+    # ---- delegates to queue/listing/ ----
 
     def write_priority_marker(self, job: Job):
-        """Index entry for priority>0 jobs. The blob NAME encodes
-        (inv_priority, created_at) so name-ascending sort = priority-desc
-        then FIFO. Body holds {job_id, priority} for unambiguous resolve."""
-        name = f"queue_priority/{self._priority_key(job)}-{job.job_id}.json"
-        body = json.dumps({"job_id": job.job_id, "priority": int(job.priority)})
-        self._upload_text(name, body)
+        from .listing import write_marker
+        write_marker(self, job)
 
     def delete_priority_marker(self, job_id: str):
-        """Remove any priority marker(s) for this job_id. Safe no-op if absent."""
-        suffix = f"-{job_id}.json"
-        for path in self._list_paths("queue_priority/"):
-            if path.endswith(suffix):
-                self._delete_blob(path)
+        from .listing import delete_marker
+        delete_marker(self, job_id)
 
     def list_priority_jobs(self, prefix: str, *, top_n: int) -> list[Job]:
-        """Fetch the top_n highest-priority jobs from prefix/ via the
-        queue_priority/ index. Markers sort ascending by name = (inv_priority,
-        created_at), so the first top_n give priority-desc + FIFO."""
-        if top_n <= 0:
-            return []
-        from concurrent.futures import ThreadPoolExecutor
-        marker_paths = sorted(
-            p for p in self._list_paths("queue_priority/") if p.endswith(".json")
-        )[:top_n]
-        if not marker_paths:
-            return []
-        workers = min(10, max(1, len(marker_paths)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            bodies = list(pool.map(self._download_text, marker_paths))
-        job_ids = []
-        for b in bodies:
-            if not b:
-                continue
-            try:
-                jid = json.loads(b).get("job_id")
-            except Exception:
-                continue
-            if jid:
-                job_ids.append(jid)
-        if not job_ids:
-            return []
-        job_paths = [f"{prefix}/{j}.json" for j in job_ids]
-        with ThreadPoolExecutor(max_workers=min(10, len(job_paths))) as pool:
-            blobs = list(pool.map(self._download_text, job_paths))
-        out = []
-        for data in blobs:
-            if data:
-                try:
-                    out.append(Job.from_json(data))
-                except Exception:
-                    pass
-        return out
+        from .listing import list_top_n
+        return list_top_n(self, prefix, top_n=top_n)
 
     def list_jobs_priority_first(self, prefix: str, *, cap: int) -> list[Job]:
-        """Combined listing: priority markers first, then FIFO oldest_first
-        over the same prefix. Deduped by job_id. The whole point of this
-        method is that high-priority jobs jump the FIFO listing window.
-        Calls migrations.backfill_priority_markers up-front so any pre-0.4.26
-        queued jobs get retroactive markers without manual intervention."""
-        from . import migrations as _mig
-        _mig.backfill_priority_markers(self)
-        pri = self.list_priority_jobs(prefix, top_n=cap)
-        fifo = self.list_jobs(prefix, oldest_first=cap)
-        seen: set[str] = set()
-        out: list[Job] = []
-        for j in (pri + fifo):
-            if j.job_id in seen:
-                continue
-            seen.add(j.job_id)
-            out.append(j)
-        return out
+        from .listing import list_priority_first
+        return list_priority_first(self, prefix, cap=cap)
 
     def list_jobs_fitting(self, prefix: str, *, max_gpu_mem_gb: int, cap: int = 4000) -> list[Job]:
-        """Priority-aware fitting jobs: queue_priority/ markers first, then FIFO
-        from queue/. Metadata stamping filters non-fitting blobs before download."""
-        # gsutil-only mode (no SDK on either side) can't read metadata, so
-        # fall back to downloading all jobs and filtering in Python.
-        if self._azure_backend is None and self._sdk_bucket is None:
-            jobs = self.list_jobs(prefix, oldest_first=cap)
-            return [j for j in jobs if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb]
-        out: list[Job] = []
-        seen: set[str] = set()
-        if prefix == "queue":
-            for j in self.list_priority_jobs(prefix, top_n=cap):
-                if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb and j.job_id not in seen:
-                    out.append(j); seen.add(j.job_id)
-        eligible_paths: list[str] = []
-        for blob in self.list_blobs_with_meta(f"{prefix}/"):
-            jid = blob.name.split("/")[-1].removesuffix(".json")
-            if not blob.name.endswith(".json") or jid in seen:
-                continue
-            md = blob.metadata
-            mem_str = md.get("gpu_mem_gb")
-            try:
-                if mem_str is None or int(mem_str) <= max_gpu_mem_gb:
-                    eligible_paths.append(blob.name)
-            except ValueError:
-                eligible_paths.append(blob.name)
-            if len(eligible_paths) + len(out) >= cap: break
-        from concurrent.futures import ThreadPoolExecutor
-        def _read(path):
-            try: txt = self._download_text(path); return Job.from_json(txt) if txt else None
-            except Exception: return None
-        with ThreadPoolExecutor(max_workers=32) as ex:
-            for j in ex.map(_read, eligible_paths):
-                if j is not None and int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb:
-                    out.append(j)
-        return out
+        from .listing import list_fitting
+        return list_fitting(self, prefix, max_gpu_mem_gb=max_gpu_mem_gb, cap=cap)
 
     def list_jobs(self, prefix: str, *, oldest_first: int = 0) -> list[Job]:
-        """Parallel-fetch job JSONs under prefix/ via a thread pool.
+        from .listing import list_jobs as _list_jobs
+        return _list_jobs(self, prefix, oldest_first=oldest_first)
 
-        oldest_first>0 caps to that many blobs picked by GCS time_created
-        — required for queue/ where 14k+ blobs would otherwise force the
-        scheduler to download every JSON before slicing per_tick_cap and
-        blow the 60s function timeout. Threads parallelise the I/O-bound
-        downloads. Workers scale with path count up to the GCS client's
-        connection pool size to avoid 'pool full' churn.
-        """
-        from concurrent.futures import ThreadPoolExecutor
-        paths = [
-            p for p in self._list_paths(f"{prefix}/", oldest_first=oldest_first)
-            if p.endswith(".json")
-        ]
-        if not paths:
-            return []
-        workers = min(10, max(1, len(paths)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            blobs = list(pool.map(self._download_text, paths))
-        jobs = []
-        for data in blobs:
-            if data:
-                jobs.append(Job.from_json(data))
-        return jobs
+    # ---- end delegates ----
 
     def upload_script(self, job_id: str, content: str):
         self._upload_text(f"scripts/{job_id}.sh", content)
