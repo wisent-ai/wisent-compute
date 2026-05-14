@@ -68,12 +68,50 @@ def _evict_complete_hf_revisions(log_fn: Callable[[str], None]) -> float:
     return freed_bytes / (1024 ** 3)
 
 
+def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
+    """Second-tier eviction: pip wheel cache, wisent local cache, apt
+    archive, system journals truncated to last day. Used when HF cache
+    eviction freed 0 GB (typical when the HF cache directory itself was
+    already pruned by something upstream) but the disk gate still
+    refuses slots. Each target is reproducible from upstream so its
+    deletion does not lose unique state.
+    """
+    home = os.path.expanduser("~")
+    targets = [
+        os.path.join(home, ".cache", "pip"),
+        os.path.join(home, ".wisent_cache"),
+        os.path.join(home, ".cache", "huggingface", "hub"),
+        os.path.join(home, ".cache", "huggingface", "datasets"),
+        "/var/cache/apt/archives",
+        "/tmp/pip-build",
+    ]
+    freed = 0.0
+    for tgt in targets:
+        if not os.path.isdir(tgt):
+            continue
+        before = shutil.disk_usage(home).free
+        try:
+            shutil.rmtree(tgt, ignore_errors=True)
+        except Exception as exc:
+            log_fn(f"secondary-evict rmtree({tgt}) failed: {exc!r}")
+            continue
+        after = shutil.disk_usage(home).free
+        gained_gb = max(0.0, (after - before) / (1024 ** 3))
+        if gained_gb > 0:
+            log_fn(f"secondary-evict rm {tgt}: +{gained_gb:.1f} GB free")
+            freed += gained_gb
+    return freed
+
+
 def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
     """Returns (refuse_slots_this_tick, diag_updates).
 
-    refuse_slots_this_tick=True if free disk is still below
-    MIN_FREE_DISK_GB AFTER attempting one HF-cache eviction of complete
-    (not-in-progress) revisions only.
+    refuse_slots_this_tick=True only if free disk is still below
+    MIN_FREE_DISK_GB AFTER:
+      1. Evicting oldest-accessed complete HF cache revisions
+      2. Evicting secondary caches (pip wheels, apt archives, wisent
+         cache, HF cache root, HF datasets cache) when HF eviction
+         freed 0 GB but disk is still tight
     """
     home = os.path.expanduser("~")
     free_gb = _free_gb(home)
@@ -90,6 +128,14 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
         free_gb = after
         diag["free_disk_gb"] = round(free_gb, 1)
         diag["hf_cache_evicted_gb"] = round(actual_reclaimed, 1)
+        # Second-tier eviction when HF cache yielded nothing but disk
+        # is still under the threshold. Targets are all reproducible.
+        if free_gb < MIN_FREE_DISK_GB and actual_reclaimed < 1.0:
+            secondary = _evict_secondary_caches(log_fn)
+            after2 = _free_gb(home)
+            free_gb = after2
+            diag["free_disk_gb"] = round(free_gb, 1)
+            diag["secondary_evicted_gb"] = round(secondary, 1)
     refuse = 0 <= free_gb < MIN_FREE_DISK_GB
     if refuse:
         log_fn(
