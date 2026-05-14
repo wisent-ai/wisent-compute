@@ -163,6 +163,16 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 total_vram_gb = int(t.vram_gb)
         vast_active = _vast_has_renter()
         slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
+        # Disk eviction MUST run before pip_upgrade_and_exec. Workstation
+        # crash-looped at disk_pct=89% (n_restarts=2380) because the
+        # drift handler ran pip install which exhausted the remaining
+        # 10 GB and crashed before stale_training_dirs eviction in
+        # gate_and_maybe_evict could free disk. Running the gate first
+        # gives pip room to work; the second gate call later in the
+        # loop is a fast no-op when disk is already healthy.
+        from .local.disk import gate_and_maybe_evict as _disk_gate_pre
+        _pre_refuse, _pre_diag = _disk_gate_pre(_log)
+        agent_diag.update(_pre_diag)
         from .local.version_check import maybe_drain_or_upgrade as _drain
         if _drain(slots, _log, kind=kind):
             time.sleep(POLL_INTERVAL); continue
