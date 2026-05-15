@@ -137,6 +137,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     last_fleet_flush = time.time()
     FLEET_FLUSH_INTERVAL = 180  # ~20 commits/hour/agent << 200/hour HF cap
 
+    _last_cap = None
     while True:
         # Phase breadcrumbs: 40GB a2-highgpu-1g agents go silent right
         # after "Agent started" and never broadcast capacity, so the
@@ -145,6 +146,16 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         # produced zero output. These _log lines pinpoint which call
         # blocks. Remove once the 40GB hang is root-caused.
         _log("loop: iter-start")
+        if _last_cap is not None:
+            try:
+                publish_capacity(
+                    store, consumer_id, kind, _last_cap["free_slots"],
+                    free_vram_gb=_last_cap["free_vram_gb"],
+                    total_vram_gb=_last_cap["total_vram_gb"],
+                    diag=_last_cap["diag"],
+                )
+            except Exception:
+                pass
         if time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL or _staging_size_gb(fleet_staging) > 5:
             from wisent.core.reading.modules.utilities.data.sources.hf.hf_writers import flush_staging_dir
             if os.path.isdir(fleet_staging) and any(os.scandir(fleet_staging)):
@@ -211,6 +222,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
         publish_capacity(store, consumer_id, kind, free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
+        _last_cap = {"free_slots": free_slots, "free_vram_gb": free_vram_gb, "total_vram_gb": total_vram_gb, "diag": dict(agent_diag)}
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
             time.sleep(10)
