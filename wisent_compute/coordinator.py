@@ -171,10 +171,21 @@ def run(target: Optional[str] = None, once: bool = False) -> int:
         # interval_seconds without depending on a PyPI publish.
         if target:
             from .targets import lookup_coordinator as _lookup
-            still_there = _lookup(target)
+            # source="gcs": the GCS registry is the ONLY authority for the
+            # self-survival check. The default source="auto" also consults
+            # the package-shipped registry.json when the GCS read returns
+            # None, and that bundled file still lists local-mac, so a stale
+            # daemon whose GCS fetch momentarily fails (or whose _GCS_CACHE
+            # is empty) resurrects itself off the bundled copy and keeps
+            # reaping fresh training VMs. Confirmed live 2026-05-15: the
+            # mac mini daemon returned 3+ times after local-mac was removed
+            # from GCS because the bundled registry.json still listed it.
+            # GCS-only means: operator removes local-mac from GCS -> daemon
+            # exits next tick, with no local escape hatch.
+            still_there = _lookup(target, source="gcs")
             if still_there is None:
                 _log(
-                    f"coordinator '{target}' no longer in registry; exiting. "
+                    f"coordinator '{target}' not in GCS registry; exiting. "
                     f"Operator removed/renamed the entry — daemon stops here so "
                     f"launchd/supervisor backs off and stale code stops issuing "
                     f"GCE mutations."
