@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wisent-compute"
-version = "0.4.212"
+version = "0.4.213"
 description = "Job queue and compute management for Wisent GPU workloads"
 requires-python = ">=3.10"
 dependencies = [

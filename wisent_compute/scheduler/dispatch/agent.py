@@ -100,8 +100,19 @@ def dispatch_agent_vms(
     tick_tag = str(int(time.time()))
     created = 0
     scheduled = scheduled_so_far
+    # Time budget: each create_instance can spend ~10s/zone × 7+ zones for
+    # first-encounter stockouts, plus a full retry on the larger tier in
+    # the escalation branch. With n_to_dispatch=2-3 per bucket, the
+    # autoscaler can easily eat 300+ seconds — confirmed live 03:39Z
+    # 2026-05-15 tick 504'd at 540s. Bail out after 120s in the
+    # dispatcher and let the next tick try again (caches will be warm).
+    _DISPATCH_BUDGET_S = 120
+    _start = time.time()
     for (accel, mt), jobs in buckets.items():
         if scheduled >= per_tick_cap:
+            break
+        if (time.time() - _start) > _DISPATCH_BUDGET_S:
+            log_fn(f"dispatch budget exhausted after {scheduled} scheduled; deferring remaining buckets to next tick")
             break
         quota_left = available.get(accel, 0)
         if quota_left <= 0:
@@ -124,6 +135,9 @@ def dispatch_agent_vms(
         # job-level flag and force every dispatch to STANDARD.
         preemptible_for_call = False
         for i in range(n_to_dispatch):
+            if (time.time() - _start) > _DISPATCH_BUDGET_S:
+                log_fn(f"dispatch budget exhausted mid-bucket {accel}; deferring")
+                return created
             script = template.replace("${ACCEL_TYPE}", accel)
             for key, val in secrets.items():
                 script = script.replace(f"${{{key}}}", val)
