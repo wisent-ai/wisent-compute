@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from google.cloud import compute_v1
 
 from ..config import PROJECT, ZONE_ROTATION, MACHINE_TYPE_ZONES, INSTANCE_PREFIX
@@ -11,6 +12,30 @@ from .base import Provider
 def _log(msg):
     sys.stderr.write(f"[gcp] {msg}\n")
     sys.stderr.flush()
+
+
+# Module-level cache of zones that recently returned
+# ZONE_RESOURCE_POOL_EXHAUSTED (GCE stockout). The Cloud Function process
+# typically lives for several ticks, so caching across calls avoids
+# re-discovering the same exhausted zones every tick. Without this, a
+# single autoscaler call could iterate 6+ stockout'd zones at ~30s each
+# (op.result() blocks until GCE marks the operation DONE-with-error),
+# blowing past the 540s Cloud Function timeout. Confirmed in production
+# logs at 01:33Z 2026-05-15: us-central1-a + us-central1-b both
+# stockout'd, autoscaler retried both in the same tick and 504'd.
+_STOCKOUT_TTL_S = 300
+_recent_stockouts: dict[str, float] = {}
+
+
+def _zone_recently_stocked_out(zone: str) -> bool:
+    ts = _recent_stockouts.get(zone)
+    if ts is None:
+        return False
+    return (time.time() - ts) < _STOCKOUT_TTL_S
+
+
+def _mark_zone_stockout(zone: str) -> None:
+    _recent_stockouts[zone] = time.time()
 
 
 class GCPProvider(Provider):
@@ -56,6 +81,15 @@ class GCPProvider(Provider):
         for zone in zones:
             region = "-".join(zone.split("-")[:2])
             if region in skip_regions:
+                continue
+            # Cross-tick stockout cache: if this zone returned
+            # ZONE_RESOURCE_POOL_EXHAUSTED within the last _STOCKOUT_TTL_S
+            # seconds, don't retry — op.result() would block ~30s for
+            # GCE to confirm the failure again, eating the 540s tick
+            # budget. The cache TTL means recovered capacity gets
+            # re-discovered after the TTL expires.
+            if _zone_recently_stocked_out(zone):
+                _log(f"skip {zone} (recent stockout, TTL {_STOCKOUT_TTL_S}s)")
                 continue
             try:
                 # Delete any existing terminated instance with same name.
@@ -133,6 +167,8 @@ class GCPProvider(Provider):
                 _log(f"Failed in {zone}: {e}")
                 if "QUOTA_EXCEEDED" in msg:
                     skip_regions.add(region)
+                if "ZONE_RESOURCE_POOL_EXHAUSTED" in msg or "STOCKOUT" in msg:
+                    _mark_zone_stockout(zone)
                 continue
         return None
 
