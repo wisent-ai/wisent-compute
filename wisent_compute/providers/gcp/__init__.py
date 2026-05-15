@@ -147,6 +147,31 @@ class GCPProvider(Provider):
                 msg = str(e)
                 if "already exists" in msg:
                     return f"{name}@{zone}"
+                # The GCE insert call at line 142 returns an Operation the moment
+                # the API accepts the request. op.result() polls until completion;
+                # if it raises (SSL UNEXPECTED_EOF_WHILE_READING, RetryError on
+                # transient transport failure, etc.) AFTER the insert was already
+                # accepted server-side, the VM may still come up. Without a probe
+                # here the loop falls through to the next zone and create_instance
+                # spawns a SECOND live VM with the same name in a different zone.
+                # Two VMs sharing one job_id both write to the same GCS log path
+                # gs://wisent-compute/status/<job>/output/command_output.log,
+                # producing interleaved-writer logs and double-charged compute.
+                # Confirmed live 2026-05-15: Qwen3 job 724084db had concurrent
+                # subprocesses at step 539 (25s/step) and step 68 (80s/step) in
+                # the same log. Probe this zone before continuing: if the VM
+                # actually exists, return its ref instead of falling through.
+                try:
+                    probe = self.client.get(project=self.project, zone=zone, instance=name)
+                    if probe.status in ("RUNNING", "STAGING", "PROVISIONING"):
+                        _log(
+                            f"Recovered {name}@{zone} (insert accepted, op.result() raised "
+                            f"{type(e).__name__}); returning existing ref to prevent duplicate "
+                            f"in another zone"
+                        )
+                        return f"{name}@{zone}"
+                except Exception:
+                    pass
                 _log(f"Failed in {zone}: {e}")
                 if "QUOTA_EXCEEDED" in msg:
                     skip_regions.add(region)
