@@ -87,6 +87,9 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                             for r, _ in provider.list_running_instance_refs_with_age()
                         }
                     if hostname not in _running_vm_names_cache:
+                        from . import heartbeat_guard as _hg_vm
+                        if _hg_vm.any_job_heartbeat_fresh(store, [job_id], 1800):
+                            continue  # fresh job heartbeat = VM+agent+training alive; aggregated_list missed a transient non-RUNNING (STAGING/REPAIRING/live-migration) snapshot
                         if getattr(job, "preemptible", False):
                             _requeue_preempted(store, job, "Spot preempted (cloud agent gone)")
                         else:
