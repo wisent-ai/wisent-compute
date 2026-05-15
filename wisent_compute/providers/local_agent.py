@@ -135,6 +135,13 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     FLEET_FLUSH_INTERVAL = 180  # ~20 commits/hour/agent << 200/hour HF cap
 
     while True:
+        # Phase breadcrumbs: 40GB a2-highgpu-1g agents go silent right
+        # after "Agent started" and never broadcast capacity, so the
+        # reaper culls them and pinned jobs (Llama 3ef705b2) never
+        # advance. The hang is somewhere in the first loop iteration but
+        # produced zero output. These _log lines pinpoint which call
+        # blocks. Remove once the 40GB hang is root-caused.
+        _log("loop: iter-start")
         if time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL or _staging_size_gb(fleet_staging) > 5:
             from wisent.core.reading.modules.utilities.data.sources.hf.hf_writers import flush_staging_dir
             if os.path.isdir(fleet_staging) and any(os.scandir(fleet_staging)):
@@ -143,7 +150,9 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 os.makedirs(fleet_staging, exist_ok=True)
                 _log("flushed fleet staging dir to HF (1 commit)")
             last_fleet_flush = time.time()
+        _log("loop: lookup_self")
         t = lookup_self(hostname, source="auto")
+        _log("loop: lookup_self done")
         if t and t.kind == "local":
             registry_env = t.env_overrides or {}
             env_delta = {
@@ -173,9 +182,11 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         from .local.disk import gate_and_maybe_evict as _disk_gate_pre
         _pre_refuse, _pre_diag = _disk_gate_pre(_log)
         agent_diag.update(_pre_diag)
+        _log("loop: pre-drain (detect_drift + import-smoketest subprocess)")
         from .local.version_check import maybe_drain_or_upgrade as _drain
         if _drain(slots, _log, kind=kind):
             time.sleep(POLL_INTERVAL); continue
+        _log("loop: drain done")
         if vast_active:
             publish_capacity(store, consumer_id, kind, {}, free_vram_gb=0,
                              total_vram_gb=total_vram_gb, diag=dict(agent_diag))
@@ -186,7 +197,9 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         if any(_slot_is_exclusive(s) for s in slots):
             used_vram = total_vram_gb
         free_vram_gb = max(0, total_vram_gb - used_vram)
+        _log("loop: pre-smi (_smi_free_vram_gb nvidia-smi call)")
         smi_free = _smi_free_vram_gb()
+        _log(f"loop: smi done free={smi_free}")
         if smi_free >= 0 and smi_free < free_vram_gb:
             free_vram_gb = smi_free
         from .local.disk import gate_and_maybe_evict as _disk_gate
@@ -198,8 +211,10 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             time.sleep(10)
             continue
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
+        _log(f"loop: pre-publish_capacity free_vram={free_vram_gb}")
         publish_capacity(store, consumer_id, kind, free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
+        _log("loop: publish_capacity done")
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
             time.sleep(10)
