@@ -268,8 +268,17 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
         rt = _estimate_runtime(j, history)
         if rt is None:
             mt = _extract_model_task(getattr(j, "command", "") or "")
-            skip_by_key[mt] = skip_by_key.get(mt, 0) + 1
-            continue
+            if int(getattr(j, "priority", 0) or 0) <= 0:
+                skip_by_key[mt] = skip_by_key.get(mt, 0) + 1
+                continue
+            # High-priority no-history job (one-off training run, e.g.
+            # free_chat_pd GRPO) must not be silently dropped: priority
+            # =999999 jobs were starved in queue indefinitely behind the
+            # history-backed benchmark backlog (Qwen3 724084db queued
+            # 30min+, zero dispatch, 2026-05-15). Conservative long
+            # runtime so it still enters schedulable and the priority
+            # sort below places it first.
+            rt = 6 * 3600.0
         schedulable.append((-int(getattr(j, "priority", 0) or 0), -rt, j))
     schedulable.sort(key=lambda t: (t[0], t[1]))
     to_write: list[object] = []
