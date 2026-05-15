@@ -200,17 +200,10 @@ def _seed_running_jobs(store: JobStorage, agents: dict[str, dict],
             runtime_seconds_estimate = doc.get("runtime_seconds_estimate", 0)
         est = _estimate_runtime(_Shim(), history)
         if est is None:
-            # Running job has no (model, task) parseable from its command
-            # (the canonical case is an admin/maintenance command like
-            # `pip install --upgrade ...` that runs through the queue but
-            # is not an extraction job). The matcher can't predict its
-            # finish time, so we don't seed an active slot for it. The
-            # job's actual VRAM usage is enforced by smi_free at claim
-            # time on the agent side anyway.
-            log_fn(
-                f"makespan: skip running {doc.get('job_id')} for seeding "
-                f"(no (model,task) parseable from command)"
-            )
+            # Admin/maintenance commands have no parseable (model, task); the
+            # matcher can't predict their finish time. Agent-side smi_free
+            # enforces actual VRAM at claim time.
+            log_fn(f"makespan: skip running {doc.get('job_id')} for seeding")
             continue
         remaining = max(0.0, est - max(0.0, elapsed))
         vram = int(doc.get("gpu_mem_gb") or 0)
@@ -265,35 +258,39 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
     if not agents:
         return 0
     _seed_running_jobs(store, agents, now, history, log_fn)
-    queued = list(store.list_jobs("queue"))
+    # Aggregate skip counts + parallel writes: 900+ per-job skip log lines
+    # were eating ~300s of the 540s tick budget; serial assignment writes
+    # added ~10s. Confirmed live 02:54Z 2026-05-15.
+    from concurrent.futures import ThreadPoolExecutor
     schedulable: list[tuple[int, float, object]] = []
-    skipped = 0
-    for j in queued:
+    skip_by_key: dict[tuple[str, str], int] = {}
+    for j in store.list_jobs("queue"):
         rt = _estimate_runtime(j, history)
         if rt is None:
-            model, task = _extract_model_task(getattr(j, "command", "") or "")
-            log_fn(
-                f"makespan: skip {getattr(j, 'job_id', '?')} -- no runtime "
-                f"data for (model={model!r}, task={task!r}); set "
-                f"runtime_seconds_estimate at submit time"
-            )
-            skipped += 1
+            mt = _extract_model_task(getattr(j, "command", "") or "")
+            skip_by_key[mt] = skip_by_key.get(mt, 0) + 1
             continue
-        priority = int(getattr(j, "priority", 0) or 0)
-        schedulable.append((-priority, -rt, j))
+        schedulable.append((-int(getattr(j, "priority", 0) or 0), -rt, j))
     schedulable.sort(key=lambda t: (t[0], t[1]))
-    rewritten = 0
+    to_write: list[object] = []
+    unassigned = 0
     for _p, neg_rt, job in schedulable:
         vram = int(getattr(job, "gpu_mem_gb", 0) or 0)
         chosen = _assign_one(job, agents, -neg_rt, vram)
         if chosen is None:
-            log_fn(f"makespan: no eligible agent for {getattr(job, 'job_id', '?')} vram={vram}GB")
+            unassigned += 1
             continue
         if getattr(job, "assigned_to", "") == chosen:
             continue
         job.assigned_to = chosen
-        store.write_job("queue", job)
-        rewritten += 1
+        to_write.append(job)
+    if to_write:
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            list(ex.map(lambda j: store.write_job("queue", j), to_write))
+    skipped = sum(skip_by_key.values())
     if skipped:
-        log_fn(f"makespan: {skipped} queued jobs skipped (no runtime data)")
-    return rewritten
+        top = sorted(skip_by_key.items(), key=lambda kv: -kv[1])[:5]
+        log_fn(f"makespan: {skipped} skipped; top: " + ", ".join(f"({m},{t}):{n}" for (m,t),n in top))
+    if unassigned:
+        log_fn(f"makespan: {unassigned} unassigned (no eligible agent)")
+    return len(to_write)
