@@ -79,9 +79,17 @@ def _save_stockouts(stockouts: dict[str, float]) -> None:
     blob = _stockout_blob()
     if blob is None:
         return
-    blob.upload_from_string(
-        json.dumps(stockouts), content_type="application/json",
-    )
+    # Network blip during a cache write should not crash the entire tick —
+    # the in-process cache still has the marker, and the next tick will
+    # retry the GCS write. Confirmed live 04:07Z 2026-05-15: SSL EOF on
+    # the upload_from_string raised through create_instance and crashed
+    # the whole monitor_jobs handler.
+    try:
+        blob.upload_from_string(
+            json.dumps(stockouts), content_type="application/json",
+        )
+    except Exception:
+        pass
 
 
 def zone_recently_stocked_out(zone: str) -> bool:
@@ -169,7 +177,10 @@ def mark_region_quota_exceeded(region: str, accel: str) -> None:
     data = {k: t for k, t in data.items() if (now - t) < (2 * QUOTA_TTL_S)}
     blob = _quota_blob()
     if blob is not None:
-        blob.upload_from_string(json.dumps(data), content_type="application/json")
+        try:
+            blob.upload_from_string(json.dumps(data), content_type="application/json")
+        except Exception:
+            pass  # transient network errors should not crash the tick
     global _quota_cache, _quota_built_at
     _quota_cache = data
     _quota_built_at = now
