@@ -248,6 +248,17 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
         if (age_seconds > IDLE_GRACE_SECONDS
                 and instance_ref not in completed_refs
                 and instance_ref not in active_refs):
+            # Branch A defers on a fresh job heartbeat; Branch B must
+            # too. A long training run never appears in completed/ and
+            # is protected only by the race-prone active_refs set, so a
+            # working VM (Llama 3ef705b2 at step ~3533, heartbeat fresh
+            # via the 0.4.224 daemon thread) was reaped here as
+            # "never-worked" at 2026-05-15T23:14:01 (restart 8). A fresh
+            # job heartbeat is proof the VM is productive — never reap.
+            _jids_b = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
+            if any_job_heartbeat_fresh(store, _jids_b, _hb_threshold):
+                _log(f"defer never-worked reap of {ref}: job heartbeat fresh for {_jids_b}")
+                continue
             provider.delete_instance(ref)
             _log(
                 f"reaped never-worked VM {ref} (broadcasting but 0 completions "
