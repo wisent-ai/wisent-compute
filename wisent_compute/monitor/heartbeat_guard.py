@@ -89,6 +89,43 @@ def any_job_heartbeat_fresh(
     return False
 
 
+def is_self_terminating_command(cmd: str) -> bool:
+    """True if the job command kills the `wc agent` process itself
+    (e.g. an upgrade-then-restart maintenance job:
+    `pip install --upgrade ... ; pkill -f "wc agent"`).
+
+    For such a command the agent's disappearance is the SUCCESS
+    condition, not an orphan failure. The agent dies before it can
+    write a COMPLETED status, so the job is stranded in running/ and
+    the orphan-reaper requeues it — which re-runs the kill on the
+    next agent generation, an infinite crash loop. Confirmed live
+    2026-05-15: job 435b184e crash-looped ubuntu-server
+    (wisent-agent.service n_restarts=7) until removed by operator.
+    """
+    if not cmd:
+        return False
+    return ("pkill" in cmd or "kill " in cmd) and "wc agent" in cmd
+
+
+def finalize_if_self_terminating(store, job, log_fn) -> bool:
+    """If job.command self-terminates the agent, finalize the job as
+    COMPLETED (running/ -> completed/) and return True. Otherwise
+    return False so the caller proceeds with its normal requeue path.
+    """
+    from datetime import datetime, timezone
+    from ..models import JobState
+    if not is_self_terminating_command(getattr(job, "command", "") or ""):
+        return False
+    job.state = JobState.COMPLETED.value
+    job.completed_at = datetime.now(timezone.utc).isoformat()
+    job.instance_ref = None
+    store.move_job(job, "running", "completed")
+    store.cleanup_status(job.job_id)
+    log_fn(f"{job.job_id}: COMPLETED (self-terminating maintenance cmd; "
+           f"agent kill is the success condition, not an orphan)")
+    return True
+
+
 def build_ref_to_jids(store) -> dict:
     """Build instance_ref -> list[job_id] from store.list_jobs('running').
     Used by the reaper to find which jobs claim each VM ref before the

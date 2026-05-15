@@ -69,12 +69,13 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                 agent_live = any(f"{p}-{hostname}" in _live_consumers_cache
                                  for p in ("local", "gcp", "azure", "aws"))
                 if agent_live:
-                    # Fresh capacity proves the agent is up but NOT that
-                    # this old running/ job is progressing — agent
-                    # restarts leave orphans. Per-job heartbeat is the
-                    # proof-of-life; requeue if stale.
-                    from .heartbeat_guard import any_job_heartbeat_fresh
-                    if any_job_heartbeat_fresh(store, [job_id], 1800):
+                    # Agent up != this old job progresses (restarts
+                    # orphan it). Heartbeat is proof; self-terminating
+                    # cmds (pkill wc agent) -> kill IS success.
+                    from . import heartbeat_guard as _hg
+                    if _hg.any_job_heartbeat_fresh(store, [job_id], 1800):
+                        continue
+                    if _hg.finalize_if_self_terminating(store, job, _log):
                         continue
                     _requeue(store, job, "local agent live but job heartbeat stale (orphan)")
                     continue
