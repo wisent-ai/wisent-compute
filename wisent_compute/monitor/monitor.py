@@ -233,14 +233,32 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     return deleted
 
 
+_COMPLETION_REFS_TTL_S = 300
+_completion_refs_cache: set = set()
+_completion_refs_built_at: float = 0.0
+
+
 def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set:
-    """Return set of instance_ref strings that appear in the completed/ bucket.
-    Used to detect VMs that broadcast capacity but never finish a job."""
+    """Return set of instance_ref strings appearing in completed/.
+
+    Iterating list_jobs("completed") downloads every completed blob (13,500+
+    in production) which took ~75s per tick — confirmed live 03:27Z
+    2026-05-15. Cache the result with a 5-minute TTL: the set only grows
+    when new jobs complete, and the never-worked reaper branch's accuracy
+    is unchanged because a VM that NEVER worked stays out of the set
+    regardless of cache age.
+    """
+    import time as _time
+    global _completion_refs_cache, _completion_refs_built_at
+    if (_time.time() - _completion_refs_built_at) < _COMPLETION_REFS_TTL_S and _completion_refs_cache:
+        return _completion_refs_cache
     refs = set()
     for j in store.list_jobs("completed"):
         r = getattr(j, "instance_ref", None)
         if r:
             refs.add(r)
+    _completion_refs_cache = refs
+    _completion_refs_built_at = _time.time()
     return refs
 
 
