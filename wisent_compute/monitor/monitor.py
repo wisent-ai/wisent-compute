@@ -144,7 +144,18 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     #     normally AND zero completions in completed/ for this instance_ref.
     #     Covers agents that broadcast but cannot claim (some upstream
     #     failure in the claim path).
-    BOOT_GRACE_SECONDS = 900       # 15-window grace for startup script + first broadcast
+    # 30-window grace for startup script + first broadcast. 900s was too
+    # tight: real-world boots on baked images consistently hit 10-14 min
+    # because pip install --force-reinstall of transformers + datasets +
+    # huggingface-hub re-downloads ~300MB on every VM, plus apt-lock
+    # contention + huggingface-cli prewarms. VMs hitting 14m42s were
+    # getting reaped at age=912s and their jobs requeued with restart
+    # counts of 4-5. Confirmed live 2026-05-15 02:24-02:26Z: three jobs
+    # (3ef705b2, 931b865e, f3fd41fb) ricocheting between dispatch and
+    # reap because BOOT_GRACE=900 fired before the agent's first
+    # broadcast. 1800s matches IDLE_GRACE pattern and absorbs the
+    # observed worst-case boot.
+    BOOT_GRACE_SECONDS = 1800
     IDLE_GRACE_SECONDS = 1800      # half-window grace for first completion
     # Build the completed-refs set ONLY if any VM is old enough to need it.
     # Iterating completed/ at fleet scale (~11k blobs) blows the 60s tick
