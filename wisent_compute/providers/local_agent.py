@@ -121,12 +121,15 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
 
     hostname = socket.gethostname()
+    _log("init: pre-reap_orphan_workdirs")
     _reap_orphan_workdirs(hostname)
+    _log("init: reap done; pre-JobStorage")
 
     initial_env: dict[str, str] = dict(os.environ)
     initial_gpu = gpu_type
 
     store = JobStorage(BUCKET)
+    _log("init: JobStorage done")
     consumer_id = f"{kind}-{hostname}"
     slots: list[dict] = []
     agent_diag: dict = {}
@@ -150,9 +153,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 os.makedirs(fleet_staging, exist_ok=True)
                 _log("flushed fleet staging dir to HF (1 commit)")
             last_fleet_flush = time.time()
-        _log("loop: lookup_self")
         t = lookup_self(hostname, source="auto")
-        _log("loop: lookup_self done")
         if t and t.kind == "local":
             registry_env = t.env_overrides or {}
             env_delta = {
@@ -186,7 +187,6 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         from .local.version_check import maybe_drain_or_upgrade as _drain
         if _drain(slots, _log, kind=kind):
             time.sleep(POLL_INTERVAL); continue
-        _log("loop: drain done")
         if vast_active:
             publish_capacity(store, consumer_id, kind, {}, free_vram_gb=0,
                              total_vram_gb=total_vram_gb, diag=dict(agent_diag))
@@ -197,9 +197,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         if any(_slot_is_exclusive(s) for s in slots):
             used_vram = total_vram_gb
         free_vram_gb = max(0, total_vram_gb - used_vram)
-        _log("loop: pre-smi (_smi_free_vram_gb nvidia-smi call)")
         smi_free = _smi_free_vram_gb()
-        _log(f"loop: smi done free={smi_free}")
         if smi_free >= 0 and smi_free < free_vram_gb:
             free_vram_gb = smi_free
         from .local.disk import gate_and_maybe_evict as _disk_gate
@@ -211,10 +209,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             time.sleep(10)
             continue
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
-        _log(f"loop: pre-publish_capacity free_vram={free_vram_gb}")
         publish_capacity(store, consumer_id, kind, free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
-        _log("loop: publish_capacity done")
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
             time.sleep(10)
