@@ -57,8 +57,13 @@ def _evict_complete_hf_revisions(log_fn: Callable[[str], None]) -> float:
     revisions = []
     for repo in info.repos:
         for rev in repo.revisions:
-            revisions.append((rev.last_accessed, rev.commit_hash, rev.size_on_disk))
-    revisions.sort()  # oldest accessed first
+            # CachedRevisionInfo exposes last_modified (a float epoch).
+            # huggingface_hub's docs explicitly note last_accessed cannot
+            # be determined per-revision because blob files are shared
+            # across revisions, so last_modified is the right ordering
+            # key for "oldest evict first".
+            revisions.append((rev.last_modified, rev.commit_hash, rev.size_on_disk))
+    revisions.sort()  # oldest snapshot first
     if not revisions:
         return 0.0
     hashes = [h for _, h, _ in revisions]
