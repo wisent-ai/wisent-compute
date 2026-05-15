@@ -231,6 +231,8 @@ def _assign_one(job, agents: dict[str, dict], runtime: float, vram: int) -> Opti
     """Pick the eligible agent that finishes this job earliest; update
     its active_slots in place. Returns the chosen consumer_id, or None
     if no agent has enough total VRAM to host the job."""
+    if bool(getattr(job, "exclusive", False)):
+        return None
     best_cid: Optional[str] = None
     best_finish: Optional[float] = None
     for cid, info in agents.items():
@@ -288,6 +290,9 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
         chosen = _assign_one(job, agents, -neg_rt, vram)
         if chosen is None:
             unassigned += 1
+            if getattr(job, "assigned_to", ""):
+                job.assigned_to = ""
+                to_write.append(job)
             continue
         if getattr(job, "assigned_to", "") == chosen:
             continue
