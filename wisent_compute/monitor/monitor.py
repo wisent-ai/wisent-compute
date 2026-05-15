@@ -66,8 +66,17 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                 if _live_consumers_cache is None:
                     from ..queue.capacity import read_consumer_capacity
                     _live_consumers_cache = read_consumer_capacity(store)
-                if any(f"{prefix}-{hostname}" in _live_consumers_cache
-                       for prefix in ("local", "gcp", "azure", "aws")):
+                agent_live = any(f"{p}-{hostname}" in _live_consumers_cache
+                                 for p in ("local", "gcp", "azure", "aws"))
+                if agent_live:
+                    # Fresh capacity proves the agent is up but NOT that
+                    # this old running/ job is progressing — agent
+                    # restarts leave orphans. Per-job heartbeat is the
+                    # proof-of-life; requeue if stale.
+                    from .heartbeat_guard import any_job_heartbeat_fresh
+                    if any_job_heartbeat_fresh(store, [job_id], 1800):
+                        continue
+                    _requeue(store, job, "local agent live but job heartbeat stale (orphan)")
                     continue
                 is_cloud_agent_name = hostname.startswith("wisent-agent-")
                 if is_cloud_agent_name:
