@@ -179,10 +179,9 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     # reaper destroys productive VMs (Llama-1B 5k run was reaped 3 times
     # mid-training on 2026-05-12 because rollout steps exceeded
     # CAPACITY_STALE_SECONDS).
-    from ..queue.capacity import CAPACITY_STALE_SECONDS as _CAP_STALE
     from .heartbeat_guard import any_job_heartbeat_fresh, build_ref_to_jids
     _ref_to_jids = build_ref_to_jids(store)
-    _hb_threshold = 2 * _CAP_STALE
+    _hb_threshold = 1800
     for ref, age_seconds in refs:
         name = ref.split("@", 1)[0]
         consumer_id = f"{kind}-{name}"
