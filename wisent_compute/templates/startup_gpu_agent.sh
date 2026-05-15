@@ -8,6 +8,28 @@ exec > /var/log/wisent-agent.log 2>&1
 
 echo "Wisent agent VM start: $(date -u)"
 
+# Ship the agent's own stdout+stderr to GCS continuously. /var/log/
+# wisent-agent.log is VM-local; before this, an agent crash was
+# invisible: the reaper deletes the VM (and this log) when capacity +
+# job heartbeat go stale, and only the training subprocess's
+# command_output.log survived (synced by the agent itself, which is
+# gone once it crashes). That is why agent deaths never surfaced an
+# error. Now: a background loop mirrors this log to
+# gs://wisent-compute/agent_logs/<instance>.log every 20s, and an EXIT
+# trap does a final flush so the crash traceback is captured even on
+# abnormal exit. Best-effort: never let logging failure abort the VM.
+_WC_INST="$(curl -s -H 'Metadata-Flavor: Google' \
+  'http://metadata.google.internal/computeMetadata/v1/instance/name' \
+  2>/dev/null || hostname)"
+_wc_ship_log() {
+  gsutil -q cp /var/log/wisent-agent.log \
+    "gs://wisent-compute/agent_logs/${_WC_INST}.log" 2>/dev/null \
+  || gcloud storage cp /var/log/wisent-agent.log \
+    "gs://wisent-compute/agent_logs/${_WC_INST}.log" 2>/dev/null || true
+}
+trap '_wc_ship_log' EXIT
+( while true; do _wc_ship_log; sleep 20; done ) &
+
 # If /opt/wisent-agent/.venv is already populated by the baked image
 # (wisent-agent family, built via deploy/bake_agent_image.sh), skip the
 # install path entirely. Otherwise fall through to the legacy install path
