@@ -92,7 +92,20 @@ class JobStorage:
             )
         elif _has_adc():
             from google.cloud import storage
+            from requests.adapters import HTTPAdapter
             client = storage.Client()
+            # Default urllib3 pool is 10 connections, which throttles every
+            # parallel scan (history rebuild fans out 32 downloads, queue
+            # listing fans out 32, dispatcher tick spawns concurrent
+            # reads). Without a larger pool, the Cloud Function spent
+            # ~6.5 minutes on a single history rebuild because 22 of 32
+            # threads were waiting on connection-pool tickets, blowing
+            # past the 540s tick timeout. Mount adapters with pool_maxsize
+            # matched to the largest fan-out so all concurrent fetches
+            # actually proceed in parallel.
+            adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64)
+            client._http.mount("https://", adapter)
+            client._http.mount("http://", adapter)
             self._sdk_bucket = client.bucket(bucket_name)
 
     @property
