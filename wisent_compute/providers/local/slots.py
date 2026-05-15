@@ -79,6 +79,35 @@ def _write_heartbeat(store: JobStorage, job_id: str) -> None:
     blob.upload_from_string(f"RUNNING {ts}")
 
 
+
+def _start_heartbeat_thread(store: JobStorage, job_id: str, proc):
+    """Stamp status/<job>/heartbeat every HEARTBEAT_INTERVAL for as long
+    as the training subprocess is alive — independent of the agent main
+    loop. The loop-coupled write (slots tick, only fires when the agent
+    reaches it) let a loop blocked >1800s on another slot's checkpoint
+    pull / drift check / HF download starve a HEALTHY job's heartbeat,
+    so the CF monitor orphan-requeued it: Llama 3ef705b2 + Qwen3
+    724084db were both requeued in one monitor pass at
+    2026-05-15T16:18:42 ('local agent live but job heartbeat stale
+    (orphan)') while training was actively progressing. A daemon thread
+    keyed on proc.poll() makes the heartbeat mean 'training process
+    alive', not 'agent loop ran recently'.
+    """
+    import threading
+
+    def _run():
+        while proc.poll() is None:
+            time.sleep(HEARTBEAT_INTERVAL)
+            try:
+                _write_heartbeat(store, job_id)
+            except Exception:
+                pass
+
+    th = threading.Thread(target=_run, name=f"hb-{job_id}", daemon=True)
+    th.start()
+    return th
+
+
 def _upload_output(store: JobStorage, job_id: str, output_dir: str) -> None:
     """Upload every regular file under output_dir to GCS via the SDK.
 
@@ -236,6 +265,7 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     )
     log_fn(f"Started job {job.job_id}: {job.command[:60]}")
     _write_heartbeat(store, job.job_id)
+    _start_heartbeat_thread(store, job.job_id, proc)
     last_hb = time.time()
     return {"proc": proc, "job": job, "log_file": log_file,
             "last_hb": last_hb, "paused": False}

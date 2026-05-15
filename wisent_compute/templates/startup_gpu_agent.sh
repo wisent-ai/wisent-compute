@@ -21,14 +21,27 @@ echo "Wisent agent VM start: $(date -u)"
 _WC_INST="$(curl -s -H 'Metadata-Flavor: Google' \
   'http://metadata.google.internal/computeMetadata/v1/instance/name' \
   2>/dev/null || hostname)"
+# CRITICAL: this function and the shipper loop MUST run with xtrace
+# off. Line 6 sets `set -euxo pipefail` (xtrace global). Without the
+# `local -; set +x` here and the `set +x` in the subshell below, the
+# 20s shipper loop emits `+ _wc_ship_log / + gsutil -q cp ... /
+# + sleep 20 / + true` into /var/log/wisent-agent.log — the very file
+# it ships — every 20s. Over a multi-hour agent life that is tens of
+# thousands of xtrace lines that bury the real agent stdout/stderr
+# (job claims, training progress, death tracebacks): the exact signal
+# this shipper exists to surface. `local -` scopes the set change to
+# the function so the main agent path keeps xtrace; the subshell
+# `set +x` silences the loop's while/sleep/true.
 _wc_ship_log() {
+  local -
+  set +x
   gsutil -q cp /var/log/wisent-agent.log \
     "gs://wisent-compute/agent_logs/${_WC_INST}.log" 2>/dev/null \
   || gcloud storage cp /var/log/wisent-agent.log \
     "gs://wisent-compute/agent_logs/${_WC_INST}.log" 2>/dev/null || true
 }
 trap '_wc_ship_log' EXIT
-( while true; do _wc_ship_log; sleep 20; done ) &
+( set +x; while true; do _wc_ship_log; sleep 20; done ) &
 
 # If /opt/wisent-agent/.venv is already populated by the baked image
 # (wisent-agent family, built via deploy/bake_agent_image.sh), skip the
