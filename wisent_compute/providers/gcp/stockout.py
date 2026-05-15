@@ -29,8 +29,8 @@ _local_cache_built_at: float = 0.0
 
 def _stockout_blob():
     from ...queue.storage import JobStorage
-    from ...config import WC_BUCKET
-    store = JobStorage(WC_BUCKET)
+    from ...config import BUCKET
+    store = JobStorage(BUCKET)
     bucket = getattr(store, "_sdk_bucket", None)
     if bucket is None:
         return None
