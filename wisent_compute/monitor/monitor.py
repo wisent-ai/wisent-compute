@@ -61,6 +61,22 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
             _log(f"{job_id}: FAILED")
 
         else:
+            # Boot grace: a freshly (re)dispatched job has not yet
+            # written its first heartbeat (agent claim -> apt/clone/pip/
+            # multi-GB ckpt-pull preamble before slots.py Popen +
+            # _write_heartbeat) while the previous run's heartbeat blob
+            # is already aged, so the orphan / VM-gone staleness guards
+            # below false-positive and requeue a healthy starting job
+            # (synchronized 3ef705b2+724084db requeues 16:18/20:00/
+            # 21:33/21:57 on RUNNING 0.4.228 VMs). Skip requeue logic
+            # until the job has had BOOT_GRACE_SECONDS to heartbeat.
+            _sa = getattr(job, "started_at", None)
+            if _sa:
+                try:
+                    if (datetime.now(timezone.utc) - datetime.fromisoformat(_sa)).total_seconds() < 1800:
+                        continue
+                except (ValueError, TypeError):
+                    pass
             if (ref or "").startswith("local@"):
                 hostname = ref[len("local@"):]
                 if _live_consumers_cache is None:
