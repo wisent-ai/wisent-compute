@@ -2,40 +2,20 @@
 from __future__ import annotations
 
 import sys
-import time
 from google.cloud import compute_v1
 
-from ..config import PROJECT, ZONE_ROTATION, MACHINE_TYPE_ZONES, INSTANCE_PREFIX
-from .base import Provider
+from ...config import PROJECT, ZONE_ROTATION, MACHINE_TYPE_ZONES, INSTANCE_PREFIX
+from ..base import Provider
+from .stockout import (
+    zone_recently_stocked_out as _zone_recently_stocked_out,
+    mark_zone_stockout as _mark_zone_stockout,
+    STOCKOUT_TTL_S as _STOCKOUT_TTL_S,
+)
 
 
 def _log(msg):
     sys.stderr.write(f"[gcp] {msg}\n")
     sys.stderr.flush()
-
-
-# Module-level cache of zones that recently returned
-# ZONE_RESOURCE_POOL_EXHAUSTED (GCE stockout). The Cloud Function process
-# typically lives for several ticks, so caching across calls avoids
-# re-discovering the same exhausted zones every tick. Without this, a
-# single autoscaler call could iterate 6+ stockout'd zones at ~30s each
-# (op.result() blocks until GCE marks the operation DONE-with-error),
-# blowing past the 540s Cloud Function timeout. Confirmed in production
-# logs at 01:33Z 2026-05-15: us-central1-a + us-central1-b both
-# stockout'd, autoscaler retried both in the same tick and 504'd.
-_STOCKOUT_TTL_S = 300
-_recent_stockouts: dict[str, float] = {}
-
-
-def _zone_recently_stocked_out(zone: str) -> bool:
-    ts = _recent_stockouts.get(zone)
-    if ts is None:
-        return False
-    return (time.time() - ts) < _STOCKOUT_TTL_S
-
-
-def _mark_zone_stockout(zone: str) -> None:
-    _recent_stockouts[zone] = time.time()
 
 
 class GCPProvider(Provider):
