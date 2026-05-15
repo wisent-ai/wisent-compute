@@ -158,6 +158,28 @@ def run(target: Optional[str] = None, once: bool = False) -> int:
         if drift:
             _log(f"coordinator drift detected {drift}; pip_upgrade_and_exec")
             pip_upgrade_and_exec(_log)
+        # Re-resolve the coordinator entry from the registry each tick. The
+        # initial _resolve_coordinator(target) at process start captures the
+        # entry once and never re-checks; if an operator pushes a new
+        # registry that removes/renames the entry to stop a racing daemon,
+        # the running process keeps reaping VMs forever using the cached
+        # entry. Confirmed live 2026-05-15: a stale mac mini daemon kept
+        # deleting fresh-heartbeat Llama/Qwen3 VMs for 4+ hours after the
+        # registry entry was removed because pip drift never fired (the
+        # daemon was already on the latest published version). Re-resolving
+        # each tick means a registry change takes effect within one
+        # interval_seconds without depending on a PyPI publish.
+        if target:
+            from .targets import lookup_coordinator as _lookup
+            still_there = _lookup(target)
+            if still_there is None:
+                _log(
+                    f"coordinator '{target}' no longer in registry; exiting. "
+                    f"Operator removed/renamed the entry — daemon stops here so "
+                    f"launchd/supervisor backs off and stale code stops issuing "
+                    f"GCE mutations."
+                )
+                raise SystemExit(0)
         n = _run_tick(store, secrets)
         _log(f"tick scheduled={n}")
         if once:
