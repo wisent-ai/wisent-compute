@@ -140,6 +140,24 @@ else
     echo "[install] WARN: host_health_beacon.sh not found at $HHB_SRC; the timer will fail"
 fi
 
+# Pre-start cleanup script. Lives at a fixed path under $HOME and is
+# invoked by wisent-agent.service ExecStartPre. The script itself is
+# replaced by the wisent-upgrade.service / wisent-upgrade.timer on
+# every pip install --upgrade (see wisent-upgrade.service.tmpl), so
+# improvements to the cleanup logic flow automatically without ever
+# re-rendering the .service file.
+PSC_SRC=$(sudo -u "$TARGET_USER" python3 -c '
+import os, wisent_compute
+print(os.path.join(os.path.dirname(wisent_compute.__file__), "deploy", "pre_start_cleanup.sh"))
+')
+if [ -f "$PSC_SRC" ]; then
+    echo "[install] copying $PSC_SRC -> $TARGET_HOME/wisent_pre_start_cleanup.sh"
+    install -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" \
+        "$PSC_SRC" "$TARGET_HOME/wisent_pre_start_cleanup.sh"
+else
+    echo "[install] WARN: pre_start_cleanup.sh not found at $PSC_SRC; agent will skip pre-start cleanup"
+fi
+
 touch /var/log/wisent-agent.log /var/log/wisent-upgrade.log
 chown "$TARGET_USER:$TARGET_USER" /var/log/wisent-agent.log /var/log/wisent-upgrade.log
 

@@ -18,8 +18,9 @@ Environment=WC_BUCKET={WC_BUCKET}
 Environment=HF_TOKEN={HF_TOKEN}
 Environment=HUGGING_FACE_HUB_TOKEN={HF_TOKEN}
 Environment=WISENT_DTYPE=auto
-ExecStartPre=-/bin/sh -c 'AVAIL_GB=$(/bin/df -BG --output=avail $HOME 2>/dev/null | /usr/bin/tail -1 | /usr/bin/tr -dc 0-9); if [ -n "$AVAIL_GB" ] && [ "$AVAIL_GB" -lt 30 ]; then /bin/rm -rf $HOME/.cache/huggingface/hub $HOME/.cache/pip 2>/dev/null; /usr/bin/find $HOME -maxdepth 1 -type d \\( -name "wisent_*" -o -name "wisent-*" \\) -mmin +60 -exec /bin/rm -rf {} + 2>/dev/null; /bin/true; fi'
+ExecStartPre=-/bin/bash {HOME}/wisent_pre_start_cleanup.sh
 ExecStartPre=-/usr/bin/python3 -m pip install --user --break-system-packages --upgrade wisent-compute wisent wisent-tools wisent-extractors wisent-evaluators
+ExecStartPre=-/bin/bash {HOME}/wisent_pre_start_cleanup.sh
 ExecStart={WC_BIN} agent --auto
 Restart=always
 RestartSec=30
