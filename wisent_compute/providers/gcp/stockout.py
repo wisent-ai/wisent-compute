@@ -101,3 +101,75 @@ def mark_zone_stockout(zone: str) -> None:
     global _local_cache, _local_cache_built_at
     _local_cache = stockouts
     _local_cache_built_at = now
+
+
+# Region-level quota cache: keys look like "us-central1:nvidia-tesla-a100"
+# so different accel quotas in the same region cache independently. Quota
+# resets when other VMs terminate, but within a tick window the same
+# region's quota stays exhausted, so 60s is enough TTL to skip retries.
+QUOTA_TTL_S = 60
+QUOTA_BLOB = "state/quota_exceeded.json"
+_quota_cache: dict[str, float] = {}
+_quota_built_at: float = 0.0
+
+
+def _quota_blob():
+    from ...queue.storage import JobStorage
+    from ...config import BUCKET
+    store = JobStorage(BUCKET)
+    bucket = getattr(store, "_sdk_bucket", None)
+    if bucket is None:
+        return None
+    return bucket.blob(QUOTA_BLOB)
+
+
+def _load_quota() -> dict[str, float]:
+    global _quota_cache, _quota_built_at
+    if (time.time() - _quota_built_at) < _LOCAL_CACHE_TTL_S and _quota_cache:
+        return _quota_cache
+    blob = _quota_blob()
+    if blob is None:
+        return {}
+    from google.api_core.exceptions import NotFound
+    try:
+        text = blob.download_as_text()
+    except NotFound:
+        _quota_cache = {}
+        _quota_built_at = time.time()
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        _quota_cache = {}
+        _quota_built_at = time.time()
+        return {}
+    if not isinstance(data, dict):
+        _quota_cache = {}
+        _quota_built_at = time.time()
+        return {}
+    _quota_cache = {k: float(v) for k, v in data.items()}
+    _quota_built_at = time.time()
+    return _quota_cache
+
+
+def region_recently_quota_exceeded(region: str, accel: str) -> bool:
+    key = f"{region}:{accel}"
+    data = _load_quota()
+    ts = data.get(key)
+    if ts is None:
+        return False
+    return (time.time() - ts) < QUOTA_TTL_S
+
+
+def mark_region_quota_exceeded(region: str, accel: str) -> None:
+    key = f"{region}:{accel}"
+    data = _load_quota()
+    now = time.time()
+    data[key] = now
+    data = {k: t for k, t in data.items() if (now - t) < (2 * QUOTA_TTL_S)}
+    blob = _quota_blob()
+    if blob is not None:
+        blob.upload_from_string(json.dumps(data), content_type="application/json")
+    global _quota_cache, _quota_built_at
+    _quota_cache = data
+    _quota_built_at = now

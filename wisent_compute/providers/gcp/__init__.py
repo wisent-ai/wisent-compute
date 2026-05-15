@@ -10,6 +10,9 @@ from .stockout import (
     zone_recently_stocked_out as _zone_recently_stocked_out,
     mark_zone_stockout as _mark_zone_stockout,
     STOCKOUT_TTL_S as _STOCKOUT_TTL_S,
+    region_recently_quota_exceeded as _region_quota_exhausted,
+    mark_region_quota_exceeded as _mark_region_quota,
+    QUOTA_TTL_S as _QUOTA_TTL_S,
 )
 
 
@@ -62,14 +65,14 @@ class GCPProvider(Provider):
             region = "-".join(zone.split("-")[:2])
             if region in skip_regions:
                 continue
-            # Cross-tick stockout cache: if this zone returned
-            # ZONE_RESOURCE_POOL_EXHAUSTED within the last _STOCKOUT_TTL_S
-            # seconds, don't retry — op.result() would block ~30s for
-            # GCE to confirm the failure again, eating the 540s tick
-            # budget. The cache TTL means recovered capacity gets
-            # re-discovered after the TTL expires.
             if _zone_recently_stocked_out(zone):
                 _log(f"skip {zone} (recent stockout, TTL {_STOCKOUT_TTL_S}s)")
+                continue
+            # Cross-call quota cache: previous tick's create_instance found
+            # this (region, accel) at QUOTA_EXCEEDED. Skip the API call —
+            # quota doesn't change within the 60s TTL window.
+            if accel_type and _region_quota_exhausted(region, accel_type):
+                _log(f"skip {zone} ({accel_type} quota exhausted in {region}, TTL {_QUOTA_TTL_S}s)")
                 continue
             try:
                 # Delete any existing terminated instance with same name.
@@ -147,6 +150,8 @@ class GCPProvider(Provider):
                 _log(f"Failed in {zone}: {e}")
                 if "QUOTA_EXCEEDED" in msg:
                     skip_regions.add(region)
+                    if accel_type:
+                        _mark_region_quota(region, accel_type)
                 if "ZONE_RESOURCE_POOL_EXHAUSTED" in msg or "STOCKOUT" in msg:
                     _mark_zone_stockout(zone)
                 continue
