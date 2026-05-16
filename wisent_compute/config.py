@@ -132,6 +132,31 @@ WC_STORAGE_BACKEND = os.environ.get("WC_STORAGE_BACKEND", "gcs")
 WC_AZURE_STORAGE_ACCOUNT = os.environ.get("WC_AZURE_STORAGE_ACCOUNT", "")
 WC_AZURE_CONTAINER = os.environ.get("WC_AZURE_CONTAINER", "wisent-compute")
 
+# Billing-credits collector. Each tick the Cloud Function reads the GCP
+# BigQuery billing export (gross / credits-applied / net + per-credit
+# cumulative + 7-day burn) and the Azure available-credit balance, then
+# writes gs://<BUCKET>/billing_health/credits.json (same convention as
+# host_health/<host>.json). The export table is account-specific; it is
+# resolved from env so a different billing account only needs a redeploy
+# env change, never a code edit. Dataset/table default to the live
+# wisent-480400 export confirmed present 2026-05-16.
+BILLING_DATASET = os.environ.get("WC_BILLING_DATASET", "billing_export")
+BILLING_TABLE = os.environ.get(
+    "WC_BILLING_TABLE", "gcp_billing_export_v1_017364_D3B657_F207B5"
+)
+# A day whose net_cost (gross + credits, credits are negative) exceeds this
+# means the promotion credit no longer fully covers spend — i.e. it is
+# exhausted or rate-capped. This is the depletion signal; it needs no
+# knowledge of the original grant ceiling (which no GCP API exposes).
+BILLING_NET_ALERT_USD = float(os.environ.get("WC_BILLING_NET_ALERT_USD", "100"))
+# Secret Manager secret holding the Azure billing service principal as JSON
+# {"tenant_id","client_id","client_secret", and one of
+# "billing_account"/"billing_profile" or "subscription_id"}. Absent secret
+# is reported as an explicit no_credentials status, never silently skipped.
+AZURE_BILLING_SECRET = os.environ.get(
+    "WC_AZURE_BILLING_SECRET", "wisent-azure-billing-sp"
+)
+
 
 # Per-model peak-VRAM overrides for models whose actual peak diverges from
 # the params-based heuristic below. Numbers are observed peak GiB during

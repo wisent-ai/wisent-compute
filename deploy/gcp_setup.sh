@@ -28,7 +28,13 @@ echo "Quotas uploaded"
 if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev/null 2>&1; then
     gcloud iam service-accounts create "$SA_NAME" --project="$PROJECT" --display-name="Wisent Compute"
 fi
-for role in roles/compute.admin roles/storage.admin roles/pubsub.publisher roles/secretmanager.secretAccessor; do
+# bigquery.jobUser lets the tick run the billing-export queries; dataViewer
+# lets it read the gcp_billing_export_v1_* table the credits collector reads.
+# secretAccessor (already listed) covers the optional Azure billing SP secret
+# wisent-azure-billing-sp consumed by the same collector — no extra binding
+# needed for the Azure path, it activates automatically once that secret
+# exists. This keeps credit tracking fully automated with no manual IAM step.
+for role in roles/compute.admin roles/storage.admin roles/pubsub.publisher roles/secretmanager.secretAccessor roles/bigquery.jobUser roles/bigquery.dataViewer; do
     gcloud projects add-iam-policy-binding "$PROJECT" \
         --member="serviceAccount:${SA_EMAIL}" --role="$role" --quiet >/dev/null 2>&1
 done

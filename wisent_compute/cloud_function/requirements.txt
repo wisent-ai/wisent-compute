@@ -2,4 +2,6 @@ google-cloud-storage>=2.18.0
 google-cloud-compute>=1.19.0
 google-cloud-pubsub>=2.21.0
 google-cloud-secret-manager>=2.20.0
+google-cloud-bigquery>=3.25.0
+azure-identity>=1.15.0
 functions-framework>=3.0.0

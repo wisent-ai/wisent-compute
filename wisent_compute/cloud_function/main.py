@@ -7,7 +7,11 @@ from google.cloud import pubsub_v1, secretmanager_v1
 from wisent_compute.config import PROJECT, BUCKET, ALERTS_TOPIC, WC_PROVIDERS
 from wisent_compute.queue.storage import JobStorage
 from wisent_compute.providers import get_provider
-from wisent_compute.monitor import check_running_jobs, reap_dead_agents
+from wisent_compute.monitor import (
+    check_running_jobs,
+    reap_dead_agents,
+    collect_billing,
+)
 from wisent_compute.scheduler import schedule_queued_jobs
 from wisent_compute.scheduler.makespan import assign_jobs
 
@@ -67,5 +71,17 @@ def monitor_jobs(request=None):
         f"Tick done: reaped {total_reaped} dead-agent VMs, "
         f"scheduled {total_scheduled} (providers={WC_PROVIDERS})"
     )
+
+    # Billing-credits collector. Global (not per-provider), runs last and is
+    # fully fault-isolated: collect_billing internally captures each source's
+    # exact error into the JSON, and this guard ensures even a hard failure
+    # in the collector path logs the precise cause WITHOUT aborting the
+    # dispatch tick that the drain depends on.
+    try:
+        collect_billing(store)
+    except Exception as e:
+        import traceback
+        _log(f"billing collector failed: {type(e).__name__}: {e}\n"
+             f"{traceback.format_exc()}")
 
     return "OK"
