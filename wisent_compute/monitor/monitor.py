@@ -93,7 +93,8 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                         continue
                     if _hg.finalize_if_self_terminating(store, job, _log):
                         continue
-                    _requeue(store, job, "local agent live but job heartbeat stale (orphan)")
+                    if not _hg.any_job_checkpoint_fresh(store, job, 5400):
+                        _requeue(store, job, "local agent live but job heartbeat stale (orphan)")
                     continue
                 is_cloud_agent_name = hostname.startswith("wisent-agent-")
                 if is_cloud_agent_name:

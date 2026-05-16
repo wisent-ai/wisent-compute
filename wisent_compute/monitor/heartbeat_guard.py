@@ -100,6 +100,76 @@ def any_job_heartbeat_fresh(
     return False
 
 
+_CKPT_URI_RE = re.compile(r"--checkpoint-gcs-uri\s+(\S+)")
+
+
+def _ckpt_prefix_from_command(cmd: str) -> str | None:
+    """Extract the in-bucket checkpoint prefix from a training command's
+    `--checkpoint-gcs-uri gs://<bucket>/<prefix>` flag. Returns the part
+    after the bucket (e.g. 'ckpts/qwen3_4b_5k_s0/') or None.
+    """
+    if not cmd:
+        return None
+    m = _CKPT_URI_RE.search(cmd)
+    if not m:
+        return None
+    uri = m.group(1).strip()
+    if not uri.startswith("gs://"):
+        return None
+    rest = uri[len("gs://"):]
+    parts = rest.split("/", 1)
+    if len(parts) < 2 or not parts[1]:
+        return None
+    return parts[1]
+
+
+def any_job_checkpoint_fresh(store, job, threshold_seconds: float) -> bool:
+    """True iff the job's GCS checkpoint directory has a blob written
+    within threshold_seconds.
+
+    A fresh checkpoint write is proof the training process is alive AND
+    productive, and it is immune to the exact failure mode that makes
+    the per-job heartbeat go stale: a multi-GB checkpoint upload
+    saturates the box's outbound network and starves the small heartbeat
+    PUT, so the heartbeat ages past the orphan threshold WHILE the job
+    is demonstrably alive — it is in the middle of writing that very
+    checkpoint. Confirmed live 2026-05-16: job 724084db was requeued
+    'local agent live but job heartbeat stale (orphan)' at 23:18:29
+    while `[ckpt] sync step 1530` had completed at 23:12 and step
+    1520->1521 stalled ~1h on the GCS upload; the orphan branch was
+    burning the restart budget (15/20) on healthy checkpoint uploads.
+
+    The newest blob under the checkpoint prefix is the liveness signal:
+    while a multi-GB checkpoint uploads, its shard blobs are
+    continuously updated, so max(updated) stays fresh even mid-upload.
+    A genuinely dead job writes zero new checkpoint blobs ever, so it is
+    still requeued once both the heartbeat and the checkpoint age out.
+    """
+    cmd = getattr(job, "command", "") or ""
+    prefix = _ckpt_prefix_from_command(cmd)
+    if not prefix:
+        return False
+    now = time.time()
+    try:
+        newest = 0.0
+        for info in store.list_blobs_with_meta(prefix):
+            upd = getattr(info, "updated", None)
+            if upd is None:
+                continue
+            ts = upd.timestamp() if hasattr(upd, "timestamp") else float(upd)
+            if ts > newest:
+                newest = ts
+        if newest <= 0.0:
+            return False
+        return (now - newest) < threshold_seconds
+    except Exception:
+        # Same fail-safe philosophy as any_job_heartbeat_fresh: a
+        # coordinator-side GCS read/list failure is NOT proof the job is
+        # dead. Defer (treat as alive); never let the coordinator's own
+        # GCS hiccup destroy a running job.
+        return True
+
+
 def is_self_terminating_command(cmd: str) -> bool:
     """True if the job command kills the `wc agent` process itself
     (e.g. an upgrade-then-restart maintenance job:
