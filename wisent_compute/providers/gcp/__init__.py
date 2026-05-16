@@ -252,7 +252,21 @@ class GCPProvider(Provider):
         for zone_path, response in self.client.aggregated_list(request=request):
             zone = zone_path.split("/")[-1]
             for inst in response.instances or []:
-                if inst.status != "RUNNING":
+                # Only a genuinely TERMINATED (or absent) instance means
+                # the VM is gone. The old `!= "RUNNING"` filter dropped
+                # VMs in transient states GCE routinely passes through —
+                # PROVISIONING/STAGING on boot and especially REPAIRING/
+                # STOPPING/SUSPENDING during host maintenance & live
+                # migration (frequent for long-running A100 VMs). A
+                # migrating VM briefly leaves this list, the monitor's
+                # "cloud agent missing from fleet" path then requeues a
+                # perfectly healthy job, and the VM rejoins seconds later.
+                # Confirmed live: wisent-agent-a100-1778891822-0 was
+                # looping normally (agent log through 01:10:36) when the
+                # coordinator declared it "VM gone" and requeued Qwen3
+                # 724084db at 01:03:37 — a false positive. Treat any
+                # non-TERMINATED status as present.
+                if inst.status == "TERMINATED":
                     continue
                 created = getattr(inst, "creation_timestamp", None) or ""
                 age = 0.0
