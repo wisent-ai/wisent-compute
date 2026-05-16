@@ -118,6 +118,41 @@ def _stale_training_dirs() -> list[str]:
     return stale
 
 
+def _stale_tmp_workdirs() -> list[str]:
+    """Extraction scratch dirs under /tmp whose newest file is older than
+    STALE_TRAINING_MAX_AGE_S. The agent creates a fresh per-job workdir
+    /tmp/wisent_act_<task>_pid<pid>_<rand> for every get-activations run
+    and /tmp/wc-<rand> / /tmp/wisent_compute_<rand> scratch dirs; the
+    orphan reaper archives+deletes these when the owning pid dies, but
+    dirs whose pid died without a clean reap (or whose reap raced a full
+    disk) accumulate and are NEVER touched by the $HOME-only
+    _stale_training_dirs gate. These are pure extraction scratch
+    (re-derived from scratch on the next run) — unlike $HOME training
+    output they hold no checkpoint state, so an mtime gate proving no
+    active writer is sufficient to delete them safely. This is the
+    consumer the gate previously missed on local-ubuntu-server: a
+    disk-starved workstation that could not reclaim /tmp and so refused
+    all slots indefinitely while orphan-requeueing every job.
+    """
+    import glob
+    now = __import__("time").time()
+    candidates: list[str] = []
+    for pat in ("/tmp/wisent_act_*", "/tmp/wisent_*",
+                "/tmp/wc-*", "/tmp/wisent_compute_*"):
+        candidates += glob.glob(pat)
+    stale: list[str] = []
+    for path in candidates:
+        if not os.path.isdir(path):
+            continue
+        newest = _newest_mtime_in_tree(path)
+        if newest == 0.0:
+            stale.append(path)  # empty dir
+            continue
+        if (now - newest) > STALE_TRAINING_MAX_AGE_S:
+            stale.append(path)
+    return stale
+
+
 def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
     """Second-tier eviction:
       - pip wheel cache, wisent local cache, HF caches (when present)
@@ -125,6 +160,8 @@ def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
       - stale wisent_* training output dirs under $HOME whose newest
         file mtime is older than STALE_TRAINING_MAX_AGE_S (no active
         writer; reproducible from HF/GCS upstream)
+      - stale /tmp/wisent_act_* / /tmp/wc-* extraction scratch dirs
+        (pure scratch, no checkpoint state; mtime-gated)
     Used when HF cache eviction freed 0 GB but the disk gate still
     refuses slots. Each target is reproducible from upstream.
     """
@@ -138,6 +175,7 @@ def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
         "/tmp/pip-build",
     ]
     targets.extend(_stale_training_dirs())
+    targets.extend(_stale_tmp_workdirs())
     freed = 0.0
     for tgt in targets:
         if not os.path.isdir(tgt):
