@@ -78,7 +78,18 @@ def any_job_heartbeat_fresh(
         try:
             text = store._download_text(f"status/{jid}/heartbeat")
         except Exception:
-            text = None
+            # A coordinator-side GCS read failure is NOT proof the job
+            # is dead. The old `except: text=None` path made a transient
+            # Cloud-Function storage hiccup on one monitor tick read as
+            # "no heartbeat" for EVERY running job, requeuing them all
+            # in the same pass — the synchronized orphan churn (3ef705b2
+            # + 724084db both requeued 2026-05-16T04:09:19, restart 11,
+            # on freshly-written heartbeat blobs). Fail safe: a read
+            # error defers (treat as alive); never let the coordinator's
+            # own read failure destroy a running job. A genuinely dead
+            # job is still caught when the read succeeds (stale ts) or
+            # via the TERMINATED/absent VM path.
+            return True
         if not text:
             continue
         ts = _parse_heartbeat_ts(text)
