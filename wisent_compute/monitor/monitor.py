@@ -16,10 +16,16 @@ import sys
 from datetime import datetime, timezone
 
 from ..config import ALERTS_TOPIC
-from ..models import Job, JobState
+from ..models import JobState
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 from .alerts import send_alert
+from .reap.helpers import (
+    _instance_refs_with_completions,
+    _requeue,
+    _requeue_jids_after_reap,
+    _requeue_preempted,
+)
 
 
 def _log(msg):
@@ -125,28 +131,8 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                 provider.delete_instance(ref)
 
 
-def _requeue(store: JobStorage, job: Job, reason: str):
-    """Move job back to queue or fail if max restarts exceeded."""
-    job.restarts += 1
-    if job.restarts > job.max_restarts:
-        job.state = JobState.FAILED.value
-        job.failed_at = datetime.now(timezone.utc).isoformat()
-        job.error = f"Exceeded {job.max_restarts} restarts ({reason})"
-        store.move_job(job, "running", "failed")
-        _log(f"{job.job_id}: FAILED (restart cap, {reason})")
-        return
-
-    job.state = JobState.QUEUED.value
-    job.instance_ref = None
-    job.started_at = None
-    job.last_restart = datetime.now(timezone.utc).isoformat()
-    store.move_job(job, "running", "queue")
-    store.cleanup_status(job.job_id)
-    _log(f"{job.job_id}: requeued ({reason}, restart {job.restarts})")
-
-
 def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -> int:
-    """Delete RUNNING VMs whose `wc agent` has stopped publishing capacity.
+    """Delete RUNNING VMs whose `wc agent` has stopped doing useful work.
 
     The agent's main loop publishes a freshness-stamped JSON to
     gs://<bucket>/capacity/<kind>-<hostname>.json on every iteration. If the
@@ -161,30 +147,25 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     live = read_consumer_capacity(store)  # consumer_id -> payload, fresh only
     refs = provider.list_running_instance_refs_with_age()
     deleted = 0
-    # Two reap conditions, each with an age guard so a VM that's still in its
-    # startup-script install phase (pip install wisent-compute + transformers +
-    # aux model download takes ~5-10 minutes before the agent's first broadcast)
-    # doesn't get killed before it can do any work.
-    #
-    #   Branch A (dead-agent): VM age > BOOT_GRACE_SECONDS AND no fresh
-    #     capacity broadcast. Covers crashed agents AND startup-script
-    #     failures. The age guard prevents reaping fresh VMs that just
-    #     haven't finished installing yet.
-    #   Branch B (never-worked): VM age > IDLE_GRACE_SECONDS AND broadcasting
-    #     normally AND zero completions in completed/ for this instance_ref.
-    #     Covers agents that broadcast but cannot claim (some upstream
-    #     failure in the claim path).
-    # 30-window grace for startup script + first broadcast. 900s was too
-    # tight: real-world boots on baked images consistently hit 10-14 min
-    # because pip install --force-reinstall of transformers + datasets +
-    # huggingface-hub re-downloads ~300MB on every VM, plus apt-lock
-    # contention + huggingface-cli prewarms. VMs hitting 14m42s were
-    # getting reaped at age=912s and their jobs requeued with restart
-    # counts of 4-5. Confirmed live 2026-05-15 02:24-02:26Z: three jobs
-    # (3ef705b2, 931b865e, f3fd41fb) ricocheting between dispatch and
-    # reap because BOOT_GRACE=900 fired before the agent's first
-    # broadcast. 1800s matches IDLE_GRACE pattern and absorbs the
-    # observed worst-case boot.
+    # Three reap conditions, each age/liveness-guarded so a VM still in its
+    # startup-script install phase (~10-14 min on baked images) is not killed
+    # before it can work.
+    #   Branch A (dead-agent): age > BOOT_GRACE AND no fresh capacity
+    #     broadcast. Covers crashed agents + startup-script failures.
+    #   Branch B (never-worked): age > IDLE_GRACE AND broadcasting AND zero
+    #     completions in completed/ for this instance_ref.
+    #   Branch C (wedged): broadcasting fresh capacity BUT free_vram_gb<=0
+    #     AND free_slots={} AND last claim/start (diag) stale AND no job on
+    #     this VM heartbeating. A hung claimed subprocess pins VRAM forever
+    #     (advance_slot only retires on proc.poll() != None), free_vram_gb=0
+    #     short-circuits the agent loop before the diag write, and the
+    #     top-of-loop re-publish keeps capacity fresh — so the VM is invisible
+    #     to Branch A (capacity fresh) AND Branch B (historical completions
+    #     keep it in completed_refs). Confirmed live 2026-05-17
+    #     (gcp-wisent-agent-80gb-1778921111-0: free_vram_gb=0, last_started_at
+    #     frozen 2026-05-16T09:17:32, 127 gpt-oss-20b jobs dead-pinned hours).
+    # BOOT/IDLE 1800s: 900s reaped real 14m boots (3ef705b2/931b865e/f3fd41fb
+    # ricocheting dispatch<->reap, confirmed 2026-05-15 02:24Z).
     BOOT_GRACE_SECONDS = 1800
     IDLE_GRACE_SECONDS = 1800      # half-window grace for first completion
     # Build the completed-refs set ONLY if any VM is old enough to need it.
@@ -269,63 +250,39 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
             deleted += 1
             _jids = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
             _requeue_jids_after_reap(store, _jids, "VM reaped (never-worked)")
+            continue
+        # Branch C (wedged): fresh capacity but structurally stuck. ALL of:
+        # free_vram_gb<=0 AND empty free_slots, diag last_started_at /
+        # last_claim_attempt_at older than _hb_threshold, no fresh heartbeat
+        # for any job on this VM. The heartbeat guard protects a healthy long
+        # trainer whose broadcast tick is merely starved; the diag-stale
+        # guard protects an agent that is actively claiming.
+        payload = live.get(consumer_id) or {}
+        if int(payload.get("free_vram_gb") or 0) <= 0 and not (payload.get("free_slots") or {}):
+            _diag = payload.get("diag") or {}
+            _last = _diag.get("last_started_at") or _diag.get("last_claim_attempt_at")
+            _stale = False
+            if _last:
+                try:
+                    _stale = (datetime.now(timezone.utc) - datetime.fromisoformat(
+                        str(_last).replace("Z", "+00:00"))).total_seconds() > _hb_threshold
+                except (ValueError, TypeError):
+                    _stale = False
+            if not _stale:
+                continue
+            _jids_c = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
+            if any_job_heartbeat_fresh(store, _jids_c, _hb_threshold):
+                _log(f"defer wedged reap of {ref}: job heartbeat fresh for {_jids_c}")
+                continue
+            provider.delete_instance(ref)
+            _log(
+                f"reaped wedged VM {ref} (capacity fresh but free_vram_gb<=0 "
+                f"& no free_slots, last claim/start {_last} stale "
+                f"> {_hb_threshold}s, no fresh job heartbeat)"
+            )
+            deleted += 1
+            _requeue_jids_after_reap(store, _jids_c, "VM reaped (wedged agent)")
+            continue
     if deleted:
         _log(f"reap_dead_agents: deleted {deleted} VM(s)")
     return deleted
-
-
-_COMPLETION_REFS_TTL_S = 300
-_completion_refs_cache: set = set()
-_completion_refs_built_at: float = 0.0
-
-
-def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set:
-    """Return set of instance_ref strings appearing in completed/.
-
-    Iterating list_jobs("completed") downloads every completed blob (13,500+
-    in production) which took ~75s per tick — confirmed live 03:27Z
-    2026-05-15. Cache the result with a 5-minute TTL: the set only grows
-    when new jobs complete, and the never-worked reaper branch's accuracy
-    is unchanged because a VM that NEVER worked stays out of the set
-    regardless of cache age.
-    """
-    import time as _time
-    global _completion_refs_cache, _completion_refs_built_at
-    if (_time.time() - _completion_refs_built_at) < _COMPLETION_REFS_TTL_S and _completion_refs_cache:
-        return _completion_refs_cache
-    refs = set()
-    for j in store.list_jobs("completed"):
-        r = getattr(j, "instance_ref", None)
-        if r:
-            refs.add(r)
-    _completion_refs_cache = refs
-    _completion_refs_built_at = _time.time()
-    return refs
-
-
-def _requeue_jids_after_reap(store: JobStorage, jids, reason: str):
-    if not jids:
-        return
-    running = {j.job_id: j for j in store.list_jobs("running")}
-    for jid in jids:
-        job = running.get(jid)
-        if job is None:
-            continue
-        _requeue(store, job, reason)
-
-
-def _requeue_preempted(store: JobStorage, job: Job, reason: str):
-    """Move job back to queue, counting preemption separately from restarts.
-
-    Preemptions are an expected part of Spot lifecycle, not a fault. They
-    accumulate in preempt_count; once that exceeds max_preempts_before_ondemand
-    the scheduler dispatches the next attempt on-demand instead.
-    """
-    job.preempt_count = getattr(job, "preempt_count", 0) + 1
-    job.state = JobState.QUEUED.value
-    job.instance_ref = None
-    job.started_at = None
-    job.last_restart = datetime.now(timezone.utc).isoformat()
-    store.move_job(job, "running", "queue")
-    store.cleanup_status(job.job_id)
-    _log(f"{job.job_id}: requeued ({reason}, preempts={job.preempt_count})")
