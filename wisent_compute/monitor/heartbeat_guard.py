@@ -146,7 +146,17 @@ def any_job_checkpoint_fresh(store, job, threshold_seconds: float) -> bool:
     still requeued once both the heartbeat and the checkpoint age out.
     """
     cmd = getattr(job, "command", "") or ""
-    prefix = _ckpt_prefix_from_command(cmd)
+    return _prefix_has_fresh_blob(
+        store, _ckpt_prefix_from_command(cmd), threshold_seconds
+    )
+
+
+def _prefix_has_fresh_blob(store, prefix, threshold_seconds: float) -> bool:
+    """True iff any blob under `prefix` was updated within
+    threshold_seconds. Shared by the job-object and jids-list checkpoint
+    guards. A coordinator-side GCS read/list failure is NOT proof the job
+    is dead, so it fails safe (returns True / defers).
+    """
     if not prefix:
         return False
     now = time.time()
@@ -163,11 +173,49 @@ def any_job_checkpoint_fresh(store, job, threshold_seconds: float) -> bool:
             return False
         return (now - newest) < threshold_seconds
     except Exception:
-        # Same fail-safe philosophy as any_job_heartbeat_fresh: a
-        # coordinator-side GCS read/list failure is NOT proof the job is
-        # dead. Defer (treat as alive); never let the coordinator's own
-        # GCS hiccup destroy a running job.
         return True
+
+
+def _job_command_for_jid(store, jid: str) -> str:
+    """Best-effort fetch of a job's command string from its running/ or
+    queue/ blob, given only the job id (the reaper has jids, not job
+    objects)."""
+    import json
+    for pfx in ("running", "queue"):
+        try:
+            txt = store._download_text(f"{pfx}/{jid}.json")
+        except Exception:
+            return ""  # fail-safe handled by caller's defer-on-fresh logic
+        if txt:
+            try:
+                return json.loads(txt).get("command") or ""
+            except Exception:
+                return ""
+    return ""
+
+
+def any_job_checkpoint_fresh_jids(
+    store, jids, threshold_seconds: float
+) -> bool:
+    """jids-list variant of any_job_checkpoint_fresh, for the
+    reap_dead_agents defer-guards (Branches A/B/C) which only have job
+    ids, not job objects. True iff ANY job's GCS checkpoint dir has a
+    blob written within threshold_seconds — the same
+    network-saturation-immune proof-of-life as the orphan-branch guard:
+    the multi-GB checkpoint upload that starves the heartbeat IS what
+    produces fresh ckpt blobs. Confirmed live 2026-05-17: job 724084db
+    was reaped 'VM reaped (wedged agent)' restart 16 at 20:42:17 while
+    checkpoint-2480 (17.28 GiB) had finalized 20:31:26 — the wedged
+    reaper's heartbeat-only defer-guard lost the race to the
+    network-starved heartbeat. Branches A/B/C now also consult this.
+    """
+    for jid in jids:
+        if not jid:
+            continue
+        prefix = _ckpt_prefix_from_command(_job_command_for_jid(store, jid))
+        if _prefix_has_fresh_blob(store, prefix, threshold_seconds):
+            return True
+    return False
 
 
 def is_self_terminating_command(cmd: str) -> bool:

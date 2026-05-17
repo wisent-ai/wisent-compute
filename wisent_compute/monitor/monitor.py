@@ -201,7 +201,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     # reaper destroys productive VMs (Llama-1B 5k run was reaped 3 times
     # mid-training on 2026-05-12 because rollout steps exceeded
     # CAPACITY_STALE_SECONDS).
-    from .heartbeat_guard import any_job_heartbeat_fresh, build_ref_to_jids
+    from .heartbeat_guard import any_job_heartbeat_fresh, build_ref_to_jids, any_job_checkpoint_fresh_jids
     _ref_to_jids = build_ref_to_jids(store)
     _hb_threshold = 1800
     for ref, age_seconds in refs:
@@ -212,7 +212,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
             if age_seconds < BOOT_GRACE_SECONDS:
                 continue  # still installing, give it time
             _jids = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
-            if any_job_heartbeat_fresh(store, _jids, _hb_threshold):
+            if any_job_heartbeat_fresh(store, _jids, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids, 5400):
                 _log(
                     f"defer reap of {ref}: capacity stale "
                     f"(age={age_seconds:.0f}s) but job heartbeat fresh for {_jids}"
@@ -238,7 +238,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
             # "never-worked" at 2026-05-15T23:14:01 (restart 8). A fresh
             # job heartbeat is proof the VM is productive — never reap.
             _jids_b = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
-            if any_job_heartbeat_fresh(store, _jids_b, _hb_threshold):
+            if any_job_heartbeat_fresh(store, _jids_b, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids_b, 5400):
                 _log(f"defer never-worked reap of {ref}: job heartbeat fresh for {_jids_b}")
                 continue
             provider.delete_instance(ref)
@@ -271,7 +271,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
             if not _stale:
                 continue
             _jids_c = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
-            if any_job_heartbeat_fresh(store, _jids_c, _hb_threshold):
+            if any_job_heartbeat_fresh(store, _jids_c, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids_c, 5400):
                 _log(f"defer wedged reap of {ref}: job heartbeat fresh for {_jids_c}")
                 continue
             provider.delete_instance(ref)
