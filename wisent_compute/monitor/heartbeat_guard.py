@@ -176,6 +176,35 @@ def _prefix_has_fresh_blob(store, prefix, threshold_seconds: float) -> bool:
         return True
 
 
+def fresh_jids_pointing_to_ref(store, ref: str) -> list:
+    """List jids whose running/ blob has instance_ref == ref, read FRESH
+    at call time. Used by reap_dead_agents as the FINAL safety check
+    immediately before any delete_instance, to defeat the race that
+    burned restart 16 of job 724084db at 2026-05-17T21:26:07: Branch B
+    (never-worked) checked `instance_ref not in active_refs` where
+    active_refs was a cache built at function entry, list_jobs("running")
+    DID NOT return 724084db at that tick (transient listing miss), the
+    gate held, the VM was deleted, and _requeue_jids_after_reap got an
+    empty jids list (_ref_to_jids came from the same cached listing) —
+    so the job was left wedged in running/ pointing at a deleted VM,
+    auto-recovery delayed until heartbeat staled.
+
+    On read-error, returns a sentinel non-empty list so the caller
+    DEFERS (treats VM as in-use) rather than reaping — same fail-safe
+    philosophy as any_job_heartbeat_fresh.
+    """
+    try:
+        out = []
+        for j in store.list_jobs("running"):
+            if getattr(j, "instance_ref", None) == ref:
+                jid = getattr(j, "job_id", None)
+                if jid:
+                    out.append(jid)
+        return out
+    except Exception:
+        return ["__list_failed__"]
+
+
 def _job_command_for_jid(store, jid: str) -> str:
     """Best-effort fetch of a job's command string from its running/ or
     queue/ blob, given only the job id (the reaper has jids, not job
