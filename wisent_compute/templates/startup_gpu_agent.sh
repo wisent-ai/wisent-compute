@@ -130,6 +130,24 @@ export HF_HUB_ETAG_TIMEOUT=1
 huggingface-cli download cross-encoder/nli-deberta-v3-small
 huggingface-cli download sentence-transformers/all-MiniLM-L6-v2
 
+# Pre-fetch tokenizer files for every extraction model. Without this,
+# each agent first-fetches the tokenizer at job-time; an interrupted
+# download leaves a zero-byte tokenizer.model and transformers' slow
+# SentencePiece path then calls sentencepiece.LoadFromFile(None/empty)
+# and dies with `TypeError: not a string` mid-extraction (observed live
+# on the winogrande Llama-2-7b-chat-hf role_play strategy on 2026-05-15).
+# Only the tokenizer config is needed here — model weights download on
+# first job claim. Hard-error on download failure so the VM recycles
+# rather than running with a half-fetched tokenizer.
+for _model in \
+    "meta-llama/Llama-3.2-1B-Instruct" \
+    "meta-llama/Llama-2-7b-chat-hf" \
+    "Qwen/Qwen3-8B" \
+    "openai/gpt-oss-20b"; do
+    huggingface-cli download "${_model}" \
+        --include "tokenizer*" "*.json" "special_tokens_map.json"
+done
+
 # Run the agent. --idle-shutdown makes it exit + self-delete the VM when the
 # queue holds nothing this VM can run. No timer, no slot constant — pure
 # condition-driven on (slots empty AND no eligible queued job).
