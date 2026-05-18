@@ -83,6 +83,17 @@ def _build_observed_map() -> dict[str, int]:
         peak = doc.get("peak_vram_gb")
         if not isinstance(peak, int) or peak <= 0:
             continue  # unmeasured / CPU job — not a usable observation
+        if doc.get("peak_vram_per_gpu") is not True:
+            # Legacy record from the pre-0.4.241 probe that summed
+            # used_memory ACROSS GPUs. On a multi-GPU host that is the
+            # cross-GPU total, not the per-card requirement (gpt-oss-20b
+            # ~89 summed vs ~50-74 real), and max() lets one such sample
+            # pin every job above the single-GPU fleet. Only peaks the
+            # corrected per-GPU probe produced are a valid single-GPU
+            # sizing signal. Until a model has one, observed_vram_gb
+            # returns None and the job sizes via the smallest-live-GPU +
+            # OOM-escalate path (no fabricated number).
+            continue
         model = _model_of(doc.get("command") or "")
         if not model:
             continue

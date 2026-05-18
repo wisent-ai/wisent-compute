@@ -346,6 +346,12 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # happy-path case (job wrote nothing).
         job.peak_vram_gb = max(int(getattr(job, "peak_vram_gb", 0) or 0),
                                int(slot.get("peak_vram_gb", 0) or 0))
+        # Stamp the per-GPU-probe marker: this agent is 0.4.241+,
+        # so smi_job_used_gb measured the MAX single-GPU footprint
+        # (grouped by gpu_uuid), not a cross-GPU sum. observed_vram_gb
+        # trusts only flagged peaks, so legacy summed records can no
+        # longer poison the model max().
+        job.peak_vram_per_gpu = True
         if state == JobState.FAILED:
             from ...sizing import escalate_on_oom
             if escalate_on_oom(store, job, job.error or ""):

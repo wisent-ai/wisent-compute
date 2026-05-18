@@ -132,6 +132,15 @@ class Job:
     # ground-truth signal the sizing heuristic learns from — it is the
     # MEASURED number, not a declared/estimated one.
     peak_vram_gb: int = 0
+    # True iff peak_vram_gb was produced by the PER-GPU probe (0.4.241+):
+    # nvidia-smi grouped by gpu_uuid, max single-GPU footprint. Records
+    # written by the pre-0.4.241 probe summed used_memory ACROSS GPUs, so
+    # on a multi-GPU host the figure is the cross-GPU total, not the
+    # per-card requirement (gpt-oss-20b: ~89 summed vs ~50-74 real). Those
+    # records are unusable as a single-GPU sizing signal; observed_vram_gb
+    # trusts ONLY peaks with this flag True so a poisoned historical
+    # sample can never dominate the max(). Default False = legacy/untrusted.
+    peak_vram_per_gpu: bool = False
 
     def __post_init__(self):
         if not self.created_at:
