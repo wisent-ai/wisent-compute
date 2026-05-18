@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import time
 
 PROJECT = os.environ.get("GCP_PROJECT", "wisent-480400")
 BUCKET = os.environ.get("WC_BUCKET", "wisent-compute")
@@ -158,49 +159,43 @@ AZURE_BILLING_SECRET = os.environ.get(
 )
 
 
-# Per-model peak-VRAM overrides for models whose actual peak diverges from
-# the params-based heuristic below. Numbers are observed peak GiB during
-# get-activations on an A100-80GB / RTX PRO 6000.
-#
-# openai/gpt-oss-20b: 78.6 GiB peak observed (job d3e0f18e tail, 2026-05-02).
-#   Model ships in mxfp4 packed format which is dequantized to bf16 in
-#   transformers' load path (mxfp4.py:115 convert_moe_packed_tensors), so
-#   on-disk size ~= 12 GiB but on-GPU peak balloons to ~80 GiB. Without
-#   this override the params-based heuristic predicts 72 GiB, leaving
-#   ~22 GiB free in the agent's bookkeeping. The agent then claims a
-#   second job that fits in 22 GiB (e.g. Llama-3.2-1B at 15 GiB) — once
-#   gpt-oss-20b finishes dequant, total = 78 + 15 = 93 GiB and the GPU
-#   OOMs. Reserving 88 GiB means no second job can be co-scheduled on a
-#   95 GiB GPU, which is the desired behavior for this model.
-MODEL_VRAM_OVERRIDES_GB = {
-    # 80 GiB so a2-ultragpu-1g (80 GiB A100) can admit it (need=80 == free=80).
-    # Previously 88 to forbid co-scheduling on the 96 GiB workstation, but that
-    # locked the model to workstation-only. Workstation's lm-eval pt-task
-    # loading bug then made gpt-oss-20b throughput effectively zero. Switching
-    # to 80 + EXCLUSIVE_MODELS (below) keeps the no-co-schedule guarantee
-    # WITHOUT blocking 80 GiB cloud VMs from admitting the job.
-    "openai/gpt-oss-20b": 80,
-}
+# Co-schedule / cost POLICY flags, loaded from GCS so they change without
+# a wisent-compute republish. These are operator decisions, NOT quantities
+# measurable from GPU telemetry, so they legitimately live in config:
+#   gs://<BUCKET>/config/model_overrides.json
+#   {"exclusive": [<model>, ...], "local_only": [<model>, ...]}
+# (Per-model VRAM sizing is NOT here — it is learned from measured peaks;
+# see wisent_compute.sizing.observed_vram_gb.) Cached in-process 5 min.
+_MODEL_POLICY_CACHE: dict = {"data": None, "fetched_at": 0.0}
+_MODEL_POLICY_TTL_S = 300
 
-# Models the agent must run with the entire GPU to itself. While a slot is
-# running one of these, the agent treats remaining free VRAM as 0 so no
-# second job is claimed. Reason: gpt-oss-20b's mxfp4 dequant balloons peak
-# from ~40 GiB to ~78 GiB after admission; on a 96 GiB workstation the
-# pre-balloon free reading lets the agent claim a co-scheduled small job
-# that then OOMs once dequant completes (job d3e0f18e, 0e8f54b6).
-EXCLUSIVE_MODELS = frozenset({
-    "openai/gpt-oss-20b",
-})
 
-# Models that may ONLY be claimed by local (on-prem) agents, never cloud.
-# Use case: gpt-oss-20b on a2-ultragpu-1g spot costs ~$2.40 per task
-# (extracted 2026-05-05 from billing_export); the workstation runs them at
-# $0 marginal. With ~6,166 gpt-oss-20b jobs in the current batch this is
-# ~$14.8k of avoidable spend in exchange for ~8x slower drain on this
-# subset only (other models keep flowing on cloud in parallel).
-LOCAL_ONLY_MODELS = frozenset({
-    "openai/gpt-oss-20b",
-})
+def _load_model_policy() -> dict:
+    now = time.time()
+    if (_MODEL_POLICY_CACHE["data"] is not None
+            and now - _MODEL_POLICY_CACHE["fetched_at"] < _MODEL_POLICY_TTL_S):
+        return _MODEL_POLICY_CACHE["data"]
+    try:
+        from google.cloud import storage
+        blob = storage.Client().bucket(BUCKET).blob("config/model_overrides.json")
+        data = json.loads(blob.download_as_text())
+        if not isinstance(data, dict):
+            raise ValueError("model_overrides.json is not a JSON object")
+    except Exception:
+        data = {}
+    data.setdefault("exclusive", [])
+    data.setdefault("local_only", [])
+    _MODEL_POLICY_CACHE["data"] = data
+    _MODEL_POLICY_CACHE["fetched_at"] = now
+    return data
+
+
+def is_exclusive_model(model: str) -> bool:
+    return model in _load_model_policy()["exclusive"]
+
+
+def is_local_only_model(model: str) -> bool:
+    return model in _load_model_policy()["local_only"]
 
 
 def estimate_gpu_memory(command: str) -> int:
@@ -210,8 +205,13 @@ def estimate_gpu_memory(command: str) -> int:
         return 0
     model = model_match.group(1).strip("'\"")
 
-    if model in MODEL_VRAM_OVERRIDES_GB:
-        return MODEL_VRAM_OVERRIDES_GB[model]
+    # Fleet-learned sizing from MEASURED actual peaks (not a declared or
+    # hand-picked constant). None when the model has too few measured
+    # completions yet — then the params heuristic below sizes it.
+    from .sizing import observed_vram_gb
+    measured = observed_vram_gb(model)
+    if measured is not None:
+        return measured
 
     params_b = 0
     m = re.search(r'(\d+\.?\d*)[Bb]', model)

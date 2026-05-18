@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ...models import JobState
 from ...queue.storage import JobStorage
+from .helpers.gpu_probe import smi_job_used_gb
 
 HEARTBEAT_INTERVAL = 60  # write a fresh heartbeat every 60s; HEARTBEAT_STALE_MINUTES=15 leaves 15 missed-write tolerance
 
@@ -268,7 +269,7 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     _start_heartbeat_thread(store, job.job_id, proc)
     last_hb = time.time()
     return {"proc": proc, "job": job, "log_file": log_file,
-            "last_hb": last_hb, "paused": False}
+            "last_hb": last_hb, "paused": False, "peak_vram_gb": 0}
 
 
 def _tail_log(path: str, max_bytes: int = 4096) -> str:
@@ -343,6 +344,8 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # doesn't leave the slot orphaned in running/. _upload_output now
         # raises on real SDK errors; a missing output_dir is a normal
         # happy-path case (job wrote nothing).
+        job.peak_vram_gb = max(int(getattr(job, "peak_vram_gb", 0) or 0),
+                               int(slot.get("peak_vram_gb", 0) or 0))
         store.move_job(job, "running", state.value)
         if Path(output_dir).exists():
             _upload_output(store, job.job_id, output_dir)
@@ -355,6 +358,9 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         log_fn(f"Job {job.job_id} {state.value}")
         return False
     now = time.time()
+    _used = smi_job_used_gb(proc.pid)
+    if _used > slot.get("peak_vram_gb", 0):
+        slot["peak_vram_gb"] = _used
     if not slot["paused"] and now - slot["last_hb"] > HEARTBEAT_INTERVAL:
         _write_heartbeat(store, job.job_id)
         # Stream the in-progress command_output.log to GCS on each heartbeat.

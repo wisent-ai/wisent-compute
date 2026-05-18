@@ -144,11 +144,11 @@ def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
         return False
     if bool(getattr(job, "exclusive", False)) and active_slot_count > 0:
         return False
-    from ....config import LOCAL_ONLY_MODELS
+    from ....config import is_local_only_model
     import re as _re
     if kind != "local":
         m = _re.search(r"--model\s+(\S+)", getattr(job, "command", "") or "")
-        if m and m.group(1).strip("'\"") in LOCAL_ONLY_MODELS:
+        if m and is_local_only_model(m.group(1).strip("'\"")):
             return False
     pinned = getattr(job, "pin_to_provider", False)
     if pinned and job.provider != kind:
@@ -196,11 +196,11 @@ def _slot_is_exclusive(slot: dict) -> bool:
     # tagged exclusive at submit time.
     if bool(getattr(job, "exclusive", False)):
         return True
-    from ....config import EXCLUSIVE_MODELS
+    from ....config import is_exclusive_model
     import re
     m = re.search(r"--model\s+(\S+)",
                    getattr(job, "command", "") or "")
-    return bool(m and m.group(1).strip("'\"") in EXCLUSIVE_MODELS)
+    return bool(m and is_exclusive_model(m.group(1).strip("'\"")))
 
 
 def _slot_vram(slot: dict) -> int:

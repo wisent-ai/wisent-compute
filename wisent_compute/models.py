@@ -121,9 +121,17 @@ class Job:
     # — large diffusion training (Z-Image, SDXL), full-finetunes, anything
     # whose peak VRAM is hard to predict from on-disk model size. Catches
     # the TOCTOU race where neighbor processes ramp up CUDA allocations
-    # AFTER admission and starve us mid-load. Generalizes EXCLUSIVE_MODELS
-    # (config.py:166) to per-job rather than regex-on-command.
+    # AFTER admission and starve us mid-load. Per-job equivalent of the
+    # config.is_exclusive_model policy (GCS model_overrides.json), which
+    # is regex-on-command; this is the explicit per-job opt-in.
     exclusive: bool = False
+    # Actual peak GPU memory (GiB) used by this job's process tree, sampled
+    # from nvidia-smi --query-compute-apps during the run and written at
+    # completion. 0 = not measured (older records, CPU jobs, or a GPU that
+    # never reported a compute-app for the process tree). This is the
+    # ground-truth signal the sizing heuristic learns from — it is the
+    # MEASURED number, not a declared/estimated one.
+    peak_vram_gb: int = 0
 
     def __post_init__(self):
         if not self.created_at:
