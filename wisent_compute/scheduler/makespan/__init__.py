@@ -192,12 +192,27 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
     from concurrent.futures import ThreadPoolExecutor
     schedulable: list[tuple[int, float, object]] = []
     skip_by_key: dict[tuple[str, str], int] = {}
+    to_write: list[object] = []
     for j in store.list_jobs("queue"):
         rt = _estimate_runtime(j, history)
         if rt is None:
             mt = _extract_model_task(getattr(j, "command", "") or "")
             if int(getattr(j, "priority", 0) or 0) <= 0:
                 skip_by_key[mt] = skip_by_key.get(mt, 0) + 1
+                # makespan can't optimally ORDER a no-history job, but it
+                # must not leave a stale assigned_to that PINS it to an
+                # agent chosen under a now-obsolete size. gpt-oss-20b was
+                # pinned to the single 96GB local box back when it was
+                # mis-sized 89 (cross-GPU-sum bug); after the per-GPU
+                # sizing fix it fits the idle 80GB fleet, but the skip
+                # path never cleared the pin so it stayed routed to the
+                # saturated box and never dispatched (q frozen ~1h+,
+                # 2026-05-18). Clearing the pin makes it claimable by any
+                # eligible agent (the documented assigned_to="" semantic);
+                # history-backed jobs' ordering is unaffected.
+                if getattr(j, "assigned_to", ""):
+                    j.assigned_to = ""
+                    to_write.append(j)
                 continue
             # High-priority no-history job (one-off training run, e.g.
             # free_chat_pd GRPO) must not be silently dropped: priority
@@ -209,7 +224,6 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
             rt = 6 * 3600.0
         schedulable.append((-int(getattr(j, "priority", 0) or 0), -rt, j))
     schedulable.sort(key=lambda t: (t[0], t[1]))
-    to_write: list[object] = []
     unassigned = 0
     for _p, neg_rt, job in schedulable:
         vram = int(getattr(job, "gpu_mem_gb", 0) or 0)
