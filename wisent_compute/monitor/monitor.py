@@ -20,6 +20,7 @@ from ..models import JobState
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 from .alerts import send_alert
+from .reap.helpers import safe_delete_vm_by_hostname
 from .reap.helpers import (
     _instance_refs_with_completions,
     _requeue,
@@ -100,19 +101,21 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                     if _hg.finalize_if_self_terminating(store, job, _log):
                         continue
                     if not _hg.any_job_checkpoint_fresh(store, job, 5400):
+                        safe_delete_vm_by_hostname(provider, hostname, _running_vm_names_cache or {}, _log)
                         _requeue(store, job, "local agent live but job heartbeat stale (orphan)")
                     continue
                 is_cloud_agent_name = hostname.startswith("wisent-agent-")
                 if is_cloud_agent_name:
                     if _running_vm_names_cache is None:
                         _running_vm_names_cache = {
-                            r.split("@", 1)[0]
+                            r.split("@", 1)[0]: r
                             for r, _ in provider.list_running_instance_refs_with_age()
                         }
                     if hostname not in _running_vm_names_cache:
                         from . import heartbeat_guard as _hg_vm
                         if _hg_vm.any_job_heartbeat_fresh(store, [job_id], 1800):
                             continue  # fresh job heartbeat = VM+agent+training alive; aggregated_list missed a transient non-RUNNING (STAGING/REPAIRING/live-migration) snapshot
+                        safe_delete_vm_by_hostname(provider, hostname, _running_vm_names_cache, _log)
                         if getattr(job, "preemptible", False):
                             _requeue_preempted(store, job, "Spot preempted (cloud agent gone)")
                         else:

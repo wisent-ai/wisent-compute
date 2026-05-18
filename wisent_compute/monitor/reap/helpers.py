@@ -17,6 +17,49 @@ from ...models import Job, JobState
 from ...queue.storage import JobStorage
 
 
+def safe_delete_vm_by_hostname(provider, hostname, vm_cache, log_fn) -> bool:
+    """Best-effort delete of a GCE VM named `hostname`.
+
+    The requeue paths in check_running_jobs (orphan + VM-gone) previously
+    moved running -> queue without calling provider.delete_instance, so
+    the prior agent's training subprocess kept running on the
+    supposedly-gone VM and producing duplicate writes against the same
+    gs://wisent-compute/ckpts/<run>/ path. Confirmed live 2026-05-18 for
+    job 724084db: 4 concurrent trainers (workstation + 3 GCP VMs) all
+    racing on the same ckpt prefix because each transient "VM missing
+    from fleet listing" requeue spawned a new dispatch without
+    terminating the old subprocess.
+
+    Looks up the full <name>@<zone> ref from `vm_cache` (a dict
+    {hostname: full_ref} built by the caller) and falls back to a fresh
+    list-and-search on cache miss (handles the exact transient-miss case
+    that caused the ghost-trainer bug). Never raises; returns True iff
+    a delete call returned cleanly. Idempotent and safe on a VM that is
+    truly gone (returns False).
+    """
+    full_ref = vm_cache.get(hostname) if isinstance(vm_cache, dict) else None
+    if not full_ref:
+        try:
+            for r, _age in provider.list_running_instance_refs_with_age():
+                if r.split("@", 1)[0] == hostname:
+                    full_ref = r
+                    break
+        except Exception as e:
+            log_fn(f"safe_delete: fresh list failed for {hostname}: "
+                   f"{type(e).__name__}: {e}")
+            return False
+    if not full_ref:
+        return False
+    try:
+        provider.delete_instance(full_ref)
+        log_fn(f"safe_delete: killed ghost VM {full_ref}")
+        return True
+    except Exception as e:
+        log_fn(f"safe_delete({full_ref}) failed: "
+               f"{type(e).__name__}: {e}")
+        return False
+
+
 def _log(msg):
     sys.stderr.write(f"[monitor] {msg}\n")
     sys.stderr.flush()
