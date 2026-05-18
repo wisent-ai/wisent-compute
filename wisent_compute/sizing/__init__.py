@@ -1,10 +1,21 @@
 """Fleet-learned per-model GPU sizing — purely from MEASURED peaks.
 
-For a model, the maximum ACTUAL peak_vram_gb the agent measured via
-nvidia-smi per-process during a completed run. No formula, no per-model
-constant, no minimum-sample gate: a single real measurement is the
-truth and is used immediately. max (not mean/mode) because one run that
-legitimately needed the peak must still be sized for.
+For a model, the SMALLEST per-GPU peak_vram_gb observed across its
+SUCCESSFUL per-GPU-probe completions. No formula, no per-model constant,
+no minimum-sample gate, no hardcoded cap: a single real measurement is
+the truth and is used immediately.
+
+min (not max/mean) because activation-extraction is memory-ELASTIC: it
+opportunistically grows to fill whatever VRAM the card has, so the same
+model measures ~89 GiB on a 96 GiB box but completes fine using ~50-74
+on an 80 GiB card. A run that COMPLETED at peak P is proof the workload
+fits in P; the smallest such P is the demonstrated-sufficient footprint.
+Taking max instead let the single largest-GPU sample (89) fence the
+whole smaller-GPU fleet off the model and re-stall the queue, even
+though every 80 GiB run finished. gpu_mem_gb gates scheduling
+eligibility, not the process, and exclusive models get the whole card,
+so sizing at the smallest proven-sufficient peak safely widens
+eligibility without changing what the process actually allocates.
 
 If a model has ZERO measured completions, observed_vram_gb returns None
 and the caller does NOT fabricate a number — the job starts on the
@@ -85,27 +96,28 @@ def _build_observed_map() -> dict[str, int]:
             continue  # unmeasured / CPU job — not a usable observation
         if doc.get("peak_vram_per_gpu") is not True:
             # Legacy record from the pre-0.4.241 probe that summed
-            # used_memory ACROSS GPUs. On a multi-GPU host that is the
-            # cross-GPU total, not the per-card requirement (gpt-oss-20b
-            # ~89 summed vs ~50-74 real), and max() lets one such sample
-            # pin every job above the single-GPU fleet. Only peaks the
-            # corrected per-GPU probe produced are a valid single-GPU
-            # sizing signal. Until a model has one, observed_vram_gb
-            # returns None and the job sizes via the smallest-live-GPU +
-            # OOM-escalate path (no fabricated number).
+            # used_memory ACROSS GPUs (cross-GPU total, not per-card).
+            # Mixing those into the per-model sample set corrupts the
+            # signal, so only peaks the corrected per-GPU probe produced
+            # are trusted. Until a model has at least one such record
+            # observed_vram_gb returns None and the job sizes via the
+            # smallest-live-GPU + OOM-escalate path (no fabricated
+            # number).
             continue
         model = _model_of(doc.get("command") or "")
         if not model:
             continue
         peaks.setdefault(model, []).append(peak)
 
-    return {model: max(samples) for model, samples in peaks.items()}
+    return {model: min(samples) for model, samples in peaks.items()}
 
 
 def observed_vram_gb(model: str) -> int | None:
-    """Max MEASURED peak_vram_gb for model, or None if the model has no
-    measured completion yet (caller must NOT fabricate a number — start
-    on the smallest ACTUAL fleet GPU and escalate via live capacities)."""
+    """Smallest demonstrated-sufficient MEASURED peak_vram_gb for model
+    (min over its successful per-GPU-probe completions), or None if the
+    model has no such measured completion yet (caller must NOT fabricate
+    a number — start on the smallest ACTUAL fleet GPU and escalate via
+    live capacities)."""
     now = time.time()
     if _cache["map"] is None or now - _cache["built_at"] > _TTL_S:
         _cache["map"] = _build_observed_map()
