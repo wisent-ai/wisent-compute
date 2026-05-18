@@ -86,6 +86,17 @@ def _run_tick(store: JobStorage, secrets: dict) -> int:
     empty) is logged and skipped so a misconfigured provider never blocks
     the primary one.
     """
+    # Coordinator-authoritative sizing: re-zero any queued job whose model
+    # has no measured peak (stamp the measured peak if one exists) BEFORE
+    # assignment. A pre-0.4.237 agent that requeues a job writes the old
+    # hardcoded estimate_gpu_memory value back; makespan's assigned_to-only
+    # write then preserves it. Correcting it here each tick makes the
+    # coordinator the single sizing authority instead of waiting for
+    # fleet-wide drift.
+    from .sizing import normalize_queue_sizing
+    n_sized = normalize_queue_sizing(store, log_fn=_log)
+    if n_sized:
+        _log(f"sizing: corrected {n_sized} stale queue gpu_mem_gb values")
     n_assigned = _assign_jobs_to_agents(store)
     if n_assigned:
         _log(f"assignment: matched {n_assigned} queued jobs to agents")

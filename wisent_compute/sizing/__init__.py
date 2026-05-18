@@ -209,3 +209,54 @@ def escalate_on_oom(store, job, error_text: str) -> bool:
     store.move_job(job, "running", "queue")
     store.cleanup_status(job.job_id)
     return True
+
+
+def normalize_queue_sizing(store, log_fn=None) -> int:
+    """Coordinator-authoritative sizing pass, run once per tick BEFORE
+    assignment.
+
+    A queued job's gpu_mem_gb is owned by the sizing path, not by the
+    agent that last touched it. An agent still on pre-0.4.237
+    wisent-compute (not yet drifted) requeues jobs writing the OLD
+    hardcoded estimate_gpu_memory output (gpt-oss-20b -> 64/12/80); the
+    0.4.238 makespan _apply_assignment then faithfully PRESERVES that
+    stale value because it only rewrites assigned_to. So the queue keeps
+    re-accumulating hardcoded sizes until every agent has drifted.
+
+    This pass closes that gap structurally: for every queued job whose
+    model has NO measured peak yet, force gpu_mem_gb back to 0 — the
+    canonical "no stored size, sized live at claim time" state. For a
+    model WITH a measured peak, stamp that measured peak (the ground
+    truth). Either way the stored number is never a hardcoded guess.
+    A lagging agent's stale write is corrected within one tick instead
+    of persisting until fleet-wide drift completes.
+
+    Fresh read-modify-write of ONLY gpu_mem_gb so a concurrent
+    makespan assigned_to write on the same blob is not lost. Returns
+    the number of queue blobs corrected this tick.
+    """
+    if log_fn is None:
+        log_fn = lambda _m: None  # noqa: E731
+    corrected = 0
+    for j in store.list_jobs("queue"):
+        model = _model_of(getattr(j, "command", "") or "")
+        if not model:
+            continue
+        peak = observed_vram_gb(model)
+        desired = peak if peak is not None else 0
+        if int(getattr(j, "gpu_mem_gb", 0) or 0) == desired:
+            continue
+        fresh = store.read_job("queue", j.job_id)
+        if fresh is None:
+            continue  # claimed/moved since tick start
+        if int(getattr(fresh, "gpu_mem_gb", 0) or 0) == desired:
+            continue
+        fresh.gpu_mem_gb = desired
+        store.write_job("queue", fresh)
+        corrected += 1
+    if corrected:
+        log_fn(
+            f"sizing: normalized {corrected} queue jobs "
+            f"(unmeasured->0 / measured->peak); stale-agent clobber corrected"
+        )
+    return corrected
