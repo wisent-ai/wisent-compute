@@ -225,8 +225,23 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
         job.assigned_to = chosen
         to_write.append(job)
     if to_write:
+        # Fresh read-modify-write of ONLY assigned_to. The Job objects in
+        # `to_write` were read at tick start; writing them whole back at
+        # tick end resurrects whatever fields changed meanwhile —
+        # notably gpu_mem_gb, which an external de-hardcode / the agent's
+        # OOM-escalation may have just rewritten. Re-read each blob now
+        # and touch only assigned_to so the live gpu_mem_gb is preserved.
+        def _apply_assignment(j):
+            fresh = store.read_job("queue", j.job_id)
+            if fresh is None:
+                return  # claimed/moved since tick start — nothing to do
+            want = getattr(j, "assigned_to", "") or ""
+            if (getattr(fresh, "assigned_to", "") or "") == want:
+                return
+            fresh.assigned_to = want
+            store.write_job("queue", fresh)
         with ThreadPoolExecutor(max_workers=16) as ex:
-            list(ex.map(lambda j: store.write_job("queue", j), to_write))
+            list(ex.map(_apply_assignment, to_write))
     skipped = sum(skip_by_key.values())
     if skipped:
         top = sorted(skip_by_key.items(), key=lambda kv: -kv[1])[:5]
