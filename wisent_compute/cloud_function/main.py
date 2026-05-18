@@ -14,6 +14,7 @@ from wisent_compute.monitor import (
 )
 from wisent_compute.scheduler import schedule_queued_jobs
 from wisent_compute.scheduler.makespan import assign_jobs
+from wisent_compute.sizing import normalize_queue_sizing
 
 _publisher = None
 _secrets = None
@@ -54,6 +55,19 @@ def monitor_jobs(request=None):
     store = JobStorage(BUCKET)
     if _publisher is None:
         _publisher = pubsub_v1.PublisherClient()
+
+    # Coordinator-authoritative sizing, BEFORE assignment. A pre-0.4.237
+    # agent that requeues a job writes the OLD hardcoded
+    # estimate_gpu_memory value (gpt-oss-20b 64/12/80); makespan's
+    # assigned_to-only write then preserves it, so the queue keeps
+    # re-accumulating hardcoded sizes until fleet-wide drift. This pass
+    # forces unmeasured-model queue blobs back to gpu_mem_gb=0 (measured
+    # -> observed peak) every tick so the stale value is corrected within
+    # one tick. This is the deployed GCP coordinator path; coordinator.
+    # _run_tick (the `wc coordinator` daemon) calls the same function.
+    n_sized = normalize_queue_sizing(store, log_fn=_log)
+    if n_sized:
+        _log(f"sizing: corrected {n_sized} stale queue gpu_mem_gb values")
 
     n_assigned = assign_jobs(store, log_fn=_log)
     if n_assigned:
