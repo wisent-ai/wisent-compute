@@ -205,69 +205,24 @@ def estimate_gpu_memory(command: str) -> int:
         return 0
     model = model_match.group(1).strip("'\"")
 
-    # Fleet-learned sizing from MEASURED actual peaks (not a declared or
-    # hand-picked constant). None when the model has too few measured
-    # completions yet — then the params heuristic below sizes it.
+    # Sizing is PURELY the measured peak. No params formula, no per-model
+    # constant, no multiplier — those are all hardcoded guesses and are
+    # forbidden. observed_vram_gb returns the max real nvidia-smi
+    # peak_vram_gb the fleet has recorded for this model.
     from .sizing import observed_vram_gb
     measured = observed_vram_gb(model)
     if measured is not None:
         return measured
 
-    params_b = 0
-    m = re.search(r'(\d+\.?\d*)[Bb]', model)
-    if m:
-        params_b = float(m.group(1))
-    else:
-        m = re.search(r'(\d+)[Mm]', model)
-        if m:
-            params_b = int(m.group(1)) / 1000
-    if params_b == 0:
-        params_b = 7
-
-    quant_factor = 1
-    if re.search(r'GPTQ|AWQ|INT4|4bit|Q4', model):
-        quant_factor = 4
-    elif re.search(r'INT8|8bit|Q8', model):
-        quant_factor = 2
-
-    weights_gb = params_b * 2 / quant_factor
-    kv_gb = weights_gb * 0.3
-    # Bumped 8 -> 12 (2026-05-14): observed peak vs estimate gap of ~5-7 GB
-    # on Qwen3-8B / Llama-3.1-8B activation-extraction runs. CUDA allocator
-    # fragmentation + transformers' attention scratch + nccl staging all
-    # eat headroom not captured by weights+kv. Under-estimating neighbors'
-    # peak caused co-tenancy OOM on job 4b0411a1 (A100-80GB: 32+32+22 GB
-    # actual, but agent's bookkeeping admitted as 26+26+22 = 74 / 80).
-    overhead_gb = 12
-
-    multiplier = 1.0
-    if re.search(r'get-activations|generate-vector', command):
-        # Bumped 1.2 -> 1.4 (2026-05-14): activation extraction layers
-        # the entire residual stream through to disk, with hidden-state
-        # buffers held in VRAM longer than the multiplier=1.2 assumed.
-        # Observed peak/declared ratio ~1.32-1.38 on the workstation
-        # fleet; 1.4 leaves 5% guard.
-        multiplier = 1.4
-    elif re.search(r'modify-weights|optimize-weights|training', command):
-        multiplier = 1.5
-
-    # GRPO / RL training memory profile is much heavier than inference or
-    # activation extraction: per training step the trainer holds the model
-    # (bf16 weights), the model gradients (bf16), the optimizer state
-    # (8-bit AdamW from bitsandbytes saves ~10 GB vs fp32 AdamW), the
-    # reference-model log-probs (another full bf16 forward), AND a KV
-    # cache for num_generations × batch_size rollout sequences during the
-    # reward computation. Tuned empirically:
-    #   1B Llama with adamw_bnb_8bit + grad-checkpoint: OOMs on T4 (15 GB),
-    #     succeeds on L4 (24 GB).
-    #   4B Qwen with same: fits in 40 GB A100 (the RTX PRO 6000 advertises
-    #     a 40 GB A100 slot; only 8 GB weights + ~25 GB rest).
-    # Formula 3x weights + 16 GB overhead lands 1B on L4 (22 GB → 24 tier),
-    # 4B on A100-40 (40 → 40 tier), 7B on A100-80 (37 → 40 or 80 tier).
-    if re.search(r'(^|\s|-m\s+)train\.train\b', command):
-        return round(weights_gb * 3 + 16)
-
-    return round((weights_gb + kv_gb + overhead_gb) * multiplier)
+    # No measurement for this model yet: do NOT fabricate a number.
+    # Return the smallest GPU tier's hardware capacity so the job is
+    # dispatched to the smallest box. If it OOMs there, the failure path
+    # (slots.advance_slot) escalates it one hardware tier at a time until
+    # it runs; that successful run's nvidia-smi peak is recorded and
+    # every later job of this model is then sized from the measurement.
+    # min(GPU_SIZING[gcp]) is hardware fact, not a picked constant.
+    from .models import GPU_SIZING
+    return min(GPU_SIZING.get("gcp", {16: None}).keys())
 
 
 def lookup_instance_type(provider: str, gpu_mem_gb: int) -> tuple[str, str]:

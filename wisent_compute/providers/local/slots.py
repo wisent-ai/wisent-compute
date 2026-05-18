@@ -346,6 +346,11 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # happy-path case (job wrote nothing).
         job.peak_vram_gb = max(int(getattr(job, "peak_vram_gb", 0) or 0),
                                int(slot.get("peak_vram_gb", 0) or 0))
+        if state == JobState.FAILED:
+            from ...sizing import escalate_on_oom
+            if escalate_on_oom(store, job, job.error or ""):
+                log_fn(f"Job {job.job_id} OOM-escalated to gpu_mem_gb={job.gpu_mem_gb}; requeued")
+                return False
         store.move_job(job, "running", state.value)
         if Path(output_dir).exists():
             _upload_output(store, job.job_id, output_dir)

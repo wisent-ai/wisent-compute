@@ -1,23 +1,18 @@
-"""Fleet-learned per-model GPU sizing.
+"""Fleet-learned per-model GPU sizing — purely from MEASURED peaks.
 
-Replaces the hand-maintained per-model VRAM constant table with a value
-derived from the fleet's own MEASURED history: for a model, the maximum
-ACTUAL peak_vram_gb (sampled by the agent from nvidia-smi per-process
-during the run, written onto the Job at completion) across that model's
-successful completions. A size at or above every actual peak the fleet
-has survived for a model is, by construction, sufficient — no human
-picks the number, and it self-corrects: a size that starts OOMing puts
-those jobs in failed/ not completed/, so the learned high-water mark
-only ever reflects sizes that actually ran to completion.
+For a model, the maximum ACTUAL peak_vram_gb the agent measured via
+nvidia-smi per-process during a completed run. No formula, no per-model
+constant, no minimum-sample gate: a single real measurement is the
+truth and is used immediately. max (not mean/mode) because one run that
+legitimately needed the peak must still be sized for.
 
-max (not mean/mode) because the number must not under-provision the
-tail: one run that legitimately needed the peak must still be sized for.
-The earlier declared-gpu_mem_gb signal was circular (it just read back
-whatever the heuristic declared); peak_vram_gb is the measured truth.
-
-Models with fewer than _MIN_OBSERVATIONS measured completions return
-None so config.estimate_gpu_memory uses its params heuristic — a
-never-seen model has no measured size yet and one sample is noise.
+If a model has ZERO measured completions, observed_vram_gb returns None
+and the caller does NOT fabricate a number — the job starts on the
+smallest GPU tier and escalates up the hardware ladder on OOM until it
+runs, at which point its real peak is measured and every later job of
+that model is sized from that measurement. There is no hardcoded VRAM
+guess anywhere in this path; the only inputs are measured peaks and
+hardware GPU-class capacities.
 
 completed/ is thousands of blobs; building the per-model map on every
 estimate call would blow the tick budget, so it is built once and
@@ -34,11 +29,6 @@ from ..config import BUCKET
 
 _MODEL_RE = re.compile(r"--model\s+(\S+)")
 
-# Confidence threshold (global, not per-model, so it adds no per-model
-# hardcoding): below this many measured completions a model's observed
-# size is not yet trustworthy.
-_MIN_OBSERVATIONS = 20
-
 _COMPLETED_SAMPLE_CAP = 6000
 _TTL_S = 600
 _cache: dict = {"map": None, "built_at": 0.0}
@@ -50,12 +40,12 @@ def _model_of(command: str) -> str:
 
 
 def _build_observed_map() -> dict[str, int]:
-    """model -> max measured peak_vram_gb over its successful completions,
-    keeping only models with >= _MIN_OBSERVATIONS measured samples.
+    """model -> max measured peak_vram_gb over its completed runs.
 
-    A coordinator-side GCS list/read outage must not silently degrade
-    every model to the params heuristic fleet-wide, so a hard failure
-    here propagates; the caller's cache keeps the last good map until a
+    Any model with >= 1 real measurement is included; there is no
+    minimum-sample gate. A coordinator-side GCS list/read outage must
+    not silently erase the map fleet-wide, so a hard failure here
+    propagates; the caller's cache keeps the last good map until a
     later rebuild succeeds.
     """
     from concurrent.futures import ThreadPoolExecutor
@@ -98,18 +88,59 @@ def _build_observed_map() -> dict[str, int]:
             continue
         peaks.setdefault(model, []).append(peak)
 
-    return {
-        model: max(samples)
-        for model, samples in peaks.items()
-        if len(samples) >= _MIN_OBSERVATIONS
-    }
+    return {model: max(samples) for model, samples in peaks.items()}
 
 
 def observed_vram_gb(model: str) -> int | None:
-    """Fleet-learned VRAM size for model from MEASURED peaks, or None if
-    not enough measured completions to trust a value yet."""
+    """Max MEASURED peak_vram_gb for model, or None if the model has no
+    measured completion yet (caller must NOT fabricate a number — start
+    smallest GPU tier and escalate on OOM)."""
     now = time.time()
     if _cache["map"] is None or now - _cache["built_at"] > _TTL_S:
         _cache["map"] = _build_observed_map()
         _cache["built_at"] = now
     return _cache["map"].get(model)
+
+
+_OOM_RE = re.compile(
+    r"out of memory|OutOfMemoryError|CUDA error: out of memory|"
+    r"CUDA_ERROR_OUT_OF_MEMORY|cuBLAS.*alloc|cudaErrorMemoryAllocation",
+    re.IGNORECASE,
+)
+
+
+def escalate_on_oom(store, job, error_text: str) -> bool:
+    """A job that OOMed while sized at a GPU tier — and has NO measured
+    peak yet — is moved up exactly one hardware tier and requeued
+    (running -> queue) instead of being failed. Returns True iff it was
+    requeued. At the largest tier, or once the model has a measured
+    peak, this does nothing and the caller fails the job normally.
+
+    This is the no-hardcode escalation: an unmeasured model starts on
+    the smallest GPU (config.estimate_gpu_memory) and climbs the real
+    hardware ladder one OOM at a time until it runs; that run's measured
+    nvidia-smi peak then sizes every later job of the model.
+    """
+    if not _OOM_RE.search(error_text or ""):
+        return False
+    model = _model_of(getattr(job, "command", "") or "")
+    if not model:
+        return False
+    if observed_vram_gb(model) is not None:
+        return False  # measured already; a real OOM is a real failure
+    from ..models import GPU_SIZING, JobState
+
+    tiers = sorted(GPU_SIZING.get("gcp", {}).keys())
+    cur = int(getattr(job, "gpu_mem_gb", 0) or 0)
+    bigger = [t for t in tiers if t > cur]
+    if not bigger:
+        return False  # already at the largest tier — genuine failure
+    job.gpu_mem_gb = bigger[0]
+    job.state = JobState.QUEUED.value
+    job.failed_at = None
+    job.error = None
+    job.instance_ref = None
+    job.started_at = None
+    store.move_job(job, "running", "queue")
+    store.cleanup_status(job.job_id)
+    return True
