@@ -94,12 +94,77 @@ def _build_observed_map() -> dict[str, int]:
 def observed_vram_gb(model: str) -> int | None:
     """Max MEASURED peak_vram_gb for model, or None if the model has no
     measured completion yet (caller must NOT fabricate a number — start
-    smallest GPU tier and escalate on OOM)."""
+    on the smallest ACTUAL fleet GPU and escalate via live capacities)."""
     now = time.time()
     if _cache["map"] is None or now - _cache["built_at"] > _TTL_S:
         _cache["map"] = _build_observed_map()
         _cache["built_at"] = now
     return _cache["map"].get(model)
+
+
+# Agent-liveness window: a capacity broadcast older than this means the
+# agent is gone, so its GPU is not part of "the actual fleet" right now.
+# This is a staleness threshold, not a VRAM figure.
+_LIVE_TTL_S = 180
+_caps_cache: dict = {"vrams": None, "built_at": 0.0}
+
+
+def _live_total_vrams() -> list[int]:
+    """Ascending, de-duplicated list of the REAL total_vram_gb values the
+    fleet is broadcasting right now — i.e. the actual GPUs that exist,
+    read from gs://<bucket>/capacity/ (each agent publishes its own
+    nvidia-smi total_vram_gb). No catalog, no hand-written tier list.
+    Stale broadcasts (older than _LIVE_TTL_S) are excluded. Cached 30s
+    so the agent claim loop / submit path does not relist every call.
+    """
+    now = time.time()
+    if (_caps_cache["vrams"] is not None
+            and now - _caps_cache["built_at"] < 30):
+        return _caps_cache["vrams"]
+    import datetime as _dt
+    from google.cloud import storage
+    from google.api_core.exceptions import NotFound
+
+    vrams: set[int] = set()
+    bucket = storage.Client().bucket(BUCKET)
+    for blob in bucket.list_blobs(prefix="capacity/"):
+        try:
+            doc = json.loads(blob.download_as_text())
+        except NotFound:
+            continue
+        pub = doc.get("published_at") or ""
+        try:
+            age = (_dt.datetime.now(_dt.timezone.utc)
+                   - _dt.datetime.fromisoformat(
+                       pub.replace("Z", "+00:00"))).total_seconds()
+        except Exception:
+            continue
+        if age > _LIVE_TTL_S:
+            continue
+        tv = doc.get("total_vram_gb")
+        if isinstance(tv, int) and tv > 0:
+            vrams.add(tv)
+    out = sorted(vrams)
+    _caps_cache["vrams"] = out
+    _caps_cache["built_at"] = now
+    return out
+
+
+def smallest_live_vram() -> int | None:
+    """Smallest REAL GPU total_vram_gb currently in the fleet, or None if
+    no live agent is broadcasting (then the caller must not invent a
+    number — the job stays unsized until a real GPU appears)."""
+    v = _live_total_vrams()
+    return v[0] if v else None
+
+
+def next_live_vram(current: int) -> int | None:
+    """Smallest REAL fleet total_vram_gb strictly greater than `current`,
+    or None if no live GPU is bigger (genuine ceiling — not a guess)."""
+    for v in _live_total_vrams():
+        if v > current:
+            return v
+    return None
 
 
 _OOM_RE = re.compile(
@@ -110,16 +175,17 @@ _OOM_RE = re.compile(
 
 
 def escalate_on_oom(store, job, error_text: str) -> bool:
-    """A job that OOMed while sized at a GPU tier — and has NO measured
-    peak yet — is moved up exactly one hardware tier and requeued
-    (running -> queue) instead of being failed. Returns True iff it was
-    requeued. At the largest tier, or once the model has a measured
-    peak, this does nothing and the caller fails the job normally.
+    """A job that OOMed while sized at some GPU — and has NO measured
+    peak yet — is moved to the next-larger REAL GPU currently in the
+    fleet and requeued (running -> queue) instead of failed. Returns
+    True iff requeued. If no live GPU is larger, or the model already
+    has a measured peak, this does nothing and the caller fails it.
 
-    This is the no-hardcode escalation: an unmeasured model starts on
-    the smallest GPU (config.estimate_gpu_memory) and climbs the real
-    hardware ladder one OOM at a time until it runs; that run's measured
-    nvidia-smi peak then sizes every later job of the model.
+    No hand-written tier ladder: the next size comes from the actual
+    GPUs the fleet is broadcasting (next_live_vram). An unmeasured model
+    starts on the smallest real fleet GPU and climbs the real observed
+    GPUs one OOM at a time until it runs; that run's measured nvidia-smi
+    peak then sizes every later job of the model.
     """
     if not _OOM_RE.search(error_text or ""):
         return False
@@ -128,14 +194,13 @@ def escalate_on_oom(store, job, error_text: str) -> bool:
         return False
     if observed_vram_gb(model) is not None:
         return False  # measured already; a real OOM is a real failure
-    from ..models import GPU_SIZING, JobState
+    from ..models import JobState
 
-    tiers = sorted(GPU_SIZING.get("gcp", {}).keys())
     cur = int(getattr(job, "gpu_mem_gb", 0) or 0)
-    bigger = [t for t in tiers if t > cur]
-    if not bigger:
-        return False  # already at the largest tier — genuine failure
-    job.gpu_mem_gb = bigger[0]
+    nxt = next_live_vram(cur)
+    if nxt is None:
+        return False  # no live GPU bigger than current — genuine failure
+    job.gpu_mem_gb = nxt
     job.state = JobState.QUEUED.value
     job.failed_at = None
     job.error = None

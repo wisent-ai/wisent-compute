@@ -206,23 +206,23 @@ def estimate_gpu_memory(command: str) -> int:
     model = model_match.group(1).strip("'\"")
 
     # Sizing is PURELY the measured peak. No params formula, no per-model
-    # constant, no multiplier — those are all hardcoded guesses and are
-    # forbidden. observed_vram_gb returns the max real nvidia-smi
+    # constant, no multiplier, no hand-written tier ladder — all forbidden
+    # hardcoded guesses. observed_vram_gb returns the max real nvidia-smi
     # peak_vram_gb the fleet has recorded for this model.
-    from .sizing import observed_vram_gb
+    from .sizing import observed_vram_gb, smallest_live_vram
     measured = observed_vram_gb(model)
     if measured is not None:
         return measured
 
-    # No measurement for this model yet: do NOT fabricate a number.
-    # Return the smallest GPU tier's hardware capacity so the job is
-    # dispatched to the smallest box. If it OOMs there, the failure path
-    # (slots.advance_slot) escalates it one hardware tier at a time until
-    # it runs; that successful run's nvidia-smi peak is recorded and
-    # every later job of this model is then sized from the measurement.
-    # min(GPU_SIZING[gcp]) is hardware fact, not a picked constant.
-    from .models import GPU_SIZING
-    return min(GPU_SIZING.get("gcp", {16: None}).keys())
+    # No measurement yet: do NOT fabricate a number. Start on the
+    # smallest GPU that ACTUALLY EXISTS in the fleet right now (read from
+    # live capacity broadcasts, not a catalog). If it OOMs there,
+    # slots.advance_slot -> sizing.escalate_on_oom moves it to the next
+    # larger REAL fleet GPU, repeating until it runs; that run's measured
+    # nvidia-smi peak then sizes every later job of this model. If no
+    # live agent is broadcasting, return 0 (unsized) rather than invent a
+    # size — the job waits for a real GPU to appear.
+    return smallest_live_vram() or 0
 
 
 def lookup_instance_type(provider: str, gpu_mem_gb: int) -> tuple[str, str]:
