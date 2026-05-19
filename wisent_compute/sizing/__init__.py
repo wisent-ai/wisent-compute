@@ -109,7 +109,21 @@ def _build_observed_map() -> dict[str, int]:
             continue
         peaks.setdefault(model, []).append(peak)
 
-    return {model: min(samples) for model, samples in peaks.items()}
+    # A per_gpu=true peak larger than the smallest live-fleet GPU came
+    # from a bigger card running this memory-elastic workload (grows to
+    # fill VRAM); it is not a valid lower bound for a fleet GPU and
+    # fences the model off the whole smaller fleet. Drop it; if none
+    # remain the model is unmeasured (observed->None) so it sizes via
+    # smallest-live-GPU+escalate, runs, and yields a fleet-representative
+    # sample that then governs via min() -> min-agg self-bootstraps
+    # (gpt-oss-20b 89 on 96GB box vs 50-74 on 80GB, 2026-05-19).
+    _sl = smallest_live_vram()
+    out: dict[str, int] = {}
+    for _m, _s in peaks.items():
+        _u = [p for p in _s if _sl is None or p <= _sl]
+        if _u:
+            out[_m] = min(_u)
+    return out
 
 
 def observed_vram_gb(model: str) -> int | None:
