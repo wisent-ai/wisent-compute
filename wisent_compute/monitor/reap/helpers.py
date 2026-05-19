@@ -113,6 +113,52 @@ def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set
     return refs
 
 
+def safety_is_real_race(store: JobStorage, jids, hb_threshold: float) -> bool:
+    """Decide whether a freshly re-listed running/ jid set
+    (fresh_jids_pointing_to_ref) is a GENUINE active_refs race that must
+    defer a reap, vs a set of confirmed ORPHANS safe to reap+requeue.
+
+    fresh_jids_pointing_to_ref's "fresh" means "re-listed at call time"
+    (beats the cached-listing race), NOT "the job is alive" — it returns
+    every running/ blob pointing at the ref with zero liveness check. On
+    a CONFIRMED-dead agent (reaper Branch A: consumer_id absent from live
+    capacity) that made the guard defer on mere blob existence forever:
+    0db3438b/6a0fceba sat ~3h on agents that were gone (no capacity
+    broadcast, heartbeats ~2.5h stale), never requeued, and the whole
+    gpt-oss-20b queue totally stalled (2026-05-19).
+
+    A real race is only when the job is plausibly alive: the GCS re-list
+    itself failed (fail-safe defer), OR some jid still heartbeats / writes
+    checkpoints fresh, OR some jid started so recently it has not had time
+    to heartbeat yet (boot grace). Otherwise every jid is a stale orphan
+    on a dead VM -> return False so the caller reaps and requeues them.
+    """
+    if not jids:
+        return False
+    if "__list_failed__" in jids:
+        return True  # GCS re-list failure: never reap on unknown state
+    from ..heartbeat_guard import (
+        any_job_heartbeat_fresh,
+        any_job_checkpoint_fresh_jids,
+    )
+    if (any_job_heartbeat_fresh(store, jids, hb_threshold)
+            or any_job_checkpoint_fresh_jids(store, jids, 5400)):
+        return True
+    running = {j.job_id: j for j in store.list_jobs("running")}
+    now = datetime.now(timezone.utc)
+    for jid in jids:
+        j = running.get(jid)
+        sa = getattr(j, "started_at", None) if j else None
+        if not sa:
+            continue
+        try:
+            if (now - datetime.fromisoformat(sa)).total_seconds() < 1800:
+                return True  # just dispatched, no heartbeat yet (real race)
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
 def _requeue_jids_after_reap(store: JobStorage, jids, reason: str):
     if not jids:
         return

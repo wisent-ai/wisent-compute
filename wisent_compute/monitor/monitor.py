@@ -20,12 +20,12 @@ from ..models import JobState
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 from .alerts import send_alert
-from .reap.helpers import safe_delete_vm_by_hostname
 from .reap.helpers import (
+    safe_delete_vm_by_hostname,
     _instance_refs_with_completions,
-    _requeue,
-    _requeue_jids_after_reap,
+    _requeue, _requeue_jids_after_reap,
     _requeue_preempted,
+    safety_is_real_race,
 )
 
 
@@ -221,9 +221,9 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
                     f"(age={age_seconds:.0f}s) but job heartbeat fresh for {_jids}"
                 )
                 continue
-            if (_safety := fresh_jids_pointing_to_ref(store, instance_ref)):
-                _log(f"defer dead-agent reap of {ref}: fresh running/ found {_safety} (active_refs race)")
-                continue
+            _safety = fresh_jids_pointing_to_ref(store, instance_ref)
+            if _safety and safety_is_real_race(store, _safety, _hb_threshold):
+                _log(f"defer dead-agent reap of {ref}: live/starting running/ {_safety}"); continue
             provider.delete_instance(ref)
             _log(
                 f"reaped dead-agent VM {ref} (no fresh capacity broadcast, "
@@ -231,7 +231,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
                 f"no fresh job heartbeat either)"
             )
             deleted += 1
-            _requeue_jids_after_reap(store, _jids, f"VM reaped (dead agent, age={age_seconds:.0f}s)")
+            _requeue_jids_after_reap(store, list(dict.fromkeys(_jids + (_safety or []))), f"VM reaped (dead agent, age={age_seconds:.0f}s)")
             continue
         if (age_seconds > IDLE_GRACE_SECONDS
                 and instance_ref not in completed_refs
