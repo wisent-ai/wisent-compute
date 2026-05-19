@@ -185,3 +185,36 @@ def _requeue_preempted(store: JobStorage, job: Job, reason: str):
     store.move_job(job, "running", "queue")
     store.cleanup_status(job.job_id)
     _log(f"{job.job_id}: requeued ({reason}, preempts={job.preempt_count})")
+
+
+def requeue_dead_local_host_orphan(store: JobStorage, job, job_id, log_fn):
+    """Requeue a job orphaned on a stale non-cloud local@ agent.
+
+    reap_dead_agents only iterates GCP provider VMs, so a local@<host>
+    that is NOT a wisent-agent-* cloud VM (e.g. the ubuntu-server lab
+    box) is never reaped there. In check_running_jobs the agent_live
+    block is skipped once that agent's capacity broadcast goes stale,
+    and the is_cloud_agent_name block does not match, so control fell
+    to a bare `continue` and the job wedged in running/ forever
+    (0db3438b: hb 03:28:42, command_output.log 03:25:46,
+    local-ubuntu-server capacity stale, coordinator logged 'dead host
+    ubuntu-server', never requeued, 2026-05-19). Leave the job alone
+    only if it is demonstrably alive (fresh heartbeat / fresh
+    checkpoint) or its command self-terminates the agent (kill is the
+    success condition); otherwise requeue it. No VM delete — the local
+    host is operator-owned and must not be touched.
+    """
+    from ..heartbeat_guard import (
+        any_job_heartbeat_fresh,
+        any_job_checkpoint_fresh,
+        finalize_if_self_terminating,
+    )
+    if any_job_heartbeat_fresh(store, [job_id], 1800):
+        return
+    if any_job_checkpoint_fresh(store, job, 5400):
+        return
+    if finalize_if_self_terminating(store, job, log_fn):
+        return
+    _requeue(store, job,
+             "local agent capacity stale & job heartbeat stale "
+             "(dead local host orphan)")

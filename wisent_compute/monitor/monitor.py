@@ -25,7 +25,7 @@ from .reap.helpers import (
     _instance_refs_with_completions,
     _requeue, _requeue_jids_after_reap,
     _requeue_preempted,
-    safety_is_real_race,
+    safety_is_real_race, requeue_dead_local_host_orphan,
 )
 
 
@@ -121,7 +121,7 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                         else:
                             _requeue(store, job, "VM gone (cloud agent missing from fleet)")
                         continue
-                continue
+                requeue_dead_local_host_orphan(store, job, job_id, _log); continue
 
             alive = provider.instance_exists(ref)
             lifecycle = provider.instance_lifecycle_state(ref)
