@@ -507,6 +507,138 @@ def quota_azure_replies(dry_run, contact_email):
     ok_count = sum(1 for r in results if r.get("ok"))
     click.echo(f"\n{ok_count}/{len(results)} tickets processed")
 
+
+@quota.command("catalog")
+@click.option("--provider", "providers_arg", default="",
+              help="Comma-separated provider list (gcp,azure); default = WC_PROVIDERS.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit machine-readable JSON.")
+def quota_catalog(providers_arg, as_json):
+    """List the full GPU catalog for each provider in WC_PROVIDERS.
+
+    GCP: every GPU-related quota under compute.googleapis.com with its
+    current per-region limit on file.
+    Azure: every GPU VM family (NC/ND/NV/GPU) the subscription
+    advertises with the locations each family is available in.
+    """
+    from .config import WC_PROVIDERS
+    from .scheduler.dispatch.quota_skus import all_catalogs
+    providers = [p.strip() for p in providers_arg.split(",") if p.strip()] \
+        or WC_PROVIDERS
+    cats = all_catalogs(providers)
+    if as_json:
+        click.echo(json.dumps(cats, indent=2, sort_keys=True, default=str))
+        return
+    for provider, rows in cats.items():
+        click.echo(f"\n=== {provider} ({len(rows)} rows) ===")
+        if not rows:
+            click.echo("  (empty)")
+            continue
+        if any(r.get("ok") is False for r in rows):
+            for r in rows:
+                if r.get("ok") is False:
+                    click.echo(f"  ERROR: {r.get('error', '?')}")
+            continue
+        if provider == "gcp":
+            click.echo(f"  {'QUOTA_ID':<52} {'FAMILY':<20} {'REGION':<16} {'LIMIT':>6}")
+            for r in sorted(rows, key=lambda x: (x.get("quota_id", ""), x.get("region", ""))):
+                lim = r.get("limit")
+                lim_str = str(lim) if lim is not None else "-"
+                click.echo(
+                    f"  {(r.get('quota_id', '?') or '?')[:50]:<52} "
+                    f"{(r.get('gpu_family') or '-')[:18]:<20} "
+                    f"{(r.get('region') or '-')[:14]:<16} "
+                    f"{lim_str:>6}"
+                )
+        elif provider == "azure":
+            seen_fam = {}
+            for r in rows:
+                fam = r.get("family", "")
+                loc = r.get("location", "")
+                seen_fam.setdefault(fam, set()).add(loc)
+            click.echo(f"  {'FAMILY':<36} {'LOCATIONS'}")
+            for fam in sorted(seen_fam):
+                locs = sorted(seen_fam[fam])
+                click.echo(f"  {fam[:34]:<36} {len(locs)} ({', '.join(locs[:5])}{', …' if len(locs) > 5 else ''})")
+
+
+@quota.command("request-all")
+@click.option("--to", "new_limit", type=int, required=True,
+              help="New per-region quota limit to request for every GPU family.")
+@click.option("--provider", "providers_arg", default="",
+              help="Comma-separated provider list (gcp,azure); default = WC_PROVIDERS.")
+@click.option("--region", "regions_arg", default="",
+              help="Comma-separated regions/locations; default = the provider's "
+                   "configured REGIONS / AZURE_LOCATIONS.")
+@click.option("--justification",
+              default="wisent-compute autoscaler bulk capacity request: provision GPU headroom "
+                      "across every supported family in the dispatch regions so the "
+                      "scheduler can fall through to whichever family Google/Azure can serve.",
+              help="Reviewer-visible justification text.")
+@click.option("--email", "contact_email", default="",
+              help="Contact email for the GCP Cloud Quotas reviewer. "
+                   "Default: $WC_QUOTA_CONTACT_EMAIL.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit machine-readable JSON result list.")
+def quota_request_all(new_limit, providers_arg, regions_arg, justification,
+                      contact_email, as_json):
+    """Submit quota-increase requests for EVERY known GPU family on each provider.
+
+    For GCP this iterates the project's known cloudquotas gpu_family
+    values (T4, L4, A100, A100_80GB, H100, H100_MEGA, H200, B200,
+    V100, P100, P4, K80) across the configured REGIONS, firing one
+    QuotaPreference per (region, family). For Azure it iterates every
+    GPU VM family the subscription advertises (NC/ND/NV) across the
+    configured AZURE_LOCATIONS.
+    """
+    import os as _os
+    from .config import WC_PROVIDERS, REGIONS, AZURE_LOCATIONS
+    from .scheduler.dispatch.quota_skus import (
+        gcp_request_all_families, azure_request_all_families,
+    )
+    providers = [p.strip() for p in providers_arg.split(",") if p.strip()] \
+        or WC_PROVIDERS
+    explicit_regions = [r.strip() for r in regions_arg.split(",") if r.strip()]
+    if not contact_email:
+        contact_email = _os.environ.get("WC_QUOTA_CONTACT_EMAIL", "").strip()
+    if not contact_email and "gcp" in providers:
+        raise click.ClickException(
+            "--email is required for GCP (or set WC_QUOTA_CONTACT_EMAIL); "
+            "the Cloud Quotas API mandates a contact email on every preference."
+        )
+    results: list[dict] = []
+    for p in providers:
+        if p == "gcp":
+            regions = explicit_regions or REGIONS
+            results.extend(gcp_request_all_families(
+                new_limit=new_limit, regions=regions,
+                contact_email=contact_email, justification=justification,
+            ))
+        elif p == "azure":
+            locs = explicit_regions or AZURE_LOCATIONS
+            results.extend(azure_request_all_families(
+                new_limit=new_limit, locations=locs,
+            ))
+        else:
+            results.append({"provider": p, "ok": False,
+                            "error": "no request-all impl for this provider"})
+    if as_json:
+        click.echo(json.dumps(results, indent=2, sort_keys=True))
+        return
+    click.echo(f"{'PROVIDER':<8} {'REGION/LOC':<18} {'FAMILY':<22} {'OK':<3} {'DETAIL'}")
+    click.echo("-" * 100)
+    for r in results:
+        rkey = r.get("region") or r.get("location") or "-"
+        fam = r.get("gpu_family") or r.get("family") or "-"
+        ok = "Y" if r.get("ok") else "N"
+        detail = r.get("name") if r.get("ok") else r.get("error", "?")
+        click.echo(
+            f"{r.get('provider', '?'):<8} {rkey[:16]:<18} {fam[:20]:<22} "
+            f"{ok:<3} {str(detail)[:60]}"
+        )
+    ok_count = sum(1 for r in results if r.get("ok"))
+    click.echo(f"\n{ok_count}/{len(results)} requests submitted")
+
 @main.command()
 @click.argument("name", required=False)
 def profiles(name):
