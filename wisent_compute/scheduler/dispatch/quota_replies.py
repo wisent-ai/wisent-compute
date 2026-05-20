@@ -150,13 +150,10 @@ def list_open_azure_tickets() -> list[dict]:
 
 def _reply_body(subscription: str, region: str, contact_email: str) -> str:
     return (
-        f"Hello,\n\n"
-        f"Thank you for following up. Please find the requested "
+        f"Hello,\n\nThank you for following up. Please find the requested "
         f"information below to proceed with the GPU quota increase on "
-        f"subscription {subscription}.\n\n"
-        f"Region to Enable: {region}\n"
-        f"Deployment Model: ARM\n"
-        f"Service Type: Compute VM\n\n"
+        f"subscription {subscription}.\n\nRegion to Enable: {region}\n"
+        f"Deployment Model: ARM\nService Type: Compute VM\n\n"
         f"Planned VM Families and Cores per family in this region:\n"
         f"  - Standard_NC24ads_A100_v4 (NCadsA100v4): 192 cores\n"
         f"  - Standard_ND96asr_A100_v4 (NDasrA100v4): 192 cores\n"
@@ -170,12 +167,9 @@ def _reply_body(subscription: str, region: str, contact_email: str) -> str:
         f"the autoscaler regional headroom beyond GCP's regional "
         f"A100/H100 limits, so a burst of queued jobs is not bottlenecked "
         f"on one cloud's regional ceiling. All VMs are released as soon "
-        f"as the job completes; we do not hold capacity.\n\n"
-        f"Please proceed with the increase. Happy to provide any "
-        f"additional information.\n\n"
-        f"Regards,\n"
-        f"Lukasz Bartoszcze\n"
-        f"{contact_email}"
+        f"as the job completes; we do not hold capacity.\n\nPlease "
+        f"proceed with the increase. Happy to provide any additional "
+        f"information.\n\nRegards,\nLukasz Bartoszcze\n{contact_email}"
     )
 
 
@@ -184,26 +178,64 @@ def _subscription_id() -> str:
     return r if isinstance(r, str) else ""
 
 
+def _subscription_quota_id() -> str:
+    """quotaId proves the subscription is sponsored (Sponsored_*).
+    az account show does NOT include subscriptionPolicies by default,
+    so hit management.azure.com via `az rest` directly."""
+    sub = _subscription_id()
+    if not sub:
+        return ""
+    r = _az(["rest", "--method", "GET", "--uri",
+             f"https://management.azure.com/subscriptions/{sub}?api-version=2022-12-01",
+             "--query", "subscriptionPolicies.quotaId"])
+    return r if isinstance(r, str) else ""
+
+
+def _escalation_body(subscription: str, quota_id: str, region: str, email: str) -> str:
+    return (
+        f"Hello,\n\nThe denial reason cited (insufficient payment history / "
+        f"bank decline / outstanding balance) is structurally inapplicable "
+        f"to this subscription:\n\nSubscription ID: {subscription}\n"
+        f"Subscription quotaId: {quota_id}\n\nThis is a credit-funded "
+        f"sponsored Azure subscription (quotaId begins with 'Sponsored_'). "
+        f"It has no invoice/payment history to evaluate: usage is paid "
+        f"from a Microsoft-granted credit balance, not from a customer "
+        f"payment instrument. There is no outstanding balance (credits "
+        f"are consumed in real time) and no prior bank decline (no bank "
+        f"instrument is attached).\n\nPlease escalate this ticket to the "
+        f"capacity team that handles sponsored / credit-funded "
+        f"subscriptions, or to your manager. The quota increase for "
+        f"{region} is needed for wisent-compute's GPU job orchestrator — "
+        f"same use case as the prior message (LLM activation extraction + "
+        f"fine-tuning, on-demand, no Spot, VMs released on job completion)."
+        f"\n\nIf you cannot escalate, please indicate the correct team or "
+        f"process and we will re-route directly.\n\nRegards,\n"
+        f"Lukasz Bartoszcze\n{email}"
+    )
+
+
 def respond_to_open_quota_tickets(
     *,
     contact_email: str,
     dry_run: bool = False,
+    escalate_billing: bool = False,
 ) -> list[dict]:
-    """Scan Open quota tickets and post one canonical reply per ticket
-    whose last communication is from Microsoft AND is asking for
-    customer info (the standard 5-answer template). Routes around
-    cases where the standard reply would be useless:
+    """Scan Open quota tickets and post a reply per ticket whose last
+    message is from Microsoft. Two reply templates:
 
-      skip_no_region_in_title      ticket title parens didn't yield a region
-      skip_customer_already_replied last message is from us (or someone non-MS)
-      skip_billing_decline          last message is a billing decline; operator
-                                    must resolve payment side, no quota reply
-                                    will help
-      replied                       reply posted via communication create
-      dry_run                       (--dry-run mode) what would have been sent
-      error                         the create call failed
+      - default (escalate_billing=False): the 5-answer info template.
+        Billing-decline tickets get action=skip_billing_decline (no
+        reply posted; standard template wouldn't help — fix the
+        billing side).
+      - escalate_billing=True: billing-decline tickets get the
+        credit-funded-subscription escalation message instead; other
+        tickets still get the standard info reply.
+
+    Actions: replied / escalated / dry_run / skip_billing_decline /
+    skip_customer_already_replied / skip_no_region_in_title / error.
     """
     subscription = _subscription_id()
+    quota_id = _subscription_quota_id() if escalate_billing else ""
     ts = int(time.time())
     out: list[dict] = []
     for t in list_open_azure_tickets():
@@ -222,25 +254,28 @@ def respond_to_open_quota_tickets(
                 "action": "skip_customer_already_replied",
             })
             continue
-        if _BILLING_DECLINE_RE.search(t.get("last_body_snippet", "") or ""):
+        is_billing = bool(_BILLING_DECLINE_RE.search(t.get("last_body_snippet", "") or ""))
+        if is_billing and not escalate_billing:
             out.append({
                 "name": name, "region": region, "ok": True,
                 "action": "skip_billing_decline",
                 "last_body_snippet": t.get("last_body_snippet", ""),
             })
             continue
+        if is_billing:
+            body = _escalation_body(subscription, quota_id, region, contact_email)
+            subject = f"RE: GPU quota across NC/ND/NV families ({region}) — escalation: sponsored subscription"
+            action_label, prefix = "escalated", "wc-quota-escalate-"
+        else:
+            body = _reply_body(subscription, region, contact_email)
+            subject = f"RE: GPU quota across NC/ND/NV families ({region})"
+            action_label, prefix = "replied", "wc-quota-reply-"
         if dry_run:
-            out.append({
-                "name": name, "region": region, "ok": True,
-                "action": "dry_run",
-                "body_chars": len(_reply_body(subscription, region, contact_email)),
-            })
+            out.append({"name": name, "region": region, "ok": True,
+                        "action": "dry_run", "would": action_label,
+                        "body_chars": len(body)})
             continue
-        body = _reply_body(subscription, region, contact_email)
-        subject = f"RE: GPU quota across NC/ND/NV families ({region})"
-        comm_name = "wc-quota-reply-" + re.sub(
-            r"[^A-Za-z0-9-]", "-", f"{region}-{ts}",
-        )
+        comm_name = prefix + re.sub(r"[^A-Za-z0-9-]", "-", f"{region}-{ts}")
         try:
             _az([
                 "support", "in-subscription", "communication", "create",
@@ -252,7 +287,7 @@ def respond_to_open_quota_tickets(
             ])
             out.append({
                 "name": name, "region": region, "ok": True,
-                "action": "replied",
+                "action": action_label,
             })
         except subprocess.CalledProcessError as exc:
             out.append({

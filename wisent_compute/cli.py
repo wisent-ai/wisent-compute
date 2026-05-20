@@ -508,6 +508,75 @@ def quota_azure_replies(dry_run, contact_email):
     click.echo(f"\n{ok_count}/{len(results)} tickets processed")
 
 
+@quota.command("azure-escalate")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print what would be sent without invoking az "
+                   "support communication create.")
+@click.option("--email", "contact_email", default="",
+              help="Contact email shown in the response signature. "
+                   "Default: $WC_QUOTA_CONTACT_EMAIL.")
+def quota_azure_escalate(dry_run, contact_email):
+    """Post a credit-funded-subscription escalation reply on every
+    Open Azure quota ticket whose latest Microsoft message was a
+    billing-side denial.
+
+    Microsoft Capacity CX sometimes declines GPU quota on Sponsored_*
+    subscriptions citing "insufficient payment history / bank decline
+    / outstanding balance" — structurally inapplicable for credit-
+    funded subscriptions because there is no invoice/payment
+    mechanism. This subcommand posts an escalation message that
+    quotes the subscription's quotaId (proof it is Sponsored_*) and
+    asks Microsoft to route the ticket to the team that handles
+    sponsored capacity, or to escalate to the support engineer's
+    manager. Same idempotency model as azure-replies: once the
+    escalation message is posted, the next invocation finds nothing
+    matching last_sender=microsoft + billing-decline body and skips.
+    """
+    import os as _os
+    from .scheduler.dispatch.quota_replies import respond_to_open_quota_tickets
+    if not contact_email:
+        contact_email = _os.environ.get("WC_QUOTA_CONTACT_EMAIL", "").strip()
+    if not contact_email:
+        raise click.ClickException(
+            "--email is required (or set WC_QUOTA_CONTACT_EMAIL); the "
+            "escalation message signs off with the customer contact email."
+        )
+    results = respond_to_open_quota_tickets(
+        contact_email=contact_email, dry_run=dry_run, escalate_billing=True,
+    )
+    # Filter to rows that represent an escalation outcome only. Dry-run
+    # rows carry a `would` field that says "escalated" vs "replied" —
+    # the standard reply path is what azure-replies handles, so this
+    # CLI surfaces only the billing-decline → escalation rows.
+    def _is_escalation_row(r):
+        if r.get("action") == "escalated":
+            return True
+        if r.get("action") == "error":
+            return True
+        if r.get("action") == "dry_run" and r.get("would") == "escalated":
+            return True
+        return False
+    relevant = [r for r in results if _is_escalation_row(r)]
+    if not relevant:
+        click.echo("(no billing-decline tickets to escalate)")
+        return
+    click.echo(f"{'TICKET':<46} {'REGION':<22} {'OK':<3} {'ACTION'}")
+    click.echo("-" * 92)
+    for r in relevant:
+        action = r.get("action", "?")
+        if action == "dry_run":
+            action = f"dry_run → would escalate"
+        detail = ' — ' + r.get('error', '') if r.get('error') else ''
+        click.echo(
+            f"{r.get('name', '?')[:44]:<46} "
+            f"{r.get('region', '-')[:20]:<22} "
+            f"{'Y' if r.get('ok') else 'N':<3} "
+            f"{action}{detail}"
+        )
+    ok_count = sum(1 for r in relevant if r.get("ok"))
+    click.echo(f"\n{ok_count}/{len(relevant)} billing-decline tickets escalated")
+
+
 @quota.command("catalog")
 @click.option("--provider", "providers_arg", default="",
               help="Comma-separated provider list (gcp,azure); default = WC_PROVIDERS.")
