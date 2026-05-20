@@ -489,9 +489,22 @@ def quota_azure_replies(dry_run, contact_email):
             "--email is required (or set WC_QUOTA_CONTACT_EMAIL); the "
             "reply body signs off with the customer contact email."
         )
-    results = respond_to_open_quota_tickets(
-        contact_email=contact_email, dry_run=dry_run,
-    )
+    import subprocess as _sp
+    try:
+        results = respond_to_open_quota_tickets(
+            contact_email=contact_email, dry_run=dry_run,
+        )
+    except _sp.CalledProcessError as exc:
+        err = (exc.stderr or "").strip()
+        if "Forbidden" in err and "permission" in err:
+            raise click.ClickException(
+                "Microsoft.Support API returned Forbidden for the current "
+                "Azure credential. Owner on the subscription is NOT "
+                "sufficient — assign 'Support Request Contributor' on "
+                "subscription 9ae7cfa4-… to the user or service principal "
+                "running this command, then retry."
+            )
+        raise
     if not results:
         click.echo("(no Open Azure quota tickets requiring reply)")
         return
@@ -541,9 +554,22 @@ def quota_azure_escalate(dry_run, contact_email):
             "--email is required (or set WC_QUOTA_CONTACT_EMAIL); the "
             "escalation message signs off with the customer contact email."
         )
-    results = respond_to_open_quota_tickets(
-        contact_email=contact_email, dry_run=dry_run, escalate_billing=True,
-    )
+    import subprocess as _sp
+    try:
+        results = respond_to_open_quota_tickets(
+            contact_email=contact_email, dry_run=dry_run, escalate_billing=True,
+        )
+    except _sp.CalledProcessError as exc:
+        err = (exc.stderr or "").strip()
+        if "Forbidden" in err and "permission" in err:
+            raise click.ClickException(
+                "Microsoft.Support API returned Forbidden for the current "
+                "Azure credential. Owner on the subscription is NOT "
+                "sufficient — assign 'Support Request Contributor' on "
+                "subscription 9ae7cfa4-… to the user or service principal "
+                "running this command, then retry."
+            )
+        raise
     # Filter to rows that represent an escalation outcome only. Dry-run
     # rows carry a `would` field that says "escalated" vs "replied" —
     # the standard reply path is what azure-replies handles, so this
