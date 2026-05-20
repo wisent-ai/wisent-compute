@@ -160,22 +160,30 @@ def gcp_request_all_families(
     from .quota_request import _gcp_request_for_family
     import os as _os
     project = _os.environ.get("GCP_PROJECT", "wisent-480400")
-    # Build the real (gpu_family -> applicable_regions) map from the
-    # catalog so we never submit a request for a (family, region) pair
-    # Google doesn't actually carry. Each catalog row already carries
-    # the region from QuotaInfo.dimensionsInfos.applicableLocations.
-    fam_regions: dict[str, set[str]] = {}
+    # Discover (a) the set of gpu_family values Google models for
+    # this project, and (b) the UNION of every region any family is
+    # available in. Per-family applicable_regions is conservative
+    # (it only lists regions where the project has a non-default
+    # quota); the union gives us the full lattice of regions Google
+    # serves any GPU SKU in. Default behavior submits each family in
+    # every region in that union — over-coverage; per-target
+    # "family not available in this region" failures are captured
+    # as result-list entries, not exceptions.
+    families: set[str] = set()
+    all_regions: set[str] = set()
     for row in _gcp_catalog():
         if row.get("quota_id") != "GPUS-PER-GPU-FAMILY-per-project-region":
             continue
         fam = row.get("gpu_family") or ""
         region = row.get("region") or ""
-        if fam and region:
-            fam_regions.setdefault(fam, set()).add(region)
+        if fam:
+            families.add(fam)
+        if region:
+            all_regions.add(region)
     requested = set(regions)
     out: list[dict] = []
-    for fam in sorted(fam_regions):
-        targets = sorted(fam_regions[fam] & requested) if requested else sorted(fam_regions[fam])
+    for fam in sorted(families):
+        targets = sorted(all_regions & requested) if requested else sorted(all_regions)
         for region in targets:
             try:
                 r = _gcp_request_for_family(
@@ -201,22 +209,36 @@ def azure_request_all_families(
     locations: list[str],
 ) -> list[dict]:
     """Fan out Microsoft.Quota create_or_update for every distinct
-    GPU family the subscription advertises in each `locations`
-    entry."""
+    GPU family the subscription advertises × every location the
+    subscription serves any GPU SKU in. Same default-= union of all
+    locations across all families pattern as GCP: per-family
+    location lists in az vm list-skus are conservative (only locations
+    the subscription has access to for that exact family), but
+    request-all defaults to the global union so the subscription
+    builds quota everywhere any family is available. Per-target
+    "family not in this location" failures are captured in the
+    result list, not raised.
+    """
     from .quota_request import _azure_request_increase
     from ...config import AZURE_SUBSCRIPTION_ID
     catalog = _azure_catalog()
-    families_per_loc: dict[str, set[str]] = {}
+    families: set[str] = set()
+    all_locs: set[str] = set()
     for row in catalog:
-        if not row.get("family"):
-            continue
-        loc = row.get("location", "")
-        if locations and loc not in locations:
-            continue
-        families_per_loc.setdefault(loc, set()).add(row["family"])
+        fam = row.get("family") or ""
+        loc = row.get("location") or ""
+        if fam:
+            families.add(fam)
+        if loc:
+            all_locs.add(loc)
+    requested = set(locations)
+    targets_per_loc: dict[str, set[str]] = {}
+    target_locs = sorted(all_locs & requested) if requested else sorted(all_locs)
+    for loc in target_locs:
+        targets_per_loc[loc] = set(families)
     out: list[dict] = []
-    for loc, families in families_per_loc.items():
-        for fam in sorted(families):
+    for loc, fams in targets_per_loc.items():
+        for fam in sorted(fams):
             try:
                 r = _azure_request_increase(
                     AZURE_SUBSCRIPTION_ID, loc, fam, new_limit,

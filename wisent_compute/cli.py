@@ -592,7 +592,7 @@ def quota_request_all(new_limit, providers_arg, regions_arg, justification,
     configured AZURE_LOCATIONS.
     """
     import os as _os
-    from .config import WC_PROVIDERS, REGIONS, AZURE_LOCATIONS
+    from .config import WC_PROVIDERS
     from .scheduler.dispatch.quota_skus import (
         gcp_request_all_families, azure_request_all_families,
     )
@@ -609,15 +609,18 @@ def quota_request_all(new_limit, providers_arg, regions_arg, justification,
     results: list[dict] = []
     for p in providers:
         if p == "gcp":
-            regions = explicit_regions or REGIONS
+            # Default = no region filter = every applicable_region the
+            # catalog reports per family. The bulk submitter intersects
+            # against this only if explicit_regions is non-empty. Don't
+            # default to wisent_compute.config.REGIONS — that's the
+            # dispatcher's current dispatch list, not a quota policy.
             results.extend(gcp_request_all_families(
-                new_limit=new_limit, regions=regions,
+                new_limit=new_limit, regions=explicit_regions,
                 contact_email=contact_email, justification=justification,
             ))
         elif p == "azure":
-            locs = explicit_regions or AZURE_LOCATIONS
             results.extend(azure_request_all_families(
-                new_limit=new_limit, locations=locs,
+                new_limit=new_limit, locations=explicit_regions,
             ))
         else:
             results.append({"provider": p, "ok": False,
