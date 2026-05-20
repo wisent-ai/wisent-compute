@@ -356,6 +356,42 @@ def dashboard(bind, port):
     serve_dashboard(host=bind, port=port)
 
 
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit machine-readable JSON instead of the table.")
+def quota(as_json):
+    """Show GPU quota totals across all providers in WC_PROVIDERS.
+
+    Reads live cloud quotas from each provider, subtracts the reservation
+    overlay and live running instances, prints per-provider rows plus a
+    cross-provider grand total per accelerator. Same numbers
+    `schedule_queued_jobs` considers each tick.
+    """
+    from .scheduler.quota import summarize_quotas
+    from .queue.storage import JobStorage
+    summary = summarize_quotas(JobStorage(BUCKET))
+    if as_json:
+        click.echo(json.dumps(summary, indent=2, sort_keys=True))
+        return
+    click.echo(f"{'PROVIDER':<10} {'ACCEL':<22} {'TOTAL':>6} {'RESERVED':>9} {'USED':>5} {'AVAIL':>6}")
+    click.echo("-" * 70)
+    grand_total: dict[str, int] = {}
+    grand_avail: dict[str, int] = {}
+    for provider_name, rows in summary.items():
+        if not rows:
+            click.echo(f"{provider_name:<10} (no quota visible — credentials missing or SDK not installed)")
+            continue
+        for accel in sorted(rows.keys()):
+            r = rows[accel]
+            click.echo(f"{provider_name:<10} {accel:<22} {r['total']:>6} {r['reserved']:>9} {r['used']:>5} {r['available']:>6}")
+            grand_total[accel] = grand_total.get(accel, 0) + r["total"]
+            grand_avail[accel] = grand_avail.get(accel, 0) + r["available"]
+    if len(summary) > 1 and grand_total:
+        click.echo("-" * 70)
+        for accel in sorted(grand_total.keys()):
+            click.echo(f"{'TOTAL':<10} {accel:<22} {grand_total[accel]:>6} {'':>9} {'':>5} {grand_avail[accel]:>6}")
+
 @main.command()
 @click.argument("name", required=False)
 def profiles(name):

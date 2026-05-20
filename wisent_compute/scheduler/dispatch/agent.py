@@ -18,6 +18,11 @@ from pathlib import Path
 from ...config import INSTANCE_PREFIX
 from ...models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
 from ...providers.base import Provider
+from ...sizing import (
+    _model_of,
+    observed_vram_gb,
+    smallest_live_vram,
+)
 
 
 _TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
@@ -82,7 +87,31 @@ def dispatch_agent_vms(
             continue
         gpu_mem = int(getattr(j, "gpu_mem_gb", 0) or 0)
         if gpu_mem <= 0:
-            continue
+            # Unmeasured on the queue blob — normalize_queue_sizing forces
+            # gpu_mem_gb=0 whenever observed_vram_gb(model) is None at sizing
+            # time (sizing/__init__.py docstring). Previously this branch
+            # was a hard `continue`, which combined with the always-write-0
+            # behaviour to lock the entire unmeasured-model queue out of
+            # the autoscaler (199 gpt-oss-20b jobs stuck at gpu_mem_gb=0
+            # observed live 2026-05-20). Recover by:
+            #   1. Re-checking observed_vram_gb (a sibling job of the same
+            #      model may have just completed and populated the map),
+            #   2. Falling back to smallest_live_vram() — the documented
+            #      start size for unmeasured models (see escalate_on_oom).
+            #      If the job overflows that tier, escalate_on_oom climbs
+            #      to next_live_vram on requeue.
+            # If neither yields a number, the fleet has no live GPU
+            # broadcasting at all and the job is genuinely unschedulable
+            # this tick; defer to the next.
+            model = _model_of(getattr(j, "command", "") or "")
+            peak = observed_vram_gb(model) if model else None
+            if isinstance(peak, int) and peak > 0:
+                gpu_mem = peak
+            else:
+                live_small = smallest_live_vram()
+                if live_small is None:
+                    continue
+                gpu_mem = live_small
         default_mt, default_accel = lookup_instance_type(provider_name, gpu_mem)
         if not (default_accel and default_mt):
             continue

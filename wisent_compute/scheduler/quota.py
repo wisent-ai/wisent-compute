@@ -175,3 +175,44 @@ def get_available_slots(store: JobStorage, provider: Provider, provider_name: st
         available[accel_type] = max(0, total - reserved - used)
 
     return available
+
+
+def summarize_quotas(store: JobStorage) -> dict[str, dict[str, dict[str, int]]]:
+    """Return cross-provider quota summary keyed by provider, then by accel.
+
+    Each accel entry carries `total` (live cloud limit summed across the
+    provider's configured regions/locations), `reserved` (the storage
+    overlay's hold), `used` (live running-instance count from the
+    provider's own API), and `available` (= max(0, total-reserved-used)).
+    Provider iteration follows `WC_PROVIDERS` so the picture matches what
+    `schedule_queued_jobs` actually considers each tick. A provider whose
+    quota fetch returns nothing (credentials absent, SDK not installed)
+    appears in the output as an empty dict so the caller can distinguish
+    "configured but unreachable" from "not configured at all".
+    """
+    from ..config import WC_PROVIDERS
+    from ..providers import get_provider
+    out: dict[str, dict[str, dict[str, int]]] = {}
+    for provider_name in WC_PROVIDERS:
+        quotas = load_quotas(store, provider_name).get(provider_name, {})
+        if not quotas:
+            out[provider_name] = {}
+            continue
+        try:
+            provider = get_provider(provider_name)
+            running = provider.list_running_instances() or {}
+        except Exception:
+            running = {}
+        rows: dict[str, dict[str, int]] = {}
+        for accel, cfg in quotas.items():
+            total = int(cfg.get("total", 0))
+            reserved = int(cfg.get("reserved", 0))
+            used = int(running.get(accel, 0))
+            rows[accel] = {
+                "total": total,
+                "reserved": reserved,
+                "used": used,
+                "available": max(0, total - reserved - used),
+            }
+        out[provider_name] = rows
+    return out
