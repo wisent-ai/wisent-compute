@@ -30,25 +30,13 @@ import re
 import subprocess
 
 
-# GCP gpu_family dimension values that the dispatcher actually targets.
-# Restricted to the families present in GPU_SIZING['gcp'] so a bulk
-# request-all does not file preferences for hardware we never use
-# (K80/P4/P100/V100 are kept on cloudquotas as legacy quota infos but
-# we never dispatch to them — including them in a bulk submission
-# floods Google's quota review with noise and hurts the signal-to-noise
-# ratio on the requests that matter, e.g. H100/H200/B200).
-# accel_label matches GPU_TYPE_TO_MACHINE_TYPE keys so request-all can
-# round-trip through the existing dispatcher catalog.
-_GCP_KNOWN_FAMILIES = [
-    ("NVIDIA_T4", "nvidia-tesla-t4"),
-    ("NVIDIA_L4", "nvidia-l4"),
-    ("NVIDIA_A100", "nvidia-tesla-a100"),
-    ("NVIDIA_A100_80GB", "nvidia-a100-80gb"),
-    ("NVIDIA_H100", "nvidia-h100-80gb"),
-    ("NVIDIA_H100_MEGA", "nvidia-h100-94gb"),
-    ("NVIDIA_H200", "nvidia-h200-141gb"),
-    ("NVIDIA_B200", "nvidia-b200-180gb"),
-]
+# Note: no hardcoded family list. The bulk-submit path discovers the
+# real set of gpu_family values from the live cloudquotas API via
+# _gcp_catalog() — rows whose quota_id is the unified
+# GPUS-PER-GPU-FAMILY-per-project-region quota carry a populated
+# `gpu_family` dimension that is the ground truth for what families
+# Google currently models in this project. Anything else would
+# reintroduce the "hardcoded list drifts from reality" problem.
 
 
 def _gcp_catalog() -> list[dict]:
@@ -161,38 +149,47 @@ def gcp_request_all_families(
     contact_email: str,
     justification: str,
 ) -> list[dict]:
-    """Fan out CreateQuotaPreference for every known GCP gpu_family in
-    every region passed. Uses the newer GPUS-PER-GPU-FAMILY-per-
-    project-region quota (the one that takes a gpu_family dimension);
-    legacy per-family NVIDIA-*-GPUS quotas are read-only here.
+    """Fan out CreateQuotaPreference for every gpu_family the live
+    cloudquotas API reports under compute.googleapis.com, in every
+    region passed. Uses the unified GPUS-PER-GPU-FAMILY-per-project-
+    region quota (the one that takes a gpu_family dimension); the
+    set of families is discovered, not hardcoded — anything Google
+    drops or adds tomorrow is picked up on the next call without a
+    package release.
     """
-    from .quota_request import _gcp_request_increase
+    from .quota_request import _gcp_request_for_family
     import os as _os
     project = _os.environ.get("GCP_PROJECT", "wisent-480400")
+    # Build the real (gpu_family -> applicable_regions) map from the
+    # catalog so we never submit a request for a (family, region) pair
+    # Google doesn't actually carry. Each catalog row already carries
+    # the region from QuotaInfo.dimensionsInfos.applicableLocations.
+    fam_regions: dict[str, set[str]] = {}
+    for row in _gcp_catalog():
+        if row.get("quota_id") != "GPUS-PER-GPU-FAMILY-per-project-region":
+            continue
+        fam = row.get("gpu_family") or ""
+        region = row.get("region") or ""
+        if fam and region:
+            fam_regions.setdefault(fam, set()).add(region)
+    requested = set(regions)
     out: list[dict] = []
-    # Patch the request module's accel-to-family map so callers can
-    # also target accel labels not in _GCP_ACCEL_TO_GPU_FAMILY yet —
-    # we already iterate by gpu_family here, no accel translation
-    # needed, but we feed an accel-label that won't trip the
-    # ValueError gate inside _gcp_request_increase by injecting on
-    # the fly.
-    from . import quota_request as _qr
-    for fam_id, accel_label in _GCP_KNOWN_FAMILIES:
-        _qr._GCP_ACCEL_TO_GPU_FAMILY[accel_label] = fam_id
-        for region in regions:
+    for fam in sorted(fam_regions):
+        targets = sorted(fam_regions[fam] & requested) if requested else sorted(fam_regions[fam])
+        for region in targets:
             try:
-                r = _gcp_request_increase(
-                    project, region, accel_label, new_limit,
+                r = _gcp_request_for_family(
+                    project, region, fam, new_limit,
                     justification, contact_email,
                 )
                 out.append({
                     "provider": "gcp", "region": region,
-                    "gpu_family": fam_id, "ok": True, **r,
+                    "gpu_family": fam, "ok": True, **r,
                 })
             except Exception as exc:
                 out.append({
                     "provider": "gcp", "region": region,
-                    "gpu_family": fam_id, "ok": False,
+                    "gpu_family": fam, "ok": False,
                     "error": f"{type(exc).__name__}: {exc}",
                 })
     return out

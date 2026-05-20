@@ -43,41 +43,35 @@ _GCP_ACCEL_TO_GPU_FAMILY = {
 }
 
 
-def _gcp_request_increase(
+def _gcp_request_for_family(
     project: str,
     region: str,
-    accel: str,
+    gpu_family: str,
     new_limit: int,
     justification: str,
     contact_email: str,
 ) -> dict:
-    """Submit a Cloud Quotas QuotaPreference for a regional GPU quota.
+    """Submit a Cloud Quotas QuotaPreference for a (region, gpu_family).
 
-    Returns {"name": <resource>, "created": True|False}. Approval is
-    asynchronous; this call only submits the request. ALREADY_EXISTS
-    is turned into an UpdateQuotaPreference so a second invocation
-    bumps the prior pending request's preferred_value rather than
-    erroring out.
+    This is the family-based primitive — no accel translation, no
+    hardcoded table. Callers iterating live cloudquotas data should
+    use this directly. Returns {"name": <resource>, "created": bool}.
+    ALREADY_EXISTS converts to UpdateQuotaPreference so re-running
+    bumps a prior pending request's preferred_value.
     """
     from google.cloud import cloudquotas_v1
 
-    family = _GCP_ACCEL_TO_GPU_FAMILY.get(accel)
-    if not family:
-        raise ValueError(
-            f"no GCP gpu_family mapping for accel '{accel}'; "
-            f"known: {sorted(_GCP_ACCEL_TO_GPU_FAMILY)}"
-        )
     client = cloudquotas_v1.CloudQuotasClient()
     qp = cloudquotas_v1.QuotaPreference(
         service="compute.googleapis.com",
         quota_id="GPUS-PER-GPU-FAMILY-per-project-region",
         quota_config=cloudquotas_v1.QuotaConfig(preferred_value=new_limit),
-        dimensions={"region": region, "gpu_family": family},
+        dimensions={"region": region, "gpu_family": gpu_family},
         justification=justification,
         contact_email=contact_email,
     )
     pref_id = (
-        f"compute-gpus-{region}-{family}".lower().replace("_", "-")
+        f"compute-gpus-{region}-{gpu_family}".lower().replace("_", "-")
     )
     parent = f"projects/{project}/locations/global"
     try:
@@ -94,6 +88,34 @@ def _gcp_request_increase(
         qp.name = f"{parent}/quotaPreferences/{pref_id}"
         resp = client.update_quota_preference(quota_preference=qp)
         return {"name": resp.name, "created": False}
+
+
+def _gcp_request_increase(
+    project: str,
+    region: str,
+    accel: str,
+    new_limit: int,
+    justification: str,
+    contact_email: str,
+) -> dict:
+    """Accel-label entrypoint (used by `wc quota request <accel>`).
+
+    Thin wrapper: translates the wisent-compute accel label to its
+    Cloud Quotas gpu_family via the small _GCP_ACCEL_TO_GPU_FAMILY
+    map, then defers to _gcp_request_for_family. Bulk submission
+    paths that already have the gpu_family in hand (e.g. from
+    _gcp_catalog) should skip this and call the family-based
+    primitive directly.
+    """
+    family = _GCP_ACCEL_TO_GPU_FAMILY.get(accel)
+    if not family:
+        raise ValueError(
+            f"no GCP gpu_family mapping for accel '{accel}'; "
+            f"known: {sorted(_GCP_ACCEL_TO_GPU_FAMILY)}"
+        )
+    return _gcp_request_for_family(
+        project, region, family, new_limit, justification, contact_email,
+    )
 
 
 def _azure_request_increase(
