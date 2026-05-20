@@ -39,6 +39,18 @@ _MS_SENDER = (
     "microsoft.com",
 )
 
+# Patterns Azure Capacity CX uses when the issue is BILLING (payment
+# history, bank decline, outstanding balance), not a request for
+# customer info. Auto-replying the standard 5-answer template against
+# a billing-decline message is useless — the operator has to fix the
+# payment side before any quota can be granted. Detect and route those
+# to a skip_billing_decline action instead of replying.
+_BILLING_DECLINE_RE = re.compile(
+    r"insufficient payment history|bank decline|outstanding balance|"
+    r"unpaid invoice|payment issues|pay now to resolve|billing issue",
+    re.IGNORECASE,
+)
+
 
 def _az(args: list[str]) -> dict | list:
     """Invoke the az CLI returning parsed JSON. Raises CalledProcessError
@@ -178,32 +190,43 @@ def respond_to_open_quota_tickets(
     dry_run: bool = False,
 ) -> list[dict]:
     """Scan Open quota tickets and post one canonical reply per ticket
-    whose last communication is from Microsoft. Returns a per-ticket
-    result list: {name, region, ok, reason, action} where action is
-    one of `replied`, `skip_customer_already_replied`,
-    `skip_no_region_in_title`, `dry_run`.
+    whose last communication is from Microsoft AND is asking for
+    customer info (the standard 5-answer template). Routes around
+    cases where the standard reply would be useless:
+
+      skip_no_region_in_title      ticket title parens didn't yield a region
+      skip_customer_already_replied last message is from us (or someone non-MS)
+      skip_billing_decline          last message is a billing decline; operator
+                                    must resolve payment side, no quota reply
+                                    will help
+      replied                       reply posted via communication create
+      dry_run                       (--dry-run mode) what would have been sent
+      error                         the create call failed
     """
     subscription = _subscription_id()
-    tickets = _open_quota_tickets()
-    if not tickets:
-        return []
     ts = int(time.time())
     out: list[dict] = []
-    for t in tickets:
-        name = t.get("name", "")
-        title = t.get("title", "")
-        region = _region_from_title(title)
+    for t in list_open_azure_tickets():
+        name = t["name"]
+        region = t["region"]
         if not region:
             out.append({
                 "name": name, "ok": False,
                 "action": "skip_no_region_in_title",
-                "title": title,
+                "title": t.get("title", ""),
             })
             continue
-        if not _last_communication_is_from_ms(name):
+        if not t["awaiting_customer"]:
             out.append({
                 "name": name, "region": region, "ok": True,
                 "action": "skip_customer_already_replied",
+            })
+            continue
+        if _BILLING_DECLINE_RE.search(t.get("last_body_snippet", "") or ""):
+            out.append({
+                "name": name, "region": region, "ok": True,
+                "action": "skip_billing_decline",
+                "last_body_snippet": t.get("last_body_snippet", ""),
             })
             continue
         if dry_run:
