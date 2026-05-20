@@ -30,9 +30,13 @@ import re
 import subprocess
 
 
-# GCP gpu_family dimension values seen across cloudquotas QuotaInfos
-# in compute.googleapis.com (verified 2026-05-20 via list_quota_infos).
-# Each entry: (gpu_family, accel_label, default_per_region_request).
+# GCP gpu_family dimension values that the dispatcher actually targets.
+# Restricted to the families present in GPU_SIZING['gcp'] so a bulk
+# request-all does not file preferences for hardware we never use
+# (K80/P4/P100/V100 are kept on cloudquotas as legacy quota infos but
+# we never dispatch to them — including them in a bulk submission
+# floods Google's quota review with noise and hurts the signal-to-noise
+# ratio on the requests that matter, e.g. H100/H200/B200).
 # accel_label matches GPU_TYPE_TO_MACHINE_TYPE keys so request-all can
 # round-trip through the existing dispatcher catalog.
 _GCP_KNOWN_FAMILIES = [
@@ -44,10 +48,6 @@ _GCP_KNOWN_FAMILIES = [
     ("NVIDIA_H100_MEGA", "nvidia-h100-94gb"),
     ("NVIDIA_H200", "nvidia-h200-141gb"),
     ("NVIDIA_B200", "nvidia-b200-180gb"),
-    ("NVIDIA_V100", "nvidia-tesla-v100"),
-    ("NVIDIA_P100", "nvidia-tesla-p100"),
-    ("NVIDIA_P4", "nvidia-tesla-p4"),
-    ("NVIDIA_K80", "nvidia-tesla-k80"),
 ]
 
 
