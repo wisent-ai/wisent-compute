@@ -119,6 +119,38 @@ def _azure_catalog() -> list[dict]:
     return out
 
 
+def gcp_request_status() -> list[dict]:
+    """One row per QuotaPreference. Buckets stateDetail into a state
+    field (approved/partially_approved/denied/reconciling/unknown)."""
+    from google.cloud import cloudquotas_v1
+    import os as _os
+    client = cloudquotas_v1.CloudQuotasClient()
+    project = _os.environ.get("GCP_PROJECT", "wisent-480400")
+    out: list[dict] = []
+    for pref in client.list_quota_preferences(
+        parent=f"projects/{project}/locations/global"
+    ):
+        qc = pref.quota_config
+        sd = (qc.state_detail or "").lower() if qc else ""
+        state = (
+            "reconciling" if pref.reconciling
+            else "partially_approved" if "partially approved" in sd
+            else "approved" if "approved" in sd
+            else "denied" if "denied" in sd else "unknown"
+        )
+        dims = dict(pref.dimensions or {})
+        out.append({
+            "name": pref.name, "quota_id": pref.quota_id,
+            "gpu_family": dims.get("gpu_family", ""),
+            "region": dims.get("region", ""),
+            "preferred_value": qc.preferred_value if qc else 0,
+            "granted_value": qc.granted_value if qc and qc.granted_value else None,
+            "state": state, "state_detail": qc.state_detail if qc else "",
+            "create_time": pref.create_time.isoformat() if pref.create_time else "",
+        })
+    return out
+
+
 def provider_catalog(provider: str) -> list[dict]:
     """Return the full GPU catalog for `provider` (gcp | azure).
 

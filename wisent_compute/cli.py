@@ -642,6 +642,80 @@ def quota_request_all(new_limit, providers_arg, regions_arg, justification,
     ok_count = sum(1 for r in results if r.get("ok"))
     click.echo(f"\n{ok_count}/{len(results)} requests submitted")
 
+
+@quota.command("requests")
+@click.option("--provider", "providers_arg", default="",
+              help="Comma-separated provider list (gcp,azure); default = WC_PROVIDERS.")
+@click.option("--state", "state_filter", default="",
+              help="Filter GCP rows by state (reconciling, approved, denied, "
+                   "partially_approved, unknown); empty = all.")
+@click.option("--awaiting-customer", is_flag=True, default=False,
+              help="For Azure, only show tickets where Microsoft has the "
+                   "latest message and is awaiting a customer reply.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit machine-readable JSON.")
+def quota_requests(providers_arg, state_filter, awaiting_customer, as_json):
+    """Cross-provider in-flight quota requests + support communications.
+
+    GCP: every cloudquotas QuotaPreference in the project with its
+    state (approved / partially_approved / denied / reconciling).
+    Azure: every Open quota-classification support ticket with the
+    latest communication's sender so it's clear which side is
+    waiting on which.
+    """
+    from .config import WC_PROVIDERS
+    providers = [p.strip() for p in providers_arg.split(",") if p.strip()] \
+        or WC_PROVIDERS
+    payload: dict = {}
+    if "gcp" in providers:
+        from .scheduler.dispatch.quota_skus import gcp_request_status
+        rows = gcp_request_status()
+        if state_filter:
+            rows = [r for r in rows if r.get("state") == state_filter]
+        payload["gcp"] = rows
+    if "azure" in providers:
+        from .scheduler.dispatch.quota_replies import list_open_azure_tickets
+        rows = list_open_azure_tickets()
+        if awaiting_customer:
+            rows = [r for r in rows if r.get("awaiting_customer")]
+        payload["azure"] = rows
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return
+    for provider, rows in payload.items():
+        click.echo(f"\n=== {provider} ({len(rows)} rows) ===")
+        if not rows:
+            click.echo("  (empty)")
+            continue
+        if provider == "gcp":
+            buckets: dict[str, int] = {}
+            for r in rows:
+                buckets[r.get("state", "?")] = buckets.get(r.get("state", "?"), 0) + 1
+            click.echo("  by state: " + ", ".join(
+                f"{s}={n}" for s, n in sorted(buckets.items())
+            ))
+            click.echo(f"  {'STATE':<20} {'FAMILY':<20} {'REGION':<16} {'PREF':>5} {'GRANTED':>8}")
+            for r in sorted(rows, key=lambda x: (x.get("state", ""), x.get("gpu_family", ""), x.get("region", ""))):
+                click.echo(
+                    f"  {(r.get('state') or '?')[:18]:<20} "
+                    f"{(r.get('gpu_family') or '-')[:18]:<20} "
+                    f"{(r.get('region') or '-')[:14]:<16} "
+                    f"{(r.get('preferred_value') or 0):>5} "
+                    f"{(str(r.get('granted_value')) if r.get('granted_value') is not None else '-'):>8}"
+                )
+        elif provider == "azure":
+            ms_n = sum(1 for r in rows if r.get("awaiting_customer"))
+            click.echo(f"  awaiting customer: {ms_n}    awaiting Microsoft: {len(rows) - ms_n}")
+            click.echo(f"  {'REGION':<22} {'AWAIT_CUST':<11} {'LAST_SENT':<22} {'LAST_BODY_SNIPPET'}")
+            for r in sorted(rows, key=lambda x: (not x.get("awaiting_customer"), x.get("region", ""))):
+                ac = "Y" if r.get("awaiting_customer") else "N"
+                click.echo(
+                    f"  {(r.get('region') or '?')[:20]:<22} "
+                    f"{ac:<11} "
+                    f"{(r.get('last_sent') or '-')[:20]:<22} "
+                    f"{(r.get('last_body_snippet') or '')[:60]}"
+                )
+
 @main.command()
 @click.argument("name", required=False)
 def profiles(name):

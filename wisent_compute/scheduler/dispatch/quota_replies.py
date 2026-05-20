@@ -53,15 +53,30 @@ def _az(args: list[str]) -> dict | list:
     return json.loads(r.stdout) if r.stdout.strip() else []
 
 
-def _last_communication_is_from_ms(ticket_name: str) -> bool:
+def _last_communication(ticket_name: str) -> dict:
+    """Return the latest communication on a ticket as a plain dict
+    {sender, createdDate, subject, body_snippet}. Empty dict if none."""
     comms = _az([
         "support", "in-subscription", "communication", "list",
         "--ticket-name", ticket_name,
         "--query", "[0]",
     ])
     if not isinstance(comms, dict):
-        return False
-    sender = (comms.get("sender") or "").lower()
+        return {}
+    body = comms.get("body") or ""
+    snippet = re.sub(r"<[^>]+>", "", body)
+    snippet = re.sub(r"\s+", " ", snippet).strip()[:240]
+    return {
+        "sender": comms.get("sender") or "",
+        "createdDate": comms.get("createdDate") or "",
+        "subject": comms.get("subject") or "",
+        "body_snippet": snippet,
+    }
+
+
+def _last_communication_is_from_ms(ticket_name: str) -> bool:
+    last = _last_communication(ticket_name)
+    sender = (last.get("sender") or "").lower()
     return any(dom in sender for dom in _MS_SENDER)
 
 
@@ -84,6 +99,41 @@ def _open_quota_tickets() -> list[dict]:
 def _region_from_title(title: str) -> str:
     m = _REGION_RE.search(title or "")
     return m.group(1).strip() if m else ""
+
+
+def list_open_azure_tickets() -> list[dict]:
+    """Reusable enumerator: one row per Open quota-classification
+    Azure support ticket, joined with the latest communication's
+    sender / sent / subject / body_snippet. The bulk-respond
+    function and any read-only status view both consume this.
+
+    Each row carries:
+      name              : Azure support ticket id
+      title             : human title (used to parse region)
+      region            : value in title parens (e.g. 'eastus')
+      last_sender       : email/string of the latest communication's sender
+      last_sent         : ISO timestamp of that communication
+      last_subject      : subject line of that communication
+      last_body_snippet : first 240 chars (HTML stripped) of that body
+      awaiting_customer : True iff last_sender domain is Microsoft —
+                          i.e. Microsoft is waiting on a customer reply.
+    """
+    out: list[dict] = []
+    for t in _open_quota_tickets():
+        last = _last_communication(t.get("name", ""))
+        sender = (last.get("sender") or "").lower()
+        awaiting = any(d in sender for d in _MS_SENDER)
+        out.append({
+            "name": t.get("name", ""),
+            "title": t.get("title", ""),
+            "region": _region_from_title(t.get("title", "")),
+            "last_sender": last.get("sender", ""),
+            "last_sent": last.get("createdDate", ""),
+            "last_subject": last.get("subject", ""),
+            "last_body_snippet": last.get("body_snippet", ""),
+            "awaiting_customer": awaiting,
+        })
+    return out
 
 
 def _reply_body(subscription: str, region: str, contact_email: str) -> str:
