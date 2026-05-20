@@ -461,6 +461,52 @@ def quota_request(accel, new_limit, regions, providers_arg, justification,
     ok_count = sum(1 for r in results if r.get("ok"))
     click.echo(f"\n{ok_count}/{len(results)} succeeded")
 
+
+@quota.command("azure-replies")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print what would be sent without invoking az "
+                   "support communication create.")
+@click.option("--email", "contact_email", default="",
+              help="Contact email shown in the response signature. "
+                   "Default: $WC_QUOTA_CONTACT_EMAIL.")
+def quota_azure_replies(dry_run, contact_email):
+    """Respond to Open Azure quota support tickets awaiting customer info.
+
+    Scans the configured Azure subscription for Open quota-classification
+    tickets, identifies ones whose most-recent communication came from
+    Microsoft (no customer reply yet), and posts a single canonical
+    reply per ticket answering Azure Capacity CX's standard five
+    questions. Region is parsed from the ticket title. Requires az CLI
+    on PATH with an active Azure auth (same prerequisite as az support
+    in-subscription tickets list).
+    """
+    import os as _os
+    from .scheduler.dispatch.quota_replies import respond_to_open_quota_tickets
+    if not contact_email:
+        contact_email = _os.environ.get("WC_QUOTA_CONTACT_EMAIL", "").strip()
+    if not contact_email:
+        raise click.ClickException(
+            "--email is required (or set WC_QUOTA_CONTACT_EMAIL); the "
+            "reply body signs off with the customer contact email."
+        )
+    results = respond_to_open_quota_tickets(
+        contact_email=contact_email, dry_run=dry_run,
+    )
+    if not results:
+        click.echo("(no Open Azure quota tickets requiring reply)")
+        return
+    click.echo(f"{'TICKET':<46} {'REGION':<22} {'OK':<3} {'ACTION'}")
+    click.echo("-" * 92)
+    for r in results:
+        click.echo(
+            f"{r.get('name', '?')[:44]:<46} "
+            f"{r.get('region', '-')[:20]:<22} "
+            f"{'Y' if r.get('ok') else 'N':<3} "
+            f"{r.get('action', '?')}{' — ' + r.get('error', '') if r.get('error') else ''}"
+        )
+    ok_count = sum(1 for r in results if r.get("ok"))
+    click.echo(f"\n{ok_count}/{len(results)} tickets processed")
+
 @main.command()
 @click.argument("name", required=False)
 def profiles(name):
