@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wisent-compute"
-version = "0.4.248"
+version = "0.4.249"
 description = "Job queue and compute management for Wisent GPU workloads"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,6 +12,13 @@ dependencies = [
     "google-cloud-compute>=1.19.0",
     "google-cloud-pubsub>=2.21.0",
     "google-cloud-secret-manager>=2.20.0",
+    # Cloud Quotas API client — backs `wc quota request <accel> --to N`
+    # via CreateQuotaPreference/UpdateQuotaPreference. quota.py keeps
+    # using google-cloud-compute's RegionsClient for the read-side
+    # regional quota fetch; this dep is the WRITE side (preference
+    # submission). Cloud Function deploy already pulls it on the next
+    # cold start once this dep lands in the deployed PyPI release.
+    "google-cloud-quotas>=0.1.0",
     "click>=8.0",
 ]
 
@@ -23,6 +30,12 @@ azure = [
     "azure-mgmt-network>=25.0.0",
     "azure-mgmt-resource>=23.0.0",
     "azure-storage-blob>=12.19.0",
+    # Microsoft.Quota provider — backs the Azure side of
+    # `wc quota request` (Quota.begin_create_or_update). Same optional
+    # gating pattern as scheduler.quota._fetch_quotas_azure: imported
+    # inside the call site so the GCP-only deployment doesn't have to
+    # carry the Azure SDK.
+    "azure-mgmt-quota>=1.1.0",
 ]
 dev = ["functions-framework>=3.0.0"]
 

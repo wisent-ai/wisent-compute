@@ -357,17 +357,27 @@ def dashboard(bind, port):
 
 
 
-@main.command()
+@main.group(invoke_without_command=True)
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit machine-readable JSON instead of the table (show subcommand).")
+@click.pass_context
+def quota(ctx, as_json):
+    """GPU quota inspection and increase requests across WC_PROVIDERS.
+
+    Default (no subcommand) is equivalent to `wc quota show` — prints
+    live cloud quota minus reservation minus running per provider.
+    Subcommands: `show` for the table, `request` to submit a quota-
+    increase request via the cloud provider's Quotas API.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(quota_show, as_json=as_json)
+
+
+@quota.command("show")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit machine-readable JSON instead of the table.")
-def quota(as_json):
-    """Show GPU quota totals across all providers in WC_PROVIDERS.
-
-    Reads live cloud quotas from each provider, subtracts the reservation
-    overlay and live running instances, prints per-provider rows plus a
-    cross-provider grand total per accelerator. Same numbers
-    `schedule_queued_jobs` considers each tick.
-    """
+def quota_show(as_json):
+    """Show GPU quota totals across all providers in WC_PROVIDERS."""
     from .scheduler.quota import summarize_quotas
     from .queue.storage import JobStorage
     summary = summarize_quotas(JobStorage(BUCKET))
@@ -391,6 +401,65 @@ def quota(as_json):
         click.echo("-" * 70)
         for accel in sorted(grand_total.keys()):
             click.echo(f"{'TOTAL':<10} {accel:<22} {grand_total[accel]:>6} {'':>9} {'':>5} {grand_avail[accel]:>6}")
+
+
+@quota.command("request")
+@click.argument("accel")
+@click.option("--to", "new_limit", type=int, required=True,
+              help="New per-region quota limit to request (e.g. 16).")
+@click.option("--region", "regions", default="",
+              help="Comma-separated regions/locations; default = every region "
+                   "the provider dispatches into (REGIONS / AZURE_LOCATIONS).")
+@click.option("--provider", "providers_arg", default="",
+              help="Comma-separated provider list (gcp,azure); default = WC_PROVIDERS.")
+@click.option("--justification",
+              default="wisent-compute autoscaler queue depth requires more parallel GPU capacity",
+              help="Reviewer-visible justification text.")
+@click.option("--email", "contact_email", default="",
+              help="Contact email for the Cloud Quotas reviewer (required for GCP). "
+                   "Default: $WC_QUOTA_CONTACT_EMAIL.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit machine-readable JSON result list.")
+def quota_request(accel, new_limit, regions, providers_arg, justification,
+                  contact_email, as_json):
+    """Submit GPU quota-increase request(s) for ACCEL via the provider Quotas API.
+
+    Fans out one request per (provider, region) across every provider in
+    --provider (default WC_PROVIDERS) and every region in --region
+    (default: the provider's configured region/location list). Approval
+    is asynchronous on the cloud provider's side; this command only
+    submits the preference and returns the per-target result table.
+    """
+    import os as _os
+    from .config import WC_PROVIDERS
+    from .scheduler.dispatch.quota_request import request_quota_increases
+    if not contact_email:
+        contact_email = _os.environ.get("WC_QUOTA_CONTACT_EMAIL", "").strip()
+    if not contact_email:
+        raise click.ClickException(
+            "--email is required (or set WC_QUOTA_CONTACT_EMAIL); the GCP "
+            "Cloud Quotas API requires a contact email on every preference."
+        )
+    providers = [p.strip() for p in providers_arg.split(",") if p.strip()] \
+        or WC_PROVIDERS
+    region_list = [r.strip() for r in regions.split(",") if r.strip()] or None
+    results = request_quota_increases(
+        accel=accel, new_limit=new_limit, providers=providers,
+        regions=region_list, justification=justification,
+        contact_email=contact_email,
+    )
+    if as_json:
+        click.echo(json.dumps(results, indent=2, sort_keys=True))
+        return
+    click.echo(f"{'PROVIDER':<8} {'REGION/LOC':<18} {'OK':<3} {'DETAIL'}")
+    click.echo("-" * 80)
+    for r in results:
+        rkey = r.get("region") or r.get("location") or "-"
+        ok = "Y" if r.get("ok") else "N"
+        detail = r.get("name") if r.get("ok") else r.get("error", "?")
+        click.echo(f"{r.get('provider', '?'):<8} {rkey:<18} {ok:<3} {detail}")
+    ok_count = sum(1 for r in results if r.get("ok"))
+    click.echo(f"\n{ok_count}/{len(results)} succeeded")
 
 @main.command()
 @click.argument("name", required=False)
