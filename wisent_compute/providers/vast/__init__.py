@@ -27,6 +27,7 @@ import urllib.request
 
 
 _VAST_BASE = "https://console.vast.ai/api/v0"
+_AUTO_LIST_THREAD_RUNNING = False  # set True when auto_list_loop starts
 
 
 class VastConfigError(RuntimeError):
@@ -205,6 +206,7 @@ def auto_list_loop(
         log_fn = lambda m: print(m, flush=True)  # noqa: E731
     if hostname is None:
         hostname = socket.gethostname()
+    global _AUTO_LIST_THREAD_RUNNING; _AUTO_LIST_THREAD_RUNNING = True
     idle_since: float | None = None
     # Startup sync: take over any pre-existing listing (manual host-UI
     # placement or an earlier bridge run) so the loop can unlist it

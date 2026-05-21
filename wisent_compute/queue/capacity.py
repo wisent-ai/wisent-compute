@@ -67,6 +67,24 @@ def publish_capacity(
         payload["total_vram_gb"] = int(total_vram_gb)
     if diag is not None:
         payload["diag"] = diag
+    # Self-report agent version + Vast-bridge state so remote
+    # operators can see whether drift has propagated and whether
+    # the bridge thread is alive — without SSHing the box. The
+    # version comes from wisent_compute.__version__; the bridge
+    # flag from a module-level marker set when auto_list_loop
+    # starts (see providers/vast/__init__.py).
+    try:
+        from .. import __version__ as _wc_version
+        payload["wisent_compute_version"] = _wc_version
+    except Exception:
+        pass
+    try:
+        from ..providers import vast as _vast_mod
+        payload["vast_bridge_active"] = bool(
+            getattr(_vast_mod, "_AUTO_LIST_THREAD_RUNNING", False)
+        )
+    except Exception:
+        payload["vast_bridge_active"] = False
     store._upload_text(f"{CAPACITY_PREFIX}{consumer_id}.json", json.dumps(payload))
 
 
