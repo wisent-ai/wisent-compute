@@ -154,22 +154,26 @@ def pip_upgrade_and_exec(log_fn) -> None:
     import os, subprocess, sys
     log_fn(f"pip_upgrade_and_exec: starting upgrade of {_PACKAGES}")
 
-    # venv-aware --user selection. pip rejects --user inside a virtualenv
-    # with "Can not perform a '--user' install. User site-packages are not
-    # visible in this virtualenv." Detect venv via sys.prefix vs
-    # sys.base_prefix (real_prefix is legacy virtualenv); skip --user in
-    # that case so pip installs into the active venv's site-packages.
+    # venv-aware --user selection.
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
     in_venv = in_venv or hasattr(sys, "real_prefix")
-    pip_args = [sys.executable, "-m", "pip", "install", "--upgrade", *_PACKAGES]
+    # --force-reinstall + --no-cache-dir overrides editable (-e) installs.
+    # Without these, an agent running from `pip install -e /path/to/clone`
+    # gets a no-op upgrade because pip considers the editable install
+    # already-satisfying the requirement, even when pypi has a newer
+    # version. The editable install keeps the same code on disk forever.
+    # --no-cache-dir avoids serving the same stale wheel from local cache.
+    pip_args = [sys.executable, "-m", "pip", "install", "--upgrade",
+                "--force-reinstall", "--no-cache-dir", *_PACKAGES]
     if os.geteuid() != 0 and not in_venv:
-        # User-mode pip: --user only when not root AND not in a venv.
         pip_args.insert(4, "--user")
     pip_args.append("--break-system-packages")
+    log_fn(f"pip_upgrade_and_exec: cmd={' '.join(pip_args)}")
     res = subprocess.run(pip_args, capture_output=True, text=True)
+    log_fn(f"pip_upgrade_and_exec: rc={res.returncode} "
+           f"stdout_tail={(res.stdout or '')[-300:]} "
+           f"stderr_tail={(res.stderr or '')[-300:]}")
     if res.returncode != 0:
-        log_fn(f"pip_upgrade_and_exec: pip install failed rc={res.returncode} "
-               f"stderr={(res.stderr or '')[:300]}")
         raise RuntimeError(f"pip upgrade failed: rc={res.returncode}")
     log_fn(f"pip_upgrade_and_exec: pip install ok; re-execing {sys.argv}")
     os.execv(sys.executable, [sys.executable, *sys.argv])

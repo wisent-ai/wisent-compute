@@ -87,6 +87,14 @@ def publish_capacity(
         )
     except Exception:
         payload["vast_bridge_active"] = False
+    # Surface VAST_API_KEY env presence (NOT the value) so remote
+    # diagnosis can tell apart "auto-enable gate found no creds" from
+    # "auto-enable gate fired but the bridge crashed". The
+    # auto-enable gate in cli.py reads exactly this env var.
+    import os as _envos
+    payload["vast_api_key_present"] = bool(
+        _envos.environ.get("VAST_API_KEY", "").strip()
+    )
     store._upload_text(f"{CAPACITY_PREFIX}{consumer_id}.json", json.dumps(payload))
 
 
