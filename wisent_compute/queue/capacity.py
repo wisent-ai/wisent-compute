@@ -87,14 +87,15 @@ def publish_capacity(
         )
     except Exception:
         payload["vast_bridge_active"] = False
-    # Surface VAST_API_KEY env presence (NOT the value) so remote
-    # diagnosis can tell apart "auto-enable gate found no creds" from
-    # "auto-enable gate fired but the bridge crashed". The
-    # auto-enable gate in cli.py reads exactly this env var.
-    import os as _envos
-    payload["vast_api_key_present"] = bool(
-        _envos.environ.get("VAST_API_KEY", "").strip()
-    )
+    # Surface Vast API key availability (NOT the value) — same
+    # resolver the auto-enable gate and _vast_has_renter use, so the
+    # broadcast pins down which gate is rejecting the bridge:
+    # env first, then GCP Secret Manager vast-api-key.
+    try:
+        from ..providers.vast._auth import vast_api_key_available
+        payload["vast_api_key_present"] = vast_api_key_available()
+    except Exception:
+        payload["vast_api_key_present"] = False
     store._upload_text(f"{CAPACITY_PREFIX}{consumer_id}.json", json.dumps(payload))
 
 

@@ -35,11 +35,11 @@ class VastConfigError(RuntimeError):
 
 
 def _api_key() -> str:
-    key = os.environ.get("VAST_API_KEY", "").strip()
+    from ._auth import resolve_vast_api_key
+    key = resolve_vast_api_key()
     if not key:
         raise VastConfigError(
-            "VAST_API_KEY not set. Get one at https://cloud.vast.ai/manage-keys/"
-        )
+            "VAST_API_KEY missing in env and GCP Secret Manager vast-api-key")
     return key
 
 

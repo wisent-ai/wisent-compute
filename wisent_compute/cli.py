@@ -342,7 +342,11 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
     auto_list_env = _os.environ.get("WC_VAST_AUTO_LIST", "").strip().lower()
     explicit_off = auto_list_env in ("0", "false", "no", "off")
     explicit_on = auto_list_env in ("1", "true", "yes", "on")
-    env_has_api_key = bool(_os.environ.get("VAST_API_KEY", "").strip())
+    try:
+        from .providers.vast._auth import vast_api_key_available
+        env_has_api_key = vast_api_key_available()
+    except Exception:
+        env_has_api_key = bool(_os.environ.get("VAST_API_KEY", "").strip())
     effective_vast = vast_auto_list or explicit_on or (
         kind == "local" and env_has_api_key and not explicit_off
     )
