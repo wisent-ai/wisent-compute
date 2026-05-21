@@ -51,16 +51,40 @@ def _api_key() -> str:
 
 
 def _machine_id() -> int:
+    """Resolve the Vast.ai machine_id.
+
+    Priority: WC_VAST_MACHINE_ID env (explicit) > auto-discovery via
+    GET /machines/?owner=me + hostname match. VAST_API_KEY alone is
+    enough to enumerate our own machines, so the lab box doesn't need
+    the explicit env var — the existing _vast_has_renter helper
+    already proves VAST_API_KEY is set on the lab box's agent."""
     mid = os.environ.get("WC_VAST_MACHINE_ID", "").strip()
-    if not mid:
+    if mid:
+        try:
+            return int(mid)
+        except ValueError as e:
+            raise VastConfigError(f"WC_VAST_MACHINE_ID must be int: {mid}") from e
+    # Auto-discover. _request() will raise VastConfigError if the API
+    # key is missing — that's the right error to surface.
+    me = _request("GET", "/machines/?owner=me", None)
+    machines = me.get("machines") or me.get("results") or []
+    if not machines:
         raise VastConfigError(
-            "WC_VAST_MACHINE_ID not set. Find your numeric machine_id at "
-            "https://cloud.vast.ai/host/machines/."
+            "Vast.ai /machines/?owner=me returned no machines. "
+            "Register the box at https://cloud.vast.ai/host/setup first."
         )
-    try:
-        return int(mid)
-    except ValueError as e:
-        raise VastConfigError(f"WC_VAST_MACHINE_ID must be int: {mid}") from e
+    host = socket.gethostname()
+    for m in machines:
+        if (m.get("hostname") or "").strip() == host:
+            return int(m["id"])
+    if len(machines) == 1:
+        return int(machines[0]["id"])
+    raise VastConfigError(
+        f"Vast.ai returned {len(machines)} machines and hostname "
+        f"'{host}' did not match any. Set WC_VAST_MACHINE_ID "
+        f"explicitly. Candidates: "
+        + ", ".join(f"{m.get('id')}={m.get('hostname')}" for m in machines)
+    )
 
 
 def _request(method: str, path: str, body: dict | None = None) -> dict:
