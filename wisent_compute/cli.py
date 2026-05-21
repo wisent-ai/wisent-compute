@@ -296,7 +296,16 @@ def cancel(job_id):
 @click.option("--kind", default="local",
               help='Consumer label in capacity broadcasts: "local" (physical box, '
                    'default), "gcp" / "azure" / "aws" / "vast" (ephemeral cloud-agent VM).')
-def agent(gpu_type, target, auto, idle_shutdown, kind):
+@click.option("--vast-auto-list", is_flag=True, default=False,
+              help="When the wisent-compute queue is empty, list this box on "
+                   "Vast.ai so external renters use the otherwise-idle GPU. "
+                   "Requires VAST_API_KEY + WC_VAST_MACHINE_ID in env. The "
+                   "listing is pulled the moment wisent-compute work appears. "
+                   "Runs as a daemon thread alongside the main agent loop.")
+@click.option("--vast-price-gpu", type=float, default=0.50,
+              help="Per-GPU-hour rental price USD when --vast-auto-list lists "
+                   "the box (default 0.50).")
+def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_price_gpu):
     """Run local GPU agent. Polls queue, respects Vast.ai renters."""
     import os as _os
     if auto:
@@ -319,6 +328,28 @@ def agent(gpu_type, target, auto, idle_shutdown, kind):
         gpu_type = gpu_type or (t.gpu_type or "")
         _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
         click.echo(f"agent: target={t.name} gpu_type={gpu_type} slots={t.slots}")
+    if vast_auto_list:
+        # Spawn the Vast.ai auto-listing daemon as a background thread so
+        # one `wc agent --vast-auto-list` invocation gives the operator both
+        # the wisent-compute claim loop AND the Vast.ai marketplace toggle
+        # in a single process — no separate systemd unit, no env-variable
+        # plumbing across processes.
+        import threading
+        from .providers.vast import auto_list_loop, VastConfigError
+        try:
+            # Probe config eagerly so misconfiguration fails fast at agent
+            # start instead of N seconds later inside the thread.
+            from .providers.vast import _api_key, _machine_id
+            _api_key(); _machine_id()
+        except VastConfigError as exc:
+            raise click.ClickException(
+                f"--vast-auto-list set but {exc}"
+            )
+        def _vast_thread():
+            auto_list_loop(price_gpu=vast_price_gpu,
+                           log_fn=lambda m: click.echo(f"[vast] {m}"))
+        threading.Thread(target=_vast_thread, daemon=True, name="vast-auto-list").start()
+        click.echo(f"[vast] auto-list thread started (price-gpu=${vast_price_gpu}/h)")
     from .providers.local_agent import run_agent
     run_agent(gpu_type=gpu_type, idle_shutdown=idle_shutdown, kind=kind)
 
