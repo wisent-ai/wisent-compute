@@ -1,28 +1,20 @@
 """Vast.ai marketplace host-listing bridge.
 
-Wisent-compute is the renter on every other cloud (GCP/Azure/AWS).
-On Vast.ai it is the HOST — we own the lab-box GPU and list it on
-Vast's marketplace so external renters use the otherwise-idle
-capacity when wisent-compute has nothing to dispatch.
+Wisent-compute is the renter on GCP/Azure/AWS. On Vast.ai it is the
+HOST — we own the lab-box GPU and list it on Vast so external
+renters use the otherwise-idle capacity when wisent-compute has
+nothing to dispatch.
 
-The Vast.ai REST endpoints used here are verified against vast-cli
-(github.com/vast-ai/vast-cli) — list_machine() at vast.py:8092
-issues PUT /api/v0/machines/create_asks/ and unlist__machine() at
-vast.py:8991 issues DELETE /api/v0/machines/{machine_id}/asks/.
+Endpoints verified against vast-cli (github.com/vast-ai/vast-cli):
+list_machine vast.py:8092 -> PUT /machines/create_asks/;
+unlist__machine vast.py:8991 -> DELETE /machines/{id}/asks/.
 
-Auth: VAST_API_KEY env var (https://cloud.vast.ai/manage-keys/).
-Target machine: WC_VAST_MACHINE_ID env var (numeric machine id from
-the Vast host UI; the host has exactly one per physical box).
-Optional pricing knobs default to conservative values that the
-caller can override via the CLI.
+Auth: VAST_API_KEY env var. Target machine: WC_VAST_MACHINE_ID (or
+auto-discovered via /machines/?owner=me + hostname).
 
-The auto-list loop polls (a) the wisent-compute queue count and
-(b) the local-{hostname} capacity blob in GCS. When both indicate
-idle for the configured cooldown window, the machine is listed.
-When work appears, the machine is unlisted immediately. Existing
-Vast rentals are NOT preempted — Vast pays them, wisent-compute
-cannot kick them off. The toggle only controls whether NEW renters
-can land on the box.
+The auto-list loop polls wisent-compute queue + local-{hostname}
+capacity blob; lists when idle, unlists when work appears. Existing
+Vast rentals are NOT preempted — only NEW renters are blocked.
 """
 from __future__ import annotations
 
@@ -214,7 +206,28 @@ def auto_list_loop(
     if hostname is None:
         hostname = socket.gethostname()
     idle_since: float | None = None
+    # Startup sync: take over any pre-existing listing (manual host-UI
+    # placement or an earlier bridge run) so the loop can unlist it
+    # when wisent-compute work arrives. Normalize price + duration to
+    # the bridge's configured values.
     listed = False
+    try:
+        ms = machine_status()
+        cur_price = ms.get("listed_gpu_cost")
+        if isinstance(cur_price, (int, float)) and cur_price > 0:
+            listed = True
+            log_fn(f"startup: listed at ${cur_price}/h on machine_id={ms.get('id')}")
+            if abs(cur_price - price_gpu) > 0.01 and not dry_run:
+                try:
+                    unlist_machine()
+                    list_machine(price_gpu=price_gpu, duration=duration_s)
+                    log_fn(f"normalized ${cur_price}/h -> ${price_gpu}/h")
+                except Exception as exc:
+                    log_fn(f"normalize failed: {exc}")
+        else:
+            log_fn("startup: not currently listed")
+    except Exception as exc:
+        log_fn(f"startup probe failed: {exc}")
     while True:
         try:
             st = _is_wisent_compute_busy(bucket, hostname)
