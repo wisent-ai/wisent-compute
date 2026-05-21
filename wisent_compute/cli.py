@@ -305,7 +305,12 @@ def cancel(job_id):
 @click.option("--vast-price-gpu", type=float, default=0.50,
               help="Per-GPU-hour rental price USD when --vast-auto-list lists "
                    "the box (default 0.50).")
-def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_price_gpu):
+@click.option("--vast-max-duration-s", type=int, default=3600,
+              help="Cap the max rental length any Vast renter can buy from "
+                   "this offer (default 3600s = 1h). Bounds the worst-case "
+                   "wait when a wisent-compute job arrives during an active "
+                   "Vast rental. 0 to leave open-ended.")
+def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_price_gpu, vast_max_duration_s):
     """Run local GPU agent. Polls queue, respects Vast.ai renters."""
     import os as _os
     if auto:
@@ -346,8 +351,11 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
                 f"--vast-auto-list set but {exc}"
             )
         def _vast_thread():
-            auto_list_loop(price_gpu=vast_price_gpu,
-                           log_fn=lambda m: click.echo(f"[vast] {m}"))
+            auto_list_loop(
+                price_gpu=vast_price_gpu,
+                duration_s=(vast_max_duration_s if vast_max_duration_s > 0 else None),
+                log_fn=lambda m: click.echo(f"[vast] {m}"),
+            )
         threading.Thread(target=_vast_thread, daemon=True, name="vast-auto-list").start()
         click.echo(f"[vast] auto-list thread started (price-gpu=${vast_price_gpu}/h)")
     from .providers.local_agent import run_agent
@@ -999,9 +1007,15 @@ def vast_status():
               help="Polling interval against the wisent-compute bucket.")
 @click.option("--price-gpu", type=float, default=0.50,
               help="Per-GPU-hour rental price USD when we list.")
+@click.option("--max-duration-s", type=int, default=3600,
+              help="Cap the max rental length any Vast renter can buy from "
+                   "this offer (default 3600s = 1h). Bounds the worst-case "
+                   "wait when a wisent-compute job arrives during an active "
+                   "Vast rental — the rental hits the duration limit and "
+                   "releases. 0 to leave open-ended.")
 @click.option("--dry-run", is_flag=True, default=False,
               help="Print the toggle decisions without calling the Vast API.")
-def vast_auto_list(idle_window_s, poll_interval_s, price_gpu, dry_run):
+def vast_auto_list(idle_window_s, poll_interval_s, price_gpu, max_duration_s, dry_run):
     """Daemon: list on Vast.ai when wisent-compute is idle, unlist when work appears.
 
     Polls (a) the queue/ prefix of gs://wisent-compute and (b) the
@@ -1016,6 +1030,7 @@ def vast_auto_list(idle_window_s, poll_interval_s, price_gpu, dry_run):
             idle_window_s=idle_window_s,
             poll_interval_s=poll_interval_s,
             price_gpu=price_gpu,
+            duration_s=(max_duration_s if max_duration_s > 0 else None),
             dry_run=dry_run,
             log_fn=lambda m: click.echo(m),
         )

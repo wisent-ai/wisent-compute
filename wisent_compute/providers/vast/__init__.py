@@ -166,13 +166,20 @@ def auto_list_loop(
     idle_window_s: int = 300,
     poll_interval_s: int = 60,
     price_gpu: float = 0.50,
+    duration_s: int | None = 3600,
     dry_run: bool = False,
     log_fn=None,
 ) -> None:
     """Daemon: poll wisent-compute state, toggle Vast.ai listing.
     Lists the machine when wisent-compute has been idle for
     idle_window_s consecutive seconds. Unlists the moment any work
-    shows up. Existing Vast rentals are NOT touched."""
+    shows up. Existing Vast rentals are NOT touched.
+
+    duration_s caps the maximum length of any rental Vast can hand
+    out from this offer (PUT /machines/create_asks/ duration field,
+    vast-cli vast.py:8092). With duration_s=3600 the worst-case wait
+    for a wisent-compute job behind an active Vast rental is one
+    hour; pass None to leave the offer open-ended."""
     if log_fn is None:
         log_fn = lambda m: print(m, flush=True)  # noqa: E731
     if hostname is None:
@@ -195,9 +202,12 @@ def auto_list_loop(
                     log_fn(f"DRY-RUN would list (idle {idle_dur}s)")
                 else:
                     try:
-                        list_machine(price_gpu=price_gpu)
+                        list_machine(price_gpu=price_gpu, duration=duration_s)
                         listed = True
-                        log_fn(f"LISTED on Vast (idle {idle_dur}s, gpu=${price_gpu}/h)")
+                        log_fn(
+                            f"LISTED on Vast (idle {idle_dur}s, "
+                            f"gpu=${price_gpu}/h, max_duration={duration_s}s)"
+                        )
                     except Exception as exc:
                         log_fn(f"list failed: {exc}")
             else:
