@@ -137,12 +137,19 @@ class Universe(ABC):
         return {}
 
 
-def discover_universes() -> dict[str, "Universe"]:
-    """Return {id: Universe} from registered entry points."""
-    out: dict[str, Universe] = {}
+def discover_universes() -> dict[str, type]:
+    """Return {entry_point_name: Universe subclass} from registered entry
+    points. Callers instantiate with their own kwargs (e.g. models, limit)
+    so the same Universe class can be parametrized differently per run.
+    """
+    out: dict[str, type] = {}
     for ep in _md.entry_points(group=ENTRY_POINT_GROUP):
-        u = ep.load()()
-        out[u.id] = u
+        cls = ep.load()
+        if not (isinstance(cls, type) and issubclass(cls, Universe)):
+            raise TypeError(
+                f"entry point {ep.name} -> {cls!r} is not a Universe subclass"
+            )
+        out[ep.name] = cls
     return out
 
 
