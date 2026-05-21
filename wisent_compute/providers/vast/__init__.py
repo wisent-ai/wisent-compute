@@ -136,7 +136,9 @@ def machine_status() -> dict:
 
 def _is_wisent_compute_busy(bucket: str, hostname: str) -> dict:
     """Read GCS to decide if wisent-compute has any work for this box.
-    Returns {queued, running_here, idle} so the caller can act."""
+    Returns {queued, running_here, free_vram_gb, idle} so the caller
+    can act and tell apart "queue has work and box is free" from
+    "queue has work and box is renter-occupied (waiting it out)"."""
     from google.cloud import storage
     from google.api_core.exceptions import NotFound
     client = storage.Client()
@@ -144,17 +146,20 @@ def _is_wisent_compute_busy(bucket: str, hostname: str) -> dict:
     queued = sum(1 for _ in b.list_blobs(prefix="queue/", max_results=2))
     cap_blob = b.blob(f"capacity/local-{hostname}.json")
     running_here = 0
+    free_vram_gb = None
     try:
         cap = json.loads(cap_blob.download_as_text())
         running_here = int(
             cap.get("diag", {}).get("claimed_this_loop", 0) or 0
         )
+        free_vram_gb = cap.get("free_vram_gb")
     except NotFound:
         pass
     except Exception:
         pass
     return {
         "queued": queued, "running_here": running_here,
+        "free_vram_gb": free_vram_gb,
         "idle": queued == 0 and running_here == 0,
     }
 
@@ -230,7 +235,25 @@ def auto_list_loop(
                         )
                     except Exception as exc:
                         log_fn(f"unlist failed: {exc}")
-            else:
+            # Visibility for the "wait for renter to finish" path:
+            # if the offer is already gone AND wisent-compute has
+            # queued work AND the box has near-zero free VRAM, that
+            # means a Vast rental is still on the GPU and the wisent-
+            # compute claim loop is going to sit idle until the
+            # renter releases (or hits the duration cap). Explicit
+            # log so the operator can tell this state apart from a
+            # plain dead-agent state.
+            free_v = st.get("free_vram_gb")
+            if (not listed
+                    and st["queued"] > 0
+                    and isinstance(free_v, (int, float))
+                    and free_v < 10):
+                log_fn(
+                    f"waiting for Vast rental to finish "
+                    f"(queued={st['queued']}, free_vram_gb={free_v}); "
+                    f"wisent-compute jobs claim as soon as renter releases"
+                )
+            elif not listed:
                 log_fn(
                     f"busy (queued={st['queued']}, "
                     f"running_here={st['running_here']}); not listed"
