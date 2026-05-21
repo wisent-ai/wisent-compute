@@ -42,7 +42,7 @@ from ..config import (
     COVERAGE_VERIFY_THREADS,
 )
 from ..queue.storage import JobStorage
-from ..queue.submit import submit_batch
+from ..queue.submit import submit_batch, submit_job
 
 PRESENT = "present"
 MISSING = "missing"
@@ -240,15 +240,24 @@ def retry_gaps(
     batch_label: str = "",
     log=None,
 ) -> int:
-    """Submit the report's gap entries via submit_batch, update state."""
+    """Submit each gap entry via submit_job so per-entry verify_command
+    (from entry.extra) reaches the agent. submit_batch flattens kwargs
+    across all jobs and cannot carry per-entry verify_command. Without
+    it the agent marks the job COMPLETED on exit=0 even if no expected
+    output was produced -- the verify_command is what enforces 'output
+    actually exists' at job-completion time."""
     if not report.gaps:
         return 0
-    commands = [g.command for g in report.gaps]
     batch_id = batch_label or f"coverage-retry-{universe.id}-{int(time.time())}"
-    submitted = submit_batch(
-        commands, batch_id=batch_id, bucket=BUCKET,
-        **universe.submit_kwargs(),
-    )
+    kwargs = universe.submit_kwargs()
+    submitted = 0
+    for g in report.gaps:
+        submit_job(
+            g.command, batch_id=batch_id, bucket=BUCKET,
+            verify_command=g.extra.get("verify_command", ""),
+            **kwargs,
+        )
+        submitted += 1
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     for entry in report.gaps:
         slot = state.setdefault(entry.group_key, {})
@@ -257,7 +266,7 @@ def retry_gaps(
         slot["last_submitted_at"] = now
     state_save(store, universe.id, state)
     if log:
-        log(f"[{universe.id}] submitted {submitted}/{len(commands)} in batch {batch_id}")
+        log(f"[{universe.id}] submitted {submitted}/{len(report.gaps)} in batch {batch_id}")
     return submitted
 
 
@@ -275,25 +284,6 @@ def verify_and_retry(
     if execute:
         retry_gaps(universe, report, state=state, store=store, log=log)
     return report
-
-
-def record_failure(
-    universe_id: str,
-    group_key: str,
-    error_text: str,
-    *,
-    store: JobStorage | None = None,
-) -> None:
-    """Record a job's terminal error against its universe state. Used by
-    a per-job verify_command wrapper or the coordinator's failed/ handler
-    so the next verify cycle can mark the group_key UNFIXABLE with the
-    real error rather than an empty string."""
-    store = store or JobStorage(BUCKET)
-    state = state_load(store, universe_id)
-    slot = state.setdefault(group_key, {})
-    slot["last_error"] = (error_text or "")[:1024]
-    slot["last_failure_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    state_save(store, universe_id, state)
 
 
 def list_universes() -> list[str]:
