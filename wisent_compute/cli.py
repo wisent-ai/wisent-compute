@@ -333,7 +333,20 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
         gpu_type = gpu_type or (t.gpu_type or "")
         _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
         click.echo(f"agent: target={t.name} gpu_type={gpu_type} slots={t.slots}")
-    if vast_auto_list:
+    # Auto-enable the Vast bridge when the box has VAST_API_KEY set
+    # and is running as a local consumer — that combination is the
+    # strong signal "this is a Vast-registered host", and the
+    # defensive _vast_has_renter helper already runs here today,
+    # so the API key has to be in env anyway. Operator opt-out:
+    # WC_VAST_AUTO_LIST=0.
+    auto_list_env = _os.environ.get("WC_VAST_AUTO_LIST", "").strip().lower()
+    explicit_off = auto_list_env in ("0", "false", "no", "off")
+    explicit_on = auto_list_env in ("1", "true", "yes", "on")
+    env_has_api_key = bool(_os.environ.get("VAST_API_KEY", "").strip())
+    effective_vast = vast_auto_list or explicit_on or (
+        kind == "local" and env_has_api_key and not explicit_off
+    )
+    if effective_vast:
         # Spawn the Vast.ai auto-listing daemon as a background thread so
         # one `wc agent --vast-auto-list` invocation gives the operator both
         # the wisent-compute claim loop AND the Vast.ai marketplace toggle
@@ -348,7 +361,7 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
             _api_key(); _machine_id()
         except VastConfigError as exc:
             raise click.ClickException(
-                f"--vast-auto-list set but {exc}"
+                f"vast bridge requested but {exc}"
             )
         def _vast_thread():
             auto_list_loop(
