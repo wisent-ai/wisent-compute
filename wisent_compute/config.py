@@ -78,6 +78,30 @@ DEFAULT_PRIORITY = 0
 DEFAULT_PREEMPTIBLE = False
 DEFAULT_ANY_PROVIDER = True
 
+# --- Autonomous failure-fixer defaults ---
+# After this many fix attempts on the same fingerprint, the fixer stops
+# dispatching new Claude Code sessions so a never-fixable root cause
+# does not burn unlimited subscription budget.
+FAILURE_FIXER_ATTEMPT_CAP = 3
+# Per-fingerprint state-file prefix under BUCKET.
+FAILURE_FIXER_STATE_PREFIX = "failure_fixes"
+# Model-router endpoint that proxies to the donated Claude Code OAuth
+# subscription pool. claude-code-subscription is the ONLY model id that
+# routes to real Claude per content-platform/src/lib/api/model-router-hmac.ts.
+MODEL_ROUTER_URL = os.environ.get(
+    "MODEL_ROUTER_URL",
+    "https://model-router-1080673333190.us-central1.run.app",
+)
+MODEL_ROUTER_MODEL = "claude-code-subscription"
+# Bytes of stack-trace tail used to compute the fingerprint (identical
+# tracebacks cluster). Short enough to ignore per-job pids/paths,
+# long enough to discriminate root causes.
+FAILURE_FINGERPRINT_TAIL_BYTES = 800
+# Max characters of failed/<jid>.json error field included in the
+# dispatched fix prompt. Bigger than fingerprint window so Claude has
+# enough context to act.
+FAILURE_FIX_PROMPT_ERROR_BYTES = 4000
+
 # --- Coverage verifier + retry orchestrator defaults ---
 # After this many submit attempts on the same group_key the
 # orchestrator marks the tuple UNFIXABLE and stops retrying.
