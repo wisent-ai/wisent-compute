@@ -1013,6 +1013,54 @@ def vast_status():
         raise click.ClickException(str(e))
 
 
+
+@vast.command("monitor")
+@click.option("--bucket", default="wisent-compute",
+              help="GCS bucket holding the wisent-compute state (default wisent-compute).")
+def vast_monitor(bucket):
+    """One-shot snapshot of the Vast bridge + wisent-compute state.
+
+    Unified view for operator inspection — no polling. Pulls:
+      (1) Vast.ai /machines/?owner=me to see if the box is currently
+          LISTED and whether a renter is on the GPU.
+      (2) gs://<bucket>/capacity/local-{hostname}.json to see what
+          the wisent-compute agent broadcasts (free_vram_gb=0 with
+          a known renter = wait-for-renter state).
+      (3) gs://<bucket>/queue/ and running/ counts to see if work
+          is queued behind a Vast rental.
+    """
+    import socket as _socket
+    from .providers.vast import machine_status, VastConfigError
+    try:
+        vast = machine_status()
+    except VastConfigError as e:
+        vast = {"error": str(e)}
+    from google.cloud import storage
+    from google.api_core.exceptions import NotFound
+    client = storage.Client()
+    b = client.bucket(bucket)
+    hostname = _socket.gethostname()
+    cap = None
+    try:
+        cap = json.loads(
+            b.blob(f"capacity/local-{hostname}.json").download_as_text()
+        )
+    except NotFound:
+        cap = {"error": f"capacity/local-{hostname}.json not found"}
+    except Exception as exc:
+        cap = {"error": f"{type(exc).__name__}: {exc}"}
+    q = sum(1 for _ in b.list_blobs(prefix="queue/", max_results=512))
+    r = sum(1 for _ in b.list_blobs(prefix="running/", max_results=512))
+    snapshot = {
+        "now": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "hostname": hostname,
+        "vast_machine": vast,
+        "wisent_capacity": cap,
+        "wisent_queue": q,
+        "wisent_running": r,
+    }
+    click.echo(json.dumps(snapshot, indent=2, default=str))
+
 @vast.command("auto-list")
 @click.option("--idle-window-s", type=int, default=300,
               help="Wisent-compute must be idle this many seconds before listing.")
