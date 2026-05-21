@@ -907,3 +907,86 @@ def bootstrap(target, dry_run, local_install):
     from .deploy.bootstrap import run_bootstrap
     run_bootstrap(target=target, dry_run=dry_run, local_install=local_install,
                   echo=click.echo)
+
+
+@main.group()
+def vast():
+    """Vast.ai marketplace host-listing (rent our idle GPU)."""
+
+
+@vast.command("list")
+@click.option("--price-gpu", type=float, default=0.50,
+              help="Per-GPU-hour rental price USD (default 0.50).")
+@click.option("--price-disk", type=float, default=0.05,
+              help="Per-GB-month disk price USD (default 0.05).")
+@click.option("--price-min-bid", type=float, default=None,
+              help="Optional minimum interruptible-bid price floor.")
+def vast_list(price_gpu, price_disk, price_min_bid):
+    """List the configured Vast.ai machine on the marketplace.
+
+    Requires VAST_API_KEY and WC_VAST_MACHINE_ID env vars.
+    """
+    from .providers.vast import list_machine, VastConfigError
+    try:
+        r = list_machine(price_gpu=price_gpu, price_disk=price_disk,
+                         price_min_bid=price_min_bid)
+        click.echo(json.dumps(r, indent=2))
+    except VastConfigError as e:
+        raise click.ClickException(str(e))
+
+
+@vast.command("unlist")
+def vast_unlist():
+    """Remove every offer for our Vast.ai machine.
+
+    Existing rentals are NOT terminated — only NEW renters are
+    blocked. Requires VAST_API_KEY and WC_VAST_MACHINE_ID.
+    """
+    from .providers.vast import unlist_machine, VastConfigError
+    try:
+        r = unlist_machine()
+        click.echo(json.dumps(r, indent=2))
+    except VastConfigError as e:
+        raise click.ClickException(str(e))
+
+
+@vast.command("status")
+def vast_status():
+    """Show Vast.ai's current view of our machine (rentals, listed)."""
+    from .providers.vast import machine_status, VastConfigError
+    try:
+        r = machine_status()
+        click.echo(json.dumps(r, indent=2, default=str))
+    except VastConfigError as e:
+        raise click.ClickException(str(e))
+
+
+@vast.command("auto-list")
+@click.option("--idle-window-s", type=int, default=300,
+              help="Wisent-compute must be idle this many seconds before listing.")
+@click.option("--poll-interval-s", type=int, default=60,
+              help="Polling interval against the wisent-compute bucket.")
+@click.option("--price-gpu", type=float, default=0.50,
+              help="Per-GPU-hour rental price USD when we list.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print the toggle decisions without calling the Vast API.")
+def vast_auto_list(idle_window_s, poll_interval_s, price_gpu, dry_run):
+    """Daemon: list on Vast.ai when wisent-compute is idle, unlist when work appears.
+
+    Polls (a) the queue/ prefix of gs://wisent-compute and (b) the
+    local-{hostname} capacity blob. When both indicate idle for
+    --idle-window-s consecutive seconds, the machine is listed at
+    --price-gpu USD/hour. When work appears, the machine is unlisted
+    immediately. Existing Vast rentals run to completion.
+    """
+    from .providers.vast import auto_list_loop, VastConfigError
+    try:
+        auto_list_loop(
+            idle_window_s=idle_window_s,
+            poll_interval_s=poll_interval_s,
+            price_gpu=price_gpu,
+            dry_run=dry_run,
+            log_fn=lambda m: click.echo(m),
+        )
+    except VastConfigError as e:
+        raise click.ClickException(str(e))
