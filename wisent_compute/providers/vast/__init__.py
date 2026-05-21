@@ -152,33 +152,32 @@ def machine_status() -> dict:
 
 
 def _is_wisent_compute_busy(bucket: str, hostname: str) -> dict:
-    """Read GCS to decide if wisent-compute has any work for this box.
-    Returns {queued, running_here, free_vram_gb, idle} so the caller
-    can act and tell apart "queue has work and box is free" from
-    "queue has work and box is renter-occupied (waiting it out)"."""
+    """busy = queue not empty OR any running/ blob has instance_ref
+    referencing this hostname. Earlier impl read claimed_this_loop
+    (per-iter counter, ~always 0) and missed in-flight work."""
     from google.cloud import storage
     from google.api_core.exceptions import NotFound
     client = storage.Client()
     b = client.bucket(bucket)
     queued = sum(1 for _ in b.list_blobs(prefix="queue/", max_results=2))
-    cap_blob = b.blob(f"capacity/local-{hostname}.json")
     running_here = 0
+    for blob in b.list_blobs(prefix="running/"):
+        try:
+            doc = json.loads(blob.download_as_text())
+            if hostname and hostname in (doc.get("instance_ref") or ""):
+                running_here += 1
+        except (NotFound, Exception):
+            continue
     free_vram_gb = None
     try:
-        cap = json.loads(cap_blob.download_as_text())
-        running_here = int(
-            cap.get("diag", {}).get("claimed_this_loop", 0) or 0
-        )
-        free_vram_gb = cap.get("free_vram_gb")
-    except NotFound:
+        free_vram_gb = json.loads(
+            b.blob(f"capacity/local-{hostname}.json").download_as_text()
+        ).get("free_vram_gb")
+    except (NotFound, Exception):
         pass
-    except Exception:
-        pass
-    return {
-        "queued": queued, "running_here": running_here,
-        "free_vram_gb": free_vram_gb,
-        "idle": queued == 0 and running_here == 0,
-    }
+    return {"queued": queued, "running_here": running_here,
+            "free_vram_gb": free_vram_gb,
+            "idle": queued == 0 and running_here == 0}
 
 
 def auto_list_loop(
@@ -248,10 +247,7 @@ def auto_list_loop(
                     try:
                         list_machine(price_gpu=price_gpu, duration=duration_s)
                         listed = True
-                        log_fn(
-                            f"LISTED on Vast (idle {idle_dur}s, "
-                            f"gpu=${price_gpu}/h, max_duration={duration_s}s)"
-                        )
+                        log_fn(f"LISTED ({idle_dur}s idle, ${price_gpu}/h, dur={duration_s}s)")
                     except Exception as exc:
                         log_fn(f"list failed: {exc}")
             else:
