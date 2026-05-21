@@ -78,6 +78,22 @@ DEFAULT_PRIORITY = 0
 DEFAULT_PREEMPTIBLE = False
 DEFAULT_ANY_PROVIDER = True
 
+# --- Coverage verifier + retry orchestrator defaults ---
+# After this many submit attempts on the same group_key the
+# orchestrator marks the tuple UNFIXABLE and stops retrying.
+COVERAGE_ATTEMPT_CAP = 5
+# HTTP 429 backoff base; sleep = COVERAGE_VERIFY_BACKOFF_BASE ** attempt.
+COVERAGE_VERIFY_BACKOFF_BASE = 2
+# Parallel verifier workers. Stays low to avoid HF rate-limit cap
+# (1000 requests / 300 s default).
+COVERAGE_VERIFY_THREADS = 4
+# Stream progress every N entries during a verify walk.
+COVERAGE_PROGRESS_LOG_EVERY = 200
+# GCS prefix under BUCKET for per-universe coverage state.
+COVERAGE_STATE_PREFIX = "coverage"
+# Max retry-loop iterations for verify_request before re-raising 429.
+COVERAGE_HTTP_RETRY_CAP = 8
+
 # Dashboard HTTP server bind address + port. Bind to all interfaces so a
 # tailscale serve front-end can reach it; the host is firewalled to the
 # tailnet anyway.
