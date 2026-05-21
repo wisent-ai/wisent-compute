@@ -41,6 +41,7 @@ dev = ["functions-framework>=3.0.0"]
 
 [project.scripts]
 wc = "wisent_compute.cli:main"
+wc-coverage = "wisent_compute.coverage.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["wisent_compute*"]
