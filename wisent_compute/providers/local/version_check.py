@@ -21,7 +21,13 @@ from importlib.metadata import PackageNotFoundError, version as _local_version
 
 _PACKAGES = ("wisent-compute", "wisent", "wisent-tools")
 _CACHE: dict[str, tuple[float, str]] = {}
-_CACHE_TTL_SECONDS = 300
+# Lower than the previous 300s so a freshly-published wheel reaches
+# running agents within a single agent-loop iteration's network round
+# trip rather than after a 5-minute cache miss. PyPI's CDN handles
+# the per-loop request rate trivially — 1 GET per package per loop
+# iteration over ~50s loop time = 0.06 RPS per agent, 3 agents in
+# the fleet = 0.18 RPS — well under any rate limit.
+_CACHE_TTL_SECONDS = 30
 
 
 def _version_tuple(v: str) -> tuple:
