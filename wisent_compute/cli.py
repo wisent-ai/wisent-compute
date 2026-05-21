@@ -1068,8 +1068,10 @@ def vast_monitor(bucket):
 @vast.command("auto-list")
 @click.option("--idle-window-s", type=int, default=300,
               help="Wisent-compute must be idle this many seconds before listing.")
-@click.option("--poll-interval-s", type=int, default=60,
-              help="Polling interval against the wisent-compute bucket.")
+@click.option("--poll-interval-s", type=int, default=10,
+              help="Polling interval against the wisent-compute bucket "
+                   "(default 10s — short enough to catch transient queue "
+                   "states; ~6 GCS list calls/min/agent).")
 @click.option("--price-gpu", type=float, default=0.50,
               help="Per-GPU-hour rental price USD when we list.")
 @click.option("--max-duration-s", type=int, default=3600,

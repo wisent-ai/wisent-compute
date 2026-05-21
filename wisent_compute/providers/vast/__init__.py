@@ -186,7 +186,7 @@ def auto_list_loop(
     bucket: str = "wisent-compute",
     hostname: str | None = None,
     idle_window_s: int = 300,
-    poll_interval_s: int = 60,
+    poll_interval_s: int = 10,
     price_gpu: float = 0.50,
     duration_s: int | None = 3600,
     dry_run: bool = False,
