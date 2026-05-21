@@ -69,13 +69,15 @@ def publish_capacity(
         payload["diag"] = diag
     # Self-report agent version + Vast-bridge state so remote
     # operators can see whether drift has propagated and whether
-    # the bridge thread is alive — without SSHing the box. The
-    # version comes from wisent_compute.__version__; the bridge
-    # flag from a module-level marker set when auto_list_loop
-    # starts (see providers/vast/__init__.py).
+    # the bridge thread is alive — without SSHing the box.
+    # importlib.metadata is the source of truth: it returns the
+    # version pip actually installed (matches what _local_version
+    # in providers/local/version_check.py reads for drift). The
+    # __init__.py __version__ constant is stale (0.3.0) and
+    # NOT the right signal.
     try:
-        from .. import __version__ as _wc_version
-        payload["wisent_compute_version"] = _wc_version
+        from importlib.metadata import version as _imd_version
+        payload["wisent_compute_version"] = _imd_version("wisent-compute")
     except Exception:
         pass
     try:
