@@ -170,15 +170,15 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
     adc = _adc_path()
     if adc:
         env["GOOGLE_APPLICATION_CREDENTIALS"] = adc
+    # failure-fixer authenticates via the local `claude` CLI's OAuth
+    # session (maintained by wisent-claude-reauth on the mac mini), not
+    # via env-var HMAC creds. PATH is forwarded so the LaunchAgent's
+    # subshell can find `claude` in /opt/homebrew/bin or wherever the
+    # CLI was installed.
     if kind == "failure-fixer":
-        # failure-fixer needs HMAC creds to dispatch to model-router. Pull
-        # them from this shell's env so `wc bootstrap` carries them into
-        # the LaunchAgent's EnvironmentVariables; if missing the agent will
-        # raise on the first execute=True call which is what we want.
-        for k in ("WISENT_COMPUTE_AGENT_ID", "WISENT_COMPUTE_AGENT_AUTH_SECRET"):
-            v = os.environ.get(k, "")
-            if v:
-                env[k] = v
+        env["PATH"] = os.environ.get(
+            "PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        )
 
     if dry_run:
         echo(f"[dry-run] {kind}={entry.name} on {platform.system()}")

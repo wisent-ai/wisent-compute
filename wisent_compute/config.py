@@ -79,26 +79,17 @@ DEFAULT_PREEMPTIBLE = False
 DEFAULT_ANY_PROVIDER = True
 
 # --- Autonomous failure-fixer defaults ---
-# After this many fix attempts on the same fingerprint, the fixer stops
-# dispatching new Claude Code sessions so a never-fixable root cause
+# After this many fix attempts on the same job_id, the fixer stops
+# dispatching new Claude Code sessions so a permanently-broken job
 # does not burn unlimited subscription budget.
 FAILURE_FIXER_ATTEMPT_CAP = 3
-# Per-fingerprint state-file prefix under BUCKET.
+# Per-job state-file prefix under BUCKET.
 FAILURE_FIXER_STATE_PREFIX = "failure_fixes"
-# Model-router endpoint that proxies to the donated Claude Code OAuth
-# subscription pool. claude-code-subscription is the ONLY model id that
-# routes to real Claude per content-platform/src/lib/api/model-router-hmac.ts.
-MODEL_ROUTER_URL = os.environ.get(
-    "MODEL_ROUTER_URL",
-    "https://model-router-1080673333190.us-central1.run.app",
-)
-MODEL_ROUTER_MODEL = "claude-code-subscription"
 # Max characters of failed/<jid>.json error field included in the
 # dispatched fix prompt. Big enough for Claude to see the full stack.
 FAILURE_FIX_PROMPT_ERROR_BYTES = 4000
-# Seconds between failure-fixer scan_and_dispatch iterations when
-# the LaunchAgent runs in tight loop. Picked to match the existing
-# wisent-compute-cron 3-minute cadence so dispatch rate is comparable.
+# Seconds between failure-fixer scan_and_dispatch iterations when the
+# LaunchAgent runs in tight loop.
 FAILURE_FIXER_TICK_SECONDS = 180
 
 # --- Coverage verifier + retry orchestrator defaults ---

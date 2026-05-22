@@ -1,35 +1,31 @@
-"""Autonomous failure-fixer: failure -> Claude Code -> ship fix -> retry.
+"""Autonomous failure-fixer: failure -> local Claude Code CLI -> ship fix -> retry.
 
 The loop, per the operator's spec:
   1. A job fails (lands in gs://wisent-compute/failed/<jid>.json)
   2. scan_new_failures() picks it up
-  3. dispatch_fix() HMAC-POSTs the failure context to model-router's
-     claude-code-subscription model
+  3. dispatch_fix() exec's the local `claude` CLI with the fix prompt
   4. Claude Code diagnoses, ships the fix to PyPI, resubmits
   5. Per-job state at gs://wisent-compute/failure_fixes/<jid>.json so
      the same job is not re-dispatched on subsequent scans
 
-One dispatch per failed job_id. No fingerprint clustering, no
-multi-failure grouping. Operator can layer that later as a cost
-control if needed; the base loop is per-job.
+One dispatch per failed job_id. No fingerprint clustering.
 
-Per-job state at gs://wisent-compute/failure_fixes/<job_id>.json
-tracks attempts. After FAILURE_FIXER_ATTEMPT_CAP attempts the job is
-marked EXHAUSTED and stops being re-dispatched.
+Authentication is via the local `claude` CLI's OAuth credentials
+(maintained by wisent-claude-reauth on the mac mini). No
+model-router POST, no HMAC, no trade_agents shoehorn. The fixer is
+designed to run as a LaunchAgent on a machine that ALREADY has the
+Claude Code CLI installed and an active OAuth session.
 
-The dispatch is HMAC-signed via WISENT_COMPUTE_AGENT_ID +
-WISENT_COMPUTE_AGENT_AUTH_SECRET env vars (mirrors the convention
-documented in content-platform/src/lib/api/model-router-hmac.ts).
+After FAILURE_FIXER_ATTEMPT_CAP attempts on the same job the job is
+marked EXHAUSTED and stops being re-dispatched so a permanently-
+broken job does not burn unlimited Claude session budget.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import os
+import shutil
+import subprocess
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -38,8 +34,6 @@ from ..config import (
     FAILURE_FIX_PROMPT_ERROR_BYTES,
     FAILURE_FIXER_ATTEMPT_CAP,
     FAILURE_FIXER_STATE_PREFIX,
-    MODEL_ROUTER_MODEL,
-    MODEL_ROUTER_URL,
 )
 from ..queue.storage import JobStorage
 
@@ -48,6 +42,7 @@ DISPATCHED = "dispatched"
 DISPATCH_FAILED = "dispatch_failed"
 DRY_RUN = "dry_run"
 ALREADY_DISPATCHED = "already_dispatched"
+CLAUDE_NOT_FOUND = "claude_cli_not_found"
 
 
 @dataclass
@@ -106,7 +101,7 @@ def state_save(store: JobStorage, job_id: str, state: dict) -> None:
 
 
 def format_fix_prompt(rec: FailureRecord, max_error_chars: int = FAILURE_FIX_PROMPT_ERROR_BYTES) -> str:
-    """Build the structured prompt sent to Claude Code via model-router
+    """Build the structured prompt passed to the local Claude Code CLI
     for ONE failed job."""
     err = rec.error[:max_error_chars]
     return (
@@ -123,92 +118,66 @@ def format_fix_prompt(rec: FailureRecord, max_error_chars: int = FAILURE_FIX_PRO
         f"Failed command:\n  {rec.command}\n\n"
         f"Traceback (last {max_error_chars} chars of stderr):\n"
         f"---BEGIN TRACEBACK---\n{err}\n---END TRACEBACK---\n\n"
-        "Constraints: never introduce mocks, soft-defaults, or silent error "
-        "absorption. Diagnose root cause and patch the cause; if the root "
-        "is in an upstream dependency the wisent-compute team cannot patch, "
-        "surface that clearly instead of inventing a workaround."
+        "Constraints: never introduce mocks, soft-defaults, or silent "
+        "error absorption. Diagnose root cause and patch the cause; if "
+        "the root is in an upstream dependency the wisent-compute team "
+        "cannot patch, surface that clearly instead of inventing a "
+        "workaround."
     )
 
 
-def _hmac_headers(body: str) -> dict:
-    """Sign body per content-platform/src/lib/api/model-router-hmac.ts:
-        ts        = unix seconds
-        bodyHash  = sha256(body).hex
-        message   = `${agentId}:${ts}:${bodyHash}`
-        signature = hmac_sha256(secret, message).hex
-    """
-    agent_id = os.environ.get("WISENT_COMPUTE_AGENT_ID", "")
-    secret = os.environ.get("WISENT_COMPUTE_AGENT_AUTH_SECRET", "")
-    if not agent_id or not secret:
-        raise RuntimeError(
-            "WISENT_COMPUTE_AGENT_ID and WISENT_COMPUTE_AGENT_AUTH_SECRET must "
-            "be set to dispatch fix requests to model-router. Provision a row "
-            "in trade_agents + trade_agent_secrets for the wisent-compute "
-            "service identity (mirror the wisent-app row)."
-        )
-    ts = str(int(time.time()))
-    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    message = f"{agent_id}:{ts}:{body_hash}"
-    sig = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
-    return {
-        "x-agent-id": agent_id,
-        "x-agent-timestamp": ts,
-        "x-agent-signature": sig,
-        "Content-Type": "application/json",
-    }
+def _claude_bin() -> str | None:
+    """Locate the local `claude` CLI binary. Returns None if not on PATH."""
+    return shutil.which("claude")
 
 
 def dispatch_fix(rec: FailureRecord, *, store: JobStorage | None = None, execute: bool = False) -> dict:
-    """Post the fix prompt to model-router for ONE failed job. Returns
-    a dispatch record dict. When execute=False, returns the dispatch
-    payload without POSTing."""
+    """Exec the local `claude` CLI with the fix prompt for ONE failed job.
+    Returns a dispatch record dict. When execute=False, returns the
+    dispatch payload without exec'ing."""
     store = store or JobStorage(BUCKET)
     state = state_load(store, rec.job_id)
     attempts = state.get("attempts", 0)
     if attempts >= FAILURE_FIXER_ATTEMPT_CAP:
         return {"job_id": rec.job_id, "status": EXHAUSTED, "attempts": attempts}
     prompt = format_fix_prompt(rec)
-    payload = json.dumps({
-        "model": MODEL_ROUTER_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 8192,
-    })
+    claude = _claude_bin()
     if not execute:
         return {
             "job_id": rec.job_id,
             "status": DRY_RUN,
             "attempts": attempts,
-            "would_post_bytes": len(payload),
-            "endpoint": f"{MODEL_ROUTER_URL}/v1/chat/completions",
+            "claude_bin": claude or "(not found on PATH)",
+            "prompt_bytes": len(prompt),
             "prompt_preview": prompt[:500],
         }
-    req = urllib.request.Request(
-        f"{MODEL_ROUTER_URL}/v1/chat/completions",
-        data=payload.encode("utf-8"),
-        headers=_hmac_headers(payload),
-        method="POST",
+    if claude is None:
+        return {
+            "job_id": rec.job_id,
+            "status": CLAUDE_NOT_FOUND,
+            "attempts": attempts,
+            "error": "`claude` CLI not on PATH. Install Claude Code and "
+                     "complete OAuth before running the failure-fixer.",
+        }
+    proc = subprocess.run(
+        [claude, "-p", prompt],
+        capture_output=True, text=True,
     )
-    try:
-        with urllib.request.urlopen(req) as r:
-            resp_body = r.read().decode("utf-8", errors="replace")
-            resp_status = r.status
-    except urllib.error.HTTPError as e:
-        resp_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        resp_status = e.code
     state["attempts"] = attempts + 1
     state["last_dispatched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    state["last_response_status"] = resp_status
-    state["last_response_preview"] = resp_body[:600]
+    state["last_returncode"] = proc.returncode
+    state["last_stdout_preview"] = (proc.stdout or "")[:600]
+    state["last_stderr_preview"] = (proc.stderr or "")[:600]
     state["failed_at"] = rec.failed_at
     state["batch_id"] = rec.batch_id
     state["command"] = rec.command
     state_save(store, rec.job_id, state)
     return {
         "job_id": rec.job_id,
-        "status": DISPATCHED if resp_status < 400 else DISPATCH_FAILED,
+        "status": DISPATCHED if proc.returncode == 0 else DISPATCH_FAILED,
         "attempts": state["attempts"],
-        "response_status": resp_status,
-        "response_preview": resp_body[:300],
+        "returncode": proc.returncode,
+        "stdout_preview": (proc.stdout or "")[:300],
     }
 
 
@@ -219,10 +188,10 @@ def scan_and_dispatch(
     store: JobStorage | None = None,
     skip_dispatched: bool = True,
 ) -> list:
-    """One-shot orchestrator: scan failed/ -> dispatch one Claude Code
-    session per UNHANDLED failed job. Returns a list of per-job
-    dispatch records. `skip_dispatched=True` (default) reads state
-    and skips jobs whose state file already shows attempts>0."""
+    """One-shot orchestrator: scan failed/ -> exec local `claude` per
+    UNHANDLED failed job. Returns a list of per-job dispatch records.
+    `skip_dispatched=True` (default) reads state and skips jobs whose
+    state file already shows attempts>0."""
     store = store or JobStorage(BUCKET)
     out: list = []
     for rec in scan_new_failures(store, since_iso=since_iso):
