@@ -182,11 +182,21 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
     # session (maintained by wisent-claude-reauth on the mac mini), not
     # via env-var HMAC creds. PATH is forwarded so the LaunchAgent's
     # subshell can find `claude` in /opt/homebrew/bin or wherever the
-    # CLI was installed.
+    # CLI was installed. GCP project env vars are forwarded too,
+    # otherwise google-cloud-storage `Client()` raises 'Project was not
+    # passed and could not be determined from the environment.' and
+    # the JobStorage SDK falls into a silent-skip code path that
+    # returns 0 failed/ blobs every tick (confirmed 2026-05-22, 273
+    # quota-burn ticks all emitted {"results": [], "count": 0}). HF
+    # token is forwarded so the verify_command's curl HEAD works.
     if kind == "failure-fixer":
         env["PATH"] = os.environ.get(
             "PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         )
+        for k in ("GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "HF_TOKEN"):
+            v = os.environ.get(k, "")
+            if v:
+                env[k] = v
 
     if dry_run:
         echo(f"[dry-run] {kind}={entry.name} on {platform.system()}")
