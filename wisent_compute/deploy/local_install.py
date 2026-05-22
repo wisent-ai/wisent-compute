@@ -96,12 +96,38 @@ WantedBy=default.target
 """
 
 
+def _wc_fix_bin() -> str:
+    """Locate the wc-fix console script. Falls through the same paths
+    as _wc_bin() but with the wc-fix label."""
+    found = shutil.which("wc-fix")
+    if found and found != "/usr/bin/wc-fix":
+        return found
+    for cand in (
+        Path.home() / "Library" / "Python" / "3.12" / "bin" / "wc-fix",
+        Path.home() / ".local" / "bin" / "wc-fix",
+    ):
+        if cand.is_file():
+            return str(cand)
+    return "wc-fix"
+
+
 def _exec_args_for(entry, kind: str) -> list[str]:
     bin_path = _wc_bin()
     if kind == "agent":
         return [bin_path, "agent", "--auto"]
     if kind == "coordinator":
         return [bin_path, "coordinator", "--target", entry.name]
+    if kind == "failure-fixer":
+        # Run scan_and_dispatch every iteration. Loop in shell so a
+        # single failure of scan_and_dispatch (transient GCS hiccup,
+        # model-router 5xx) does not require launchd to restart the
+        # whole job; the next iteration retries cleanly.
+        from ..config import FAILURE_FIXER_TICK_SECONDS as _tick
+        wc_fix = _wc_fix_bin()
+        return [
+            "/bin/bash", "-c",
+            f"while true; do {wc_fix} scan-dispatch --execute; sleep {_tick}; done",
+        ]
     raise ValueError(f"unknown install kind: {kind}")
 
 
@@ -137,13 +163,22 @@ def _install_linux(label: str, exec_args: list[str], env: dict[str, str],
 
 
 def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) -> None:
-    """Install agent/coordinator persistently on the current machine."""
+    """Install agent/coordinator/failure-fixer persistently on the current machine."""
     label = f"{LABEL_PREFIX}.{kind}.{entry.name}"
     exec_args = _exec_args_for(entry, kind)
     env = {"PYTHONUNBUFFERED": "1"}
     adc = _adc_path()
     if adc:
         env["GOOGLE_APPLICATION_CREDENTIALS"] = adc
+    if kind == "failure-fixer":
+        # failure-fixer needs HMAC creds to dispatch to model-router. Pull
+        # them from this shell's env so `wc bootstrap` carries them into
+        # the LaunchAgent's EnvironmentVariables; if missing the agent will
+        # raise on the first execute=True call which is what we want.
+        for k in ("WISENT_COMPUTE_AGENT_ID", "WISENT_COMPUTE_AGENT_AUTH_SECRET"):
+            v = os.environ.get(k, "")
+            if v:
+                env[k] = v
 
     if dry_run:
         echo(f"[dry-run] {kind}={entry.name} on {platform.system()}")

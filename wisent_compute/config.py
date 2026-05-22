@@ -96,6 +96,10 @@ MODEL_ROUTER_MODEL = "claude-code-subscription"
 # Max characters of failed/<jid>.json error field included in the
 # dispatched fix prompt. Big enough for Claude to see the full stack.
 FAILURE_FIX_PROMPT_ERROR_BYTES = 4000
+# Seconds between failure-fixer scan_and_dispatch iterations when
+# the LaunchAgent runs in tight loop. Picked to match the existing
+# wisent-compute-cron 3-minute cadence so dispatch rate is comparable.
+FAILURE_FIXER_TICK_SECONDS = 180
 
 # --- Coverage verifier + retry orchestrator defaults ---
 # After this many submit attempts on the same group_key the

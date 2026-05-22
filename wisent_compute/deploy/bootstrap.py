@@ -122,6 +122,16 @@ def run_bootstrap(target, dry_run: bool, local_install: bool,
     if local_install:
         if not target:
             raise RuntimeError("--local requires --target NAME")
+        # Special target: failure-fixer is a wisent-compute-internal
+        # daemon, not a registry coordinator entry. Treated like the
+        # local install path but with kind=failure-fixer so the
+        # ExecArgs come from the bash-loop branch in
+        # local_install._exec_args_for.
+        if target == "failure-fixer":
+            from types import SimpleNamespace
+            install_local(SimpleNamespace(name="failure-fixer"),
+                          "failure-fixer", dry_run, echo)
+            return
         t = lookup(target)
         if t and t.kind == "local":
             install_local(t, "agent", dry_run, echo)
