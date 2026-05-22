@@ -93,13 +93,8 @@ MODEL_ROUTER_URL = os.environ.get(
     "https://model-router-1080673333190.us-central1.run.app",
 )
 MODEL_ROUTER_MODEL = "claude-code-subscription"
-# Bytes of stack-trace tail used to compute the fingerprint (identical
-# tracebacks cluster). Short enough to ignore per-job pids/paths,
-# long enough to discriminate root causes.
-FAILURE_FINGERPRINT_TAIL_BYTES = 800
 # Max characters of failed/<jid>.json error field included in the
-# dispatched fix prompt. Bigger than fingerprint window so Claude has
-# enough context to act.
+# dispatched fix prompt. Big enough for Claude to see the full stack.
 FAILURE_FIX_PROMPT_ERROR_BYTES = 4000
 
 # --- Coverage verifier + retry orchestrator defaults ---

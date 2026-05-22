@@ -1,21 +1,21 @@
 """Autonomous failure-fixer: failure -> Claude Code -> ship fix -> retry.
 
-Closes the diagnostic loop the operator called out: every job that
-exits to failed/ has its full traceback sitting in
-gs://wisent-compute/failed/<jid>.json, but until now nothing read it
-and nothing dispatched a remediation. This module walks failed/ on
-demand (or on each coordinator tick), fingerprints failures by
-stack-trace tail so identical-root-cause failures cluster, and POSTs
-the failure context to model-router's claude-code-subscription so a
-Claude Code session diagnoses the root cause, ships the code fix (via
-the existing wisent-tools / wisent-compute PyPI publish path), and
-resubmits the failed jobs.
+The loop, per the operator's spec:
+  1. A job fails (lands in gs://wisent-compute/failed/<jid>.json)
+  2. scan_new_failures() picks it up
+  3. dispatch_fix() HMAC-POSTs the failure context to model-router's
+     claude-code-subscription model
+  4. Claude Code diagnoses, ships the fix to PyPI, resubmits
+  5. Per-job state at gs://wisent-compute/failure_fixes/<jid>.json so
+     the same job is not re-dispatched on subsequent scans
 
-Per-fingerprint state lives at
-gs://wisent-compute/failure_fixes/<fingerprint>.json with attempts +
-last dispatch timestamp + last response summary. After
-FAILURE_FIXER_ATTEMPT_CAP attempts the fingerprint is marked
-EXHAUSTED and the fixer stops dispatching it.
+One dispatch per failed job_id. No fingerprint clustering, no
+multi-failure grouping. Operator can layer that later as a cost
+control if needed; the base loop is per-job.
+
+Per-job state at gs://wisent-compute/failure_fixes/<job_id>.json
+tracks attempts. After FAILURE_FIXER_ATTEMPT_CAP attempts the job is
+marked EXHAUSTED and stops being re-dispatched.
 
 The dispatch is HMAC-signed via WISENT_COMPUTE_AGENT_ID +
 WISENT_COMPUTE_AGENT_AUTH_SECRET env vars (mirrors the convention
@@ -30,12 +30,11 @@ import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterator
 
 from ..config import (
     BUCKET,
-    FAILURE_FINGERPRINT_TAIL_BYTES,
     FAILURE_FIX_PROMPT_ERROR_BYTES,
     FAILURE_FIXER_ATTEMPT_CAP,
     FAILURE_FIXER_STATE_PREFIX,
@@ -48,6 +47,7 @@ EXHAUSTED = "exhausted"
 DISPATCHED = "dispatched"
 DISPATCH_FAILED = "dispatch_failed"
 DRY_RUN = "dry_run"
+ALREADY_DISPATCHED = "already_dispatched"
 
 
 @dataclass
@@ -58,52 +58,6 @@ class FailureRecord:
     command: str
     error: str
     failed_at: str
-    fingerprint: str
-
-
-@dataclass
-class FingerprintGroup:
-    """All FailureRecords with the same stack-trace tail."""
-    fingerprint: str
-    records: list = field(default_factory=list)
-
-    @property
-    def count(self) -> int:
-        return len(self.records)
-
-    @property
-    def latest(self) -> FailureRecord:
-        return max(self.records, key=lambda r: r.failed_at)
-
-
-def fingerprint_failure(error_text: str) -> str:
-    """sha256 over the NORMALIZED root-cause signature: the final
-    Exception line + the bottom-most `File "...", line N, in func`
-    frame, with file paths stripped to basenames. This clusters by
-    root cause across jobs that differ only in workdir / task name /
-    prompt format / pid. When no Python traceback markers are found
-    (e.g. shell crash, OOM kill, exit-code-only failure), the raw
-    tail substring is used so distinct shell-level failures still
-    cluster correctly.
-    """
-    import re as _re
-    text = error_text or ""
-    exc_matches = _re.findall(r"^[A-Za-z_][A-Za-z0-9_]*Error:[^\n]*", text, _re.MULTILINE)
-    exc_line = exc_matches[-1] if exc_matches else ""
-    file_matches = _re.findall(
-        r'File "([^"]+)", line (\d+), in (\S+)', text
-    )
-    if file_matches:
-        path, lineno, func = file_matches[-1]
-        basename = path.rsplit("/", 1)[-1]
-        frame = f"{basename}:{lineno}:{func}"
-    else:
-        frame = ""
-    if exc_line or frame:
-        signature = f"{exc_line}||{frame}"
-    else:
-        signature = text[-FAILURE_FINGERPRINT_TAIL_BYTES:]
-    return hashlib.sha256(signature.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
 def _parse_failed_blob(store: JobStorage, name: str) -> FailureRecord | None:
@@ -114,14 +68,12 @@ def _parse_failed_blob(store: JobStorage, name: str) -> FailureRecord | None:
         blob = json.loads(txt)
     except Exception:
         return None
-    err = (blob.get("error") or "")
     return FailureRecord(
         job_id=blob.get("job_id") or "",
         batch_id=blob.get("batch_id") or "",
         command=blob.get("command") or "",
-        error=err,
+        error=blob.get("error") or "",
         failed_at=blob.get("failed_at") or "",
-        fingerprint=fingerprint_failure(err),
     )
 
 
@@ -140,54 +92,40 @@ def scan_new_failures(store: JobStorage, since_iso: str | None = None) -> Iterat
         yield rec
 
 
-def group_by_fingerprint(records: list) -> dict:
-    """Bucket records by fingerprint."""
-    out: dict[str, FingerprintGroup] = {}
-    for r in records:
-        out.setdefault(r.fingerprint, FingerprintGroup(fingerprint=r.fingerprint)).records.append(r)
-    return out
+def _state_path(job_id: str) -> str:
+    return f"{FAILURE_FIXER_STATE_PREFIX}/{job_id}.json"
 
 
-def _state_path(fingerprint: str) -> str:
-    return f"{FAILURE_FIXER_STATE_PREFIX}/{fingerprint}.json"
-
-
-def state_load(store: JobStorage, fingerprint: str) -> dict:
-    txt = store._download_text(_state_path(fingerprint))
+def state_load(store: JobStorage, job_id: str) -> dict:
+    txt = store._download_text(_state_path(job_id))
     return json.loads(txt) if txt else {}
 
 
-def state_save(store: JobStorage, fingerprint: str, state: dict) -> None:
-    store._upload_text(_state_path(fingerprint), json.dumps(state, indent=2, sort_keys=True))
+def state_save(store: JobStorage, job_id: str, state: dict) -> None:
+    store._upload_text(_state_path(job_id), json.dumps(state, indent=2, sort_keys=True))
 
 
-def format_fix_prompt(group: FingerprintGroup, max_error_chars: int = FAILURE_FIX_PROMPT_ERROR_BYTES) -> str:
-    """Build the structured prompt sent to Claude Code via model-router."""
-    latest = group.latest
-    sample = group.records[:3]
-    sample_summary = "\n".join(
-        f"- job_id={r.job_id} batch_id={r.batch_id} failed_at={r.failed_at}" for r in sample
-    )
-    err = latest.error[:max_error_chars]
+def format_fix_prompt(rec: FailureRecord, max_error_chars: int = FAILURE_FIX_PROMPT_ERROR_BYTES) -> str:
+    """Build the structured prompt sent to Claude Code via model-router
+    for ONE failed job."""
+    err = rec.error[:max_error_chars]
     return (
         "You are the wisent-compute autonomous failure-fixer.\n"
-        f"A wisent-compute job batch has {group.count} jobs in failed/ with "
-        f"the same root cause (fingerprint {group.fingerprint}).\n\n"
-        "Diagnose the root cause from the traceback below, ship the fix to the "
-        "appropriate repo (wisent / wisent-tools / wisent-compute), publish the "
-        "patched package to PyPI, then resubmit the failed jobs via "
-        "`wc submit <command> --verify <verify_command>`. The fleet's local "
-        "agents drift-pick-up the new PyPI release on their next loop; cloud "
-        "agents self-terminate on drift so a fresh VM with the new version "
-        "claims the resubmitted jobs.\n\n"
-        f"Sample failing job command (one of {group.count} with same fingerprint):\n"
-        f"  {latest.command}\n\n"
-        f"Sample failed_at timestamps:\n{sample_summary}\n\n"
-        f"Traceback tail (last {max_error_chars} chars of stderr):\n"
+        f"A wisent-compute job (job_id={rec.job_id} batch_id={rec.batch_id}) "
+        f"failed at {rec.failed_at}.\n\n"
+        "Diagnose the root cause from the traceback below, ship the fix to "
+        "the appropriate repo (wisent / wisent-tools / wisent-compute), "
+        "publish the patched package to PyPI, then resubmit this exact "
+        "command via `wc submit <command> --verify <verify_command>`. The "
+        "fleet's local agents drift-pick-up the new PyPI release on their "
+        "next loop; cloud agents self-terminate on drift so a fresh VM with "
+        "the new version claims the resubmitted job.\n\n"
+        f"Failed command:\n  {rec.command}\n\n"
+        f"Traceback (last {max_error_chars} chars of stderr):\n"
         f"---BEGIN TRACEBACK---\n{err}\n---END TRACEBACK---\n\n"
         "Constraints: never introduce mocks, soft-defaults, or silent error "
-        "absorption. Diagnose root cause and patch the cause; if the root is "
-        "in an upstream dependency the wisent-compute team cannot patch, "
+        "absorption. Diagnose root cause and patch the cause; if the root "
+        "is in an upstream dependency the wisent-compute team cannot patch, "
         "surface that clearly instead of inventing a workaround."
     )
 
@@ -220,20 +158,16 @@ def _hmac_headers(body: str) -> dict:
     }
 
 
-def dispatch_fix(group: FingerprintGroup, *, store: JobStorage | None = None, execute: bool = False) -> dict:
-    """Post the fix prompt to model-router. Returns a dispatch record dict.
-    When execute=False, returns the dispatch payload without POSTing."""
+def dispatch_fix(rec: FailureRecord, *, store: JobStorage | None = None, execute: bool = False) -> dict:
+    """Post the fix prompt to model-router for ONE failed job. Returns
+    a dispatch record dict. When execute=False, returns the dispatch
+    payload without POSTing."""
     store = store or JobStorage(BUCKET)
-    state = state_load(store, group.fingerprint)
+    state = state_load(store, rec.job_id)
     attempts = state.get("attempts", 0)
     if attempts >= FAILURE_FIXER_ATTEMPT_CAP:
-        return {
-            "fingerprint": group.fingerprint,
-            "status": EXHAUSTED,
-            "attempts": attempts,
-            "last_error": state.get("last_error", ""),
-        }
-    prompt = format_fix_prompt(group)
+        return {"job_id": rec.job_id, "status": EXHAUSTED, "attempts": attempts}
+    prompt = format_fix_prompt(rec)
     payload = json.dumps({
         "model": MODEL_ROUTER_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -241,7 +175,7 @@ def dispatch_fix(group: FingerprintGroup, *, store: JobStorage | None = None, ex
     })
     if not execute:
         return {
-            "fingerprint": group.fingerprint,
+            "job_id": rec.job_id,
             "status": DRY_RUN,
             "attempts": attempts,
             "would_post_bytes": len(payload),
@@ -265,11 +199,12 @@ def dispatch_fix(group: FingerprintGroup, *, store: JobStorage | None = None, ex
     state["last_dispatched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     state["last_response_status"] = resp_status
     state["last_response_preview"] = resp_body[:600]
-    state["last_group_count"] = group.count
-    state["last_sample_job_id"] = group.latest.job_id
-    state_save(store, group.fingerprint, state)
+    state["failed_at"] = rec.failed_at
+    state["batch_id"] = rec.batch_id
+    state["command"] = rec.command
+    state_save(store, rec.job_id, state)
     return {
-        "fingerprint": group.fingerprint,
+        "job_id": rec.job_id,
         "status": DISPATCHED if resp_status < 400 else DISPATCH_FAILED,
         "attempts": state["attempts"],
         "response_status": resp_status,
@@ -277,10 +212,25 @@ def dispatch_fix(group: FingerprintGroup, *, store: JobStorage | None = None, ex
     }
 
 
-def scan_and_dispatch(*, since_iso: str | None = None, execute: bool = False, store: JobStorage | None = None) -> list:
-    """One-shot orchestrator: scan failed/ -> group -> dispatch new fingerprints.
-    Returns a list of per-fingerprint dispatch records."""
+def scan_and_dispatch(
+    *,
+    since_iso: str | None = None,
+    execute: bool = False,
+    store: JobStorage | None = None,
+    skip_dispatched: bool = True,
+) -> list:
+    """One-shot orchestrator: scan failed/ -> dispatch one Claude Code
+    session per UNHANDLED failed job. Returns a list of per-job
+    dispatch records. `skip_dispatched=True` (default) reads state
+    and skips jobs whose state file already shows attempts>0."""
     store = store or JobStorage(BUCKET)
-    records = list(scan_new_failures(store, since_iso=since_iso))
-    groups = group_by_fingerprint(records)
-    return [dispatch_fix(g, store=store, execute=execute) for g in groups.values()]
+    out: list = []
+    for rec in scan_new_failures(store, since_iso=since_iso):
+        if skip_dispatched:
+            prior = state_load(store, rec.job_id)
+            if prior.get("attempts", 0) > 0:
+                out.append({"job_id": rec.job_id, "status": ALREADY_DISPATCHED,
+                            "attempts": prior["attempts"]})
+                continue
+        out.append(dispatch_fix(rec, store=store, execute=execute))
+    return out
