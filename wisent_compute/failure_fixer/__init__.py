@@ -72,10 +72,22 @@ def _parse_failed_blob(store: JobStorage, name: str) -> FailureRecord | None:
     )
 
 
-def scan_new_failures(store: JobStorage, since_iso: str | None = None) -> Iterator[FailureRecord]:
+def scan_new_failures(
+    store: JobStorage,
+    since_iso: str | None = None,
+    command_pattern: str | None = None,
+) -> Iterator[FailureRecord]:
     """Yield FailureRecords for every failed/<jid>.json whose failed_at
-    is >= since_iso (ISO-8601 lexicographic compare). since_iso=None
-    means scan every failed blob."""
+    is >= since_iso (ISO-8601 lexicographic compare) AND whose command
+    contains `command_pattern` (case-sensitive substring) if set.
+    since_iso=None means scan every failed blob; command_pattern=None
+    means no command filter. The command filter exists because the
+    initial run of the autonomous loop dispatched against all 3892
+    historical failed/ blobs and exhausted the Claude Code OAuth
+    subscription quota within minutes -- scoping by command lets the
+    operator target the workload they actually want fixed (e.g.
+    'raw.extract_and_upload', 'extract_and_upload', 'lm_eval')
+    instead of every historical failure."""
     for info in store.list_blobs_with_meta("failed/"):
         if not info.name.endswith(".json"):
             continue
@@ -83,6 +95,8 @@ def scan_new_failures(store: JobStorage, since_iso: str | None = None) -> Iterat
         if rec is None:
             continue
         if since_iso and rec.failed_at < since_iso:
+            continue
+        if command_pattern and command_pattern not in rec.command:
             continue
         yield rec
 
@@ -184,6 +198,7 @@ def dispatch_fix(rec: FailureRecord, *, store: JobStorage | None = None, execute
 def scan_and_dispatch(
     *,
     since_iso: str | None = None,
+    command_pattern: str | None = None,
     execute: bool = False,
     store: JobStorage | None = None,
     skip_dispatched: bool = True,
@@ -191,10 +206,14 @@ def scan_and_dispatch(
     """One-shot orchestrator: scan failed/ -> exec local `claude` per
     UNHANDLED failed job. Returns a list of per-job dispatch records.
     `skip_dispatched=True` (default) reads state and skips jobs whose
-    state file already shows attempts>0."""
+    state file already shows attempts>0. `command_pattern` scopes the
+    scan to failures whose command contains that substring (use this
+    to target a specific workload like 'raw.extract_and_upload')."""
     store = store or JobStorage(BUCKET)
     out: list = []
-    for rec in scan_new_failures(store, since_iso=since_iso):
+    for rec in scan_new_failures(
+        store, since_iso=since_iso, command_pattern=command_pattern,
+    ):
         if skip_dispatched:
             prior = state_load(store, rec.job_id)
             if prior.get("attempts", 0) > 0:

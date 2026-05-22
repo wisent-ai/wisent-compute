@@ -90,13 +90,21 @@ def cmd_dispatch(job_id: str, since: str | None, execute: bool) -> None:
 
 @main.command("scan-dispatch")
 @click.option("--since", default=None)
+@click.option("--command-pattern", "command_pattern", default=None,
+              help="Only dispatch failures whose command contains this "
+                   "substring (e.g. 'raw.extract_and_upload'). Without "
+                   "this the scan touches every failed/ blob and burns "
+                   "Claude OAuth quota on historical failures the "
+                   "operator does not care about.")
 @click.option("--execute", is_flag=True, default=False,
               help="Actually dispatch each undispatched failed job; default dry-run.")
-def cmd_scan_dispatch(since: str | None, execute: bool) -> None:
+def cmd_scan_dispatch(since: str | None, command_pattern: str | None, execute: bool) -> None:
     """Scan failed/ and dispatch one Claude Code session per undispatched
     job. Per-job ATTEMPT_CAP stops re-dispatching after
     FAILURE_FIXER_ATTEMPT_CAP attempts."""
-    results = scan_and_dispatch(since_iso=since, execute=execute)
+    results = scan_and_dispatch(
+        since_iso=since, command_pattern=command_pattern, execute=execute,
+    )
     click.echo(json.dumps({"results": results, "count": len(results)}, indent=2))
 
 
