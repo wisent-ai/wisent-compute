@@ -77,12 +77,33 @@ class FingerprintGroup:
 
 
 def fingerprint_failure(error_text: str) -> str:
-    """sha256 of the LAST FAILURE_FINGERPRINT_TAIL_BYTES chars of the
-    error text. Stack traces converge to the same tail when the root
-    cause is identical, even if earlier frames differ (different pids,
-    workdirs, task names)."""
-    tail = (error_text or "")[-FAILURE_FINGERPRINT_TAIL_BYTES:]
-    return hashlib.sha256(tail.encode("utf-8", errors="replace")).hexdigest()[:16]
+    """sha256 over the NORMALIZED root-cause signature: the final
+    Exception line + the bottom-most `File "...", line N, in func`
+    frame, with file paths stripped to basenames. This clusters by
+    root cause across jobs that differ only in workdir / task name /
+    prompt format / pid. When no Python traceback markers are found
+    (e.g. shell crash, OOM kill, exit-code-only failure), the raw
+    tail substring is used so distinct shell-level failures still
+    cluster correctly.
+    """
+    import re as _re
+    text = error_text or ""
+    exc_matches = _re.findall(r"^[A-Za-z_][A-Za-z0-9_]*Error:[^\n]*", text, _re.MULTILINE)
+    exc_line = exc_matches[-1] if exc_matches else ""
+    file_matches = _re.findall(
+        r'File "([^"]+)", line (\d+), in (\S+)', text
+    )
+    if file_matches:
+        path, lineno, func = file_matches[-1]
+        basename = path.rsplit("/", 1)[-1]
+        frame = f"{basename}:{lineno}:{func}"
+    else:
+        frame = ""
+    if exc_line or frame:
+        signature = f"{exc_line}||{frame}"
+    else:
+        signature = text[-FAILURE_FINGERPRINT_TAIL_BYTES:]
+    return hashlib.sha256(signature.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
 def _parse_failed_blob(store: JobStorage, name: str) -> FailureRecord | None:
