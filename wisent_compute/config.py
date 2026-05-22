@@ -91,6 +91,14 @@ FAILURE_FIX_PROMPT_ERROR_BYTES = 4000
 # Seconds between failure-fixer scan_and_dispatch iterations when the
 # LaunchAgent runs in tight loop.
 FAILURE_FIXER_TICK_SECONDS = 180
+# Command substring the LaunchAgent passes to wc-fix scan-dispatch
+# --command-pattern. Empty string means scan every failed/ blob,
+# which exhausts Claude Code subscription quota fast (live failure
+# 2026-05-22: 273 dispatches in one tick burned the daily limit).
+# Set this to the workload the operator wants the autonomous fixer
+# to target. raw.extract_and_upload is the canonical activation
+# extraction workload.
+FAILURE_FIXER_COMMAND_PATTERN = "raw.extract_and_upload"
 
 # --- Coverage verifier + retry orchestrator defaults ---
 # After this many submit attempts on the same group_key the

@@ -122,11 +122,19 @@ def _exec_args_for(entry, kind: str) -> list[str]:
         # single failure of scan_and_dispatch (transient GCS hiccup,
         # model-router 5xx) does not require launchd to restart the
         # whole job; the next iteration retries cleanly.
-        from ..config import FAILURE_FIXER_TICK_SECONDS as _tick
+        from ..config import (
+            FAILURE_FIXER_COMMAND_PATTERN as _pattern,
+            FAILURE_FIXER_TICK_SECONDS as _tick,
+        )
         wc_fix = _wc_fix_bin()
+        # entry.name is the bootstrap target name. When target is
+        # 'failure-fixer' the scope defaults to FAILURE_FIXER_COMMAND_PATTERN;
+        # callers can pass a different target name to mean a different
+        # workload (handled by the bootstrap dispatcher).
+        pat_arg = f"--command-pattern '{_pattern}'" if _pattern else ""
         return [
             "/bin/bash", "-c",
-            f"while true; do {wc_fix} scan-dispatch --execute; sleep {_tick}; done",
+            f"while true; do {wc_fix} scan-dispatch --execute {pat_arg}; sleep {_tick}; done",
         ]
     raise ValueError(f"unknown install kind: {kind}")
 
