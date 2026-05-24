@@ -49,25 +49,39 @@ def _render_repo_block(repo: str, workdir: str, extras: str) -> str:
 
 
 def submit_batch(commands: list[str], **kwargs) -> int:
-    """Submit many commands concurrently. Returns the count submitted.
+    """Submit many commands concurrently as one run. Returns the count.
 
-    Falls through to per-line submit_job for the actual GCS writes; the
-    concurrency just hides GCS round-trip latency. ThreadPoolExecutor is
-    correct here: each worker is I/O-bound on GCS, not CPU.
+    Generates one run_id for the whole invocation, threads it onto every
+    job, then writes the immutable runs/<run_id>.json manifest with all
+    member job_ids. The API path (COMPUTE_API_KEY set) skips the manifest
+    since it has no GCS queue to track against.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .runs import generate_run_id, write_run_manifest
+
+    run_id = kwargs.pop("run_id", "") or generate_run_id()
+    kwargs["run_id"] = run_id
     workers = 1 if len(commands) <= 4 else 64
     if workers == 1:
-        for cmd in commands:
-            submit_job(cmd, **kwargs)
-        return len(commands)
-    done = 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(submit_job, cmd, **kwargs) for cmd in commands]
-        for fut in as_completed(futures):
-            fut.result()
-            done += 1
-    return done
+        jobs = [submit_job(cmd, **kwargs) for cmd in commands]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(submit_job, cmd, **kwargs) for cmd in commands]
+            jobs = [fut.result() for fut in as_completed(futures)]
+
+    if not os.environ.get("COMPUTE_API_KEY", "").strip():
+        import platform
+        from .storage import JobStorage
+        store = JobStorage(kwargs.get("bucket", "") or BUCKET)
+        write_run_manifest(
+            store, run_id,
+            os.environ.get("WC_RUN_NAME", ""),
+            os.environ.get("WC_SUBMITTER_APP", ""),
+            os.environ.get("USER", "") or os.environ.get("LOGNAME", ""),
+            platform.node(),
+            commands, [j.job_id for j in jobs],
+        )
+    return len(jobs)
 
 
 def submit_job(
@@ -91,6 +105,7 @@ def submit_job(
     output_uri: str = "",
     verify_command: str = "",
     exclusive: bool = False,
+    run_id: str = "",
 ) -> Job:
     """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
@@ -106,7 +121,7 @@ def submit_job(
         gpu_type=gpu_type, vram_gb=vram_gb, machine_type=machine_type,
         pre_command=pre_command, apt_packages=apt_packages or [],
         output_uri=output_uri, verify_command=verify_command,
-        exclusive=exclusive,
+        exclusive=exclusive, run_id=run_id,
     )
 
 
@@ -171,6 +186,7 @@ def _submit_via_gcs(
     output_uri: str = "",
     verify_command: str = "",
     exclusive: bool = False,
+    run_id: str = "",
 ) -> Job:
     """Submit directly to GCS queue (no API server needed).
 
@@ -266,6 +282,8 @@ def _submit_via_gcs(
         submitted_by=submitter,
         submitted_from=host,
         submitted_via="cli",
+        run_id=run_id,
+        submitter_app=os.environ.get("WC_SUBMITTER_APP", ""),
         repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
         pre_command=pre_command,
         apt_packages=apt_packages,

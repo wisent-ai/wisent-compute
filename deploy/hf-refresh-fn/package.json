@@ -1,0 +1,11 @@
+{
+  "name": "wisent-hf-refresh",
+  "version": "0.1.0",
+  "description": "GCP Cloud Function: walks wisent-ai/activations on Hugging Face and upserts public.hf_snapshots in the wisent-enterprise Supabase project. Triggered by Cloud Scheduler every 6h. No SSH, no GitHub Actions, no Vercel function compute.",
+  "type": "module",
+  "main": "index.mjs",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.4.0"
+  }
+}

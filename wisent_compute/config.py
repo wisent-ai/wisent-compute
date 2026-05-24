@@ -99,6 +99,10 @@ FAILURE_FIXER_TICK_SECONDS = 180
 # to target. raw.extract_and_upload is the canonical activation
 # extraction workload.
 FAILURE_FIXER_COMMAND_PATTERN = "raw.extract_and_upload"
+# Max fully-terminal runs the by-run reaper deletes per coordinator tick.
+# Bounds per-tick GCS work so a large backlog drains over several ticks
+# instead of one multi-thousand-blob delete stalling the tick.
+RUN_REAP_PER_TICK = 50
 
 # --- Coverage verifier + retry orchestrator defaults ---
 # After this many submit attempts on the same group_key the

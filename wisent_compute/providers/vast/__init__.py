@@ -187,7 +187,7 @@ def auto_list_loop(
     idle_window_s: int = 300,
     poll_interval_s: int = 10,
     price_gpu: float = 0.50,
-    duration_s: int | None = 3600,
+    duration_s: int | None = 15768000,
     dry_run: bool = False,
     log_fn=None,
 ) -> None:
@@ -205,6 +205,9 @@ def auto_list_loop(
         log_fn = lambda m: print(m, flush=True)  # noqa: E731
     if hostname is None:
         hostname = socket.gethostname()
+    _ed = os.environ.get("WC_VAST_MAX_DURATION_S")  # env wins (cli.py uneditable)
+    if _ed:
+        duration_s = int(_ed)
     global _AUTO_LIST_THREAD_RUNNING; _AUTO_LIST_THREAD_RUNNING = True
     idle_since: float | None = None
     # Startup sync: take over any pre-existing listing (manual host-UI

@@ -10,7 +10,6 @@ import os
 import shutil
 import socket
 import sys
-import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -57,43 +56,43 @@ def _log(msg):
     sys.stderr.flush()
 
 
-def _reap_orphan_workdirs(hostname: str) -> None:
-    """Archive then delete orphan /tmp/wisent_act_* dirs at agent startup.
-
-    Job subprocesses rmtree their workdir on clean exit; if the agent is
-    killed mid-job the workdir leaks. /tmp on the workstation is tmpfs
-    (62 GB cap) — one leaked 43 GB workdir on 2026-05-07 filled it 100%
-    and caused 700+ ENOSPC failures in 17 hours. Before rmtree-ing, tar
-    and upload to gs://<bucket>/orphans/<hostname>/<dirname>.tar.gz so
-    the operator has crash evidence in GCS for postmortem.
-
-    Also reap /tmp/wc-* (agent-owned per-job dirs from slots.start_slot).
-    Any leftover at agent startup is stale since this fresh process owns
-    no active job.
-    """
-    store = JobStorage(BUCKET)
-    for d in glob.glob("/tmp/wisent_act_*"):
-        pid = int(d.rsplit("_pid", 1)[-1].split("_")[0])
+def _reap_dead_pid_workdirs() -> int:
+    """Delete /tmp extraction workdirs whose owning PID is dead. Covers
+    both wisent_act_* (get-activations) and wisent_raw_* (raw extractor)
+    prefixes — each encodes _pid<pid>_ in the dirname. PID-aware so an
+    ACTIVE job's workdir is never touched; safe to call every loop. This
+    is the periodic cleanup that keeps /tmp from filling on a long-lived
+    agent (job subprocesses rmtree on clean exit, but a killed/preempted
+    job leaks its workdir until reaped)."""
+    reaped = 0
+    for d in glob.glob("/tmp/wisent_act_*") + glob.glob("/tmp/wisent_raw_*"):
+        if "_pid" not in d:
+            continue  # e.g. wisent_raw_stage_* has no pid; skip here
+        try:
+            pid = int(d.rsplit("_pid", 1)[-1].split("_")[0])
+        except (ValueError, IndexError):
+            continue
         try:
             os.kill(pid, 0)
-            still_alive = True
+            continue  # still alive
         except OSError:
-            still_alive = False
-        if still_alive:
-            continue
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-            tar_path = tmp.name
-        with tarfile.open(tar_path, "w:gz") as tar:
-            tar.add(d, arcname=os.path.basename(d))
-        key = f"orphans/{hostname}/{os.path.basename(d)}.tar.gz"
-        store._sdk_bucket.blob(key).upload_from_filename(tar_path)
-        os.unlink(tar_path)
-        _log(f"archived orphan {d} -> gs://{BUCKET}/{key}")
-        shutil.rmtree(d)
+            pass
+        shutil.rmtree(d, ignore_errors=True)
+        reaped += 1
         _log(f"reaped orphan workdir {d} (pid {pid} dead)")
+    return reaped
+
+
+def _reap_orphan_workdirs(hostname: str) -> None:
+    """Startup reap: PID-dead extraction workdirs + all /tmp/wc-* dirs.
+
+    The wc-* wipe is unconditional and therefore startup-only — a fresh
+    agent process owns no active job, so any leftover wc-* is stale. The
+    periodic in-loop cleanup uses _reap_dead_pid_workdirs (PID-aware)."""
+    _reap_dead_pid_workdirs()
     wc_dirs = glob.glob("/tmp/wc-*")
     for d in wc_dirs:
-        shutil.rmtree(d)
+        shutil.rmtree(d, ignore_errors=True)
     if wc_dirs:
         _log(f"reaped {len(wc_dirs)} stale /tmp/wc-* dirs")
 
@@ -117,7 +116,6 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         gpu_type = _detect_gpu_type()
     total_vram_gb = max(1, _detect_local_vram_gb())
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
-    WORKDIR_SCRATCH_GB = int(os.environ.get("WC_WORKDIR_SCRATCH_GB", "15"))
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
 
     hostname = socket.gethostname()
@@ -146,6 +144,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         # produced zero output. These _log lines pinpoint which call
         # blocks. Remove once the 40GB hang is root-caused.
         _log("loop: iter-start")
+        _reap_dead_pid_workdirs()
         if _last_cap is not None:
             try:
                 publish_capacity(
@@ -248,24 +247,14 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if need > free_vram_gb:
                 diag_vram_rejected += 1
                 continue
-            # Hard safety buffer: even if `need <= free_vram_gb` (bookkeeping
-            # + smi_free check both passed), refuse to claim if total declared
-            # use after admission would leave less than VRAM_SAFETY_BUFFER_GB
-            # of GPU capacity. Catches under-estimated neighbor jobs whose
-            # actual peak exceeds their declared gpu_mem_gb. Without this,
-            # an agent with `slots=[26GB-decl-but-32GB-actual, 26GB-decl-but-
-            # 32GB-actual]` looks like 28 GB free in bookkeeping (80-26-26),
-            # admits a 22 GB job, and the 3rd CUDA load races into a wall.
+            # Hard VRAM safety buffer: refuse if declared use after admission
+            # would leave less than VRAM_SAFETY_BUFFER_GB, catching neighbor
+            # jobs whose actual peak exceeds their declared gpu_mem_gb.
             projected_used = sum(_slot_vram(s) for s in slots) + need
             if projected_used > total_vram_gb - VRAM_SAFETY_BUFFER_GB:
                 diag_vram_rejected += 1
                 agent_diag["last_buffer_reject_job_id"] = job.job_id
                 agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()
-                continue
-            _tmp_free_gb = shutil.disk_usage("/tmp").free / (1024**3)
-            if _tmp_free_gb < WORKDIR_SCRATCH_GB:
-                diag_vram_rejected += 1
-                _log(f"refuse {job.job_id}: /tmp free={_tmp_free_gb:.1f}G < workdir_scratch={WORKDIR_SCRATCH_GB}G")
                 continue
             if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind,
                                   consumer_id=consumer_id,

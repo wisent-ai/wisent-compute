@@ -73,6 +73,14 @@ class Job:
     submitted_by: str = ""        # username on the submitting machine
     submitted_from: str = ""      # hostname of the submitting machine
     submitted_via: str = ""       # cli | api | other
+    # run_id is the tracking primitive above a job: one `wc submit`
+    # invocation = one run, written once to runs/<run_id>.json with the
+    # member job_ids. Distinct from batch_id (a legacy free-text label).
+    # submitter_app names the orchestrator that issued the run
+    # (activation-extraction, failure-fixer, manual, ...) from
+    # $WC_SUBMITTER_APP, so resubmits are distinguishable from manual runs.
+    run_id: str = ""
+    submitter_app: str = ""
     # Optional source repo to git clone before running command. The startup
     # script clones repo into ./{repo_workdir} and pip-installs the [train]
     # extra so 'cd {repo_workdir} && python -m train.foo' works without the

@@ -108,6 +108,15 @@ def _run_tick(store: JobStorage, secrets: dict) -> int:
         if reaped:
             _log(f"{name}: reaped {reaped} dead-agent VM(s)")
         total += schedule_queued_jobs(store, provider, name, secrets)
+    # By-run reaper: drop per-job blobs once a run is fully terminal so
+    # completed/+failed/ stop accumulating thousands of orphaned records.
+    # Capped per tick to bound work on a large backlog.
+    from .monitor.reap.run_reaper import reap_terminal_runs
+    from .config import RUN_REAP_PER_TICK
+    summary = reap_terminal_runs(store, limit=RUN_REAP_PER_TICK)
+    if summary["reaped_runs"]:
+        _log(f"run-reaper: reaped {summary['reaped_runs']} run(s), "
+             f"deleted {summary['deleted_jobs']} job blob(s)")
     return total
 
 
