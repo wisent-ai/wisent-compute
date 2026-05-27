@@ -25,6 +25,7 @@ from .local.helpers import (
     _no_eligible_in_queue,
     _slot_is_exclusive,
     _slot_vram,
+    _slot_rss, _free_ram_gb,
     _smi_free_vram_gb,
     _staging_size_gb,
     _vast_has_renter,
@@ -224,6 +225,9 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         _last_cap = {"free_slots": free_slots, "free_vram_gb": free_vram_gb, "total_vram_gb": total_vram_gb, "diag": dict(agent_diag)}
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
+            time.sleep(10)
+            continue
+        if slots and 0 <= _free_ram_gb() < max(_slot_rss(s) for s in slots):
             time.sleep(10)
             continue
 

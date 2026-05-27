@@ -211,6 +211,41 @@ def _slot_vram(slot: dict) -> int:
     )
 
 
+def _free_ram_gb() -> float:
+    """Free host RAM (GB) from /proc/meminfo MemAvailable; -1.0 if unreadable
+    (e.g. non-Linux) — caller treats <0 as 'unknown, do not gate'."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / (1024 ** 2)
+    except Exception:
+        pass
+    return -1.0
+
+
+def _slot_rss(slot: dict) -> float:
+    """Measured resident host RAM (GB) of a running slot's whole process tree
+    (bash + python + upload workers), summed from /proc/<pid>/status VmRSS.
+    This is the OBSERVED per-job footprint used to decide if another job fits
+    — no hardcoded estimate."""
+    pid = getattr(slot.get("proc"), "pid", None)
+    if not pid:
+        return 0.0
+    from .gpu_probe import _proc_tree_pids
+    total_kb = 0
+    for p in _proc_tree_pids(pid):
+        try:
+            with open(f"/proc/{p}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        total_kb += int(line.split()[1])
+                        break
+        except Exception:
+            continue
+    return total_kb / (1024 ** 2)
+
+
 def _no_eligible_in_queue(store: JobStorage, gpu_type: str,
                            total_vram_gb: int, free_vram_gb: int,
                            kind: str = "local",
