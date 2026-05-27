@@ -128,10 +128,6 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
 
     store = JobStorage(BUCKET)
     _log("init: JobStorage done")
-    if hard_slot_cap == 0:
-        _cap = (store._download_text("config/local_slots") or "").strip()
-        hard_slot_cap = int(_cap) if _cap.isdigit() else 0
-        _log(f"slot cap from config/local_slots={hard_slot_cap}")
     consumer_id = f"{kind}-{hostname}"
     slots: list[dict] = []
     agent_diag: dict = {}
