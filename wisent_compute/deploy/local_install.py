@@ -44,6 +44,19 @@ def _adc_path() -> str:
     return str(candidates[0]) if candidates else ""
 
 
+def _hf_write_token() -> str:
+    """Central write-scoped HF token from gs://<WC_BUCKET>/config/hf_token.
+    Baked into the agent/coordinator/failure-fixer unit env so extraction
+    jobs upload to wisent-ai/* with write perms instead of inheriting the
+    box's read-only ambient token (the observed 403 'write token' failure)."""
+    from google.cloud import storage
+    from ..config import BUCKET
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+    client = storage.Client(project=project) if project else storage.Client()
+    blob = client.bucket(BUCKET).blob("config/hf_token")
+    return blob.download_as_text().strip() if blob.exists() else ""
+
+
 def _plist_text(label: str, exec_args: list[str], env: dict[str, str]) -> str:
     args_xml = "".join(f"        <string>{a}</string>\n" for a in exec_args)
     env_xml = "".join(
@@ -178,6 +191,15 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
     adc = _adc_path()
     if adc:
         env["GOOGLE_APPLICATION_CREDENTIALS"] = adc
+    # Every kind needs the central write token: the agent spawns extraction
+    # jobs that upload to wisent-ai/* (inherits this env), the coordinator
+    # renders it into GCE agent startup, the failure-fixer's verify curl uses
+    # it. Sourced from GCS config so it's correct regardless of the box's
+    # ambient HF_TOKEN (which was read-only -> 403 on upload).
+    hf = _hf_write_token()
+    if hf:
+        env["HF_TOKEN"] = hf
+        env["HUGGING_FACE_HUB_TOKEN"] = hf
     # failure-fixer authenticates via the local `claude` CLI's OAuth
     # session (maintained by wisent-claude-reauth on the mac mini), not
     # via env-var HMAC creds. PATH is forwarded so the LaunchAgent's
@@ -193,7 +215,7 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
         env["PATH"] = os.environ.get(
             "PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         )
-        for k in ("GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "HF_TOKEN"):
+        for k in ("GOOGLE_CLOUD_PROJECT", "GCP_PROJECT"):
             v = os.environ.get(k, "")
             if v:
                 env[k] = v

@@ -25,6 +25,17 @@ from ...models import JobState
 from ...queue.storage import JobStorage
 from .helpers.gpu_probe import smi_job_used_gb
 
+_HF_WRITE_TOK: dict = {}
+
+
+def _hf_write_token(store) -> str:
+    """Central write-scoped HF token from gs://<bucket>/config/hf_token,
+    injected into every job env so uploads do not 403 when the agent ambient
+    HF_TOKEN is read-only. Cached per process; empty if unset."""
+    if "t" not in _HF_WRITE_TOK:
+        _HF_WRITE_TOK["t"] = (store._download_text("config/hf_token") or "").strip()
+    return _HF_WRITE_TOK["t"]
+
 HEARTBEAT_INTERVAL = 60  # write a fresh heartbeat every 60s; HEARTBEAT_STALE_MINUTES=15 leaves 15 missed-write tolerance
 
 
@@ -258,11 +269,14 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     fleet_staging = os.environ.get("WISENT_FLEET_STAGING_DIR",
                                     "/tmp/wisent_fleet_staging")
     os.makedirs(fleet_staging, exist_ok=True)
+    job_env = {**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1",
+               "WISENT_FLEET_STAGING_DIR": fleet_staging}
+    _hf = _hf_write_token(store)
+    if _hf:
+        job_env["HF_TOKEN"] = job_env["HUGGING_FACE_HUB_TOKEN"] = _hf
     proc = subprocess.Popen(
         full_command, shell=True, stdout=log_file, stderr=subprocess.STDOUT,
-        cwd=work_dir,
-        env={**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1",
-             "WISENT_FLEET_STAGING_DIR": fleet_staging},
+        cwd=work_dir, env=job_env,
     )
     log_fn(f"Started job {job.job_id}: {job.command[:60]}")
     _write_heartbeat(store, job.job_id)
