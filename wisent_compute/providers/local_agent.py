@@ -30,6 +30,7 @@ from .local.helpers import (
     _staging_size_gb,
     _vast_has_renter,
 )
+from .local.disk.staging import setup_agent_staging
 
 
 POLL_INTERVAL = 10
@@ -118,6 +119,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     total_vram_gb = max(1, _detect_local_vram_gb())
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
+    setup_agent_staging(_log)
 
     hostname = socket.gethostname()
     _log("init: pre-reap_orphan_workdirs")
@@ -138,12 +140,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
 
     _last_cap = None
     while True:
-        # Phase breadcrumbs: 40GB a2-highgpu-1g agents go silent right
-        # after "Agent started" and never broadcast capacity, so the
-        # reaper culls them and pinned jobs (Llama 3ef705b2) never
-        # advance. The hang is somewhere in the first loop iteration but
-        # produced zero output. These _log lines pinpoint which call
-        # blocks. Remove once the 40GB hang is root-caused.
+        # Phase breadcrumbs for the 40GB a2-highgpu-1g first-iter hang.
         _log("loop: iter-start")
         _reap_dead_pid_workdirs()
         if _last_cap is not None:
