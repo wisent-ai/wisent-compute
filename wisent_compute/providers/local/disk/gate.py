@@ -289,4 +289,11 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
                 "eligible_for_eviction": age is None or age > STALE_TRAINING_MAX_AGE_S,
             })
         diag["training_dir_candidates"] = candidates_diag
+    # Also refuse admitting NEW jobs when host RAM is low — large raw uploads
+    # hold big CPU buffers and OOM-kill the box if concurrency isn't bounded
+    # by actual memory pressure (not a static slot cap).
+    from .ram import ram_refuse
+    ram_ref, ram_diag = ram_refuse(log_fn)
+    diag.update(ram_diag)
+    refuse = refuse or ram_ref
     return refuse, diag
