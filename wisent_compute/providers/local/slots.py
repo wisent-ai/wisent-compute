@@ -269,7 +269,7 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     fleet_staging = os.environ.get("WISENT_FLEET_STAGING_DIR",
                                     "/tmp/wisent_fleet_staging")
     os.makedirs(fleet_staging, exist_ok=True)
-    job_env = {**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1",
+    job_env = {**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1", "HF_HUB_DISABLE_XET": "1",
                "WISENT_FLEET_STAGING_DIR": fleet_staging}
     _hf = _hf_write_token(store)
     if _hf:
