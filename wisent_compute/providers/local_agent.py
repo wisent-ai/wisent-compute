@@ -58,29 +58,29 @@ def _log(msg):
 
 
 def _reap_dead_pid_workdirs() -> int:
-    """Delete /tmp extraction workdirs whose owning PID is dead. Covers
-    both wisent_act_* (get-activations) and wisent_raw_* (raw extractor)
-    prefixes — each encodes _pid<pid>_ in the dirname. PID-aware so an
-    ACTIVE job's workdir is never touched; safe to call every loop. This
-    is the periodic cleanup that keeps /tmp from filling on a long-lived
-    agent (job subprocesses rmtree on clean exit, but a killed/preempted
-    job leaks its workdir until reaped)."""
+    """Reap /tmp extraction workdirs whose owning PID is dead (wisent_act_*/
+    wisent_raw_*_pid<pid>), PLUS orphaned wisent_raw_stage_* dirs (no pid in
+    name) that no running process references in its cmdline — those leak on
+    /tmp (a tmpfs) when a job crashes. PID/ref-aware; safe every loop."""
     reaped = 0
     for d in glob.glob("/tmp/wisent_act_*") + glob.glob("/tmp/wisent_raw_*"):
         if "_pid" not in d:
-            continue  # e.g. wisent_raw_stage_* has no pid; skip here
+            continue
         try:
             pid = int(d.rsplit("_pid", 1)[-1].split("_")[0])
         except (ValueError, IndexError):
             continue
         try:
-            os.kill(pid, 0)
-            continue  # still alive
+            os.kill(pid, 0); continue
         except OSError:
             pass
-        shutil.rmtree(d, ignore_errors=True)
-        reaped += 1
-        _log(f"reaped orphan workdir {d} (pid {pid} dead)")
+        shutil.rmtree(d, ignore_errors=True); reaped += 1
+    import subprocess as _sp
+    _cmd = _sp.run(["bash", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null"],
+                   capture_output=True, text=True).stdout
+    for d in glob.glob("/tmp/wisent_raw_stage_*"):
+        if d not in _cmd:
+            shutil.rmtree(d, ignore_errors=True); reaped += 1
     return reaped
 
 
