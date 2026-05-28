@@ -224,6 +224,22 @@ def _free_ram_gb() -> float:
     return -1.0
 
 
+def _total_ram_gb() -> float:
+    """Total host RAM (GB) from /proc/meminfo MemTotal; -1.0 if unreadable.
+    The sum-based admission gate bounds anonymous slot RSS against THIS, not
+    MemAvailable — MemAvailable counts reclaimable staging page-cache as free,
+    so it masked the real footprint and the agent over-admitted to a status=1
+    OOM at ~100G on a 123G box."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024 ** 2)
+    except Exception:
+        pass
+    return -1.0
+
+
 def _slot_rss(slot: dict) -> float:
     """Measured resident host RAM (GB) of a running slot's whole process tree
     (bash + python + upload workers), summed from /proc/<pid>/status VmRSS.

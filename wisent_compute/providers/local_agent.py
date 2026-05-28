@@ -25,7 +25,7 @@ from .local.helpers import (
     _no_eligible_in_queue,
     _slot_is_exclusive,
     _slot_vram,
-    _slot_rss, _free_ram_gb,
+    _slot_rss, _free_ram_gb, _total_ram_gb,
     _smi_free_vram_gb,
     _staging_size_gb,
     _vast_has_renter,
@@ -224,9 +224,12 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
             time.sleep(10)
             continue
-        if slots and 0 <= _free_ram_gb() < max(_slot_rss(s) for s in slots):
-            time.sleep(10)
-            continue
+        # Sum-based RAM gate: bound measured slot RSS + largest-job growth
+        # headroom against MemTotal (MemAvailable counts reclaimable staging
+        # page-cache as free, which masked the footprint -> status=1 OOM).
+        _rss = [_slot_rss(s) for s in slots]
+        if _rss and (_t := _total_ram_gb()) > 0 and sum(_rss) + 3 * max(_rss) > _t:
+            time.sleep(10); continue
 
         # Centralized assignment writes job.assigned_to on the queue blob;
         # _job_eligible(consumer_id=...) below filters to ONLY the jobs this
