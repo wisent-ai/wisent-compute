@@ -289,11 +289,11 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
                 "eligible_for_eviction": age is None or age > STALE_TRAINING_MAX_AGE_S,
             })
         diag["training_dir_candidates"] = candidates_diag
-    # /tmp-pressure: back off new admissions when the staging tmpfs can't fit another job of the largest live stage size (measured, not a job cap).
+    # staging-pressure backpressure: extraction outruns bandwidth-bound uploads, so refuse admissions when the TMPDIR pending pool leaves <~6 jobs' free disk (else it refills the volume -> ENOSPC).
     import subprocess as _sp
-    _tf = _free_gb("/tmp"); diag["tmp_free_gb"] = round(_tf, 1)
-    _b = _sp.run(["bash", "-c", "du -s /tmp/wisent_raw_stage_* 2>/dev/null | sort -rn | head -1 | cut -f1"], capture_output=True, text=True).stdout.strip()
+    _td = os.environ.get("TMPDIR", "/tmp"); _sf = _free_gb(_td)
+    _b = _sp.run(["bash", "-c", f"du -s {_td}/wisent_raw_pending/*/ 2>/dev/null | sort -rn | head -1 | cut -f1"], capture_output=True, text=True).stdout.strip()
     _bg = (int(_b) / (1024 ** 2)) if _b.isdigit() else 0.0
-    if not refuse and 0 <= _tf < _bg:
-        log_fn(f"/tmp low (~{_tf:.1f}GB < {_bg:.1f}GB largest stage); refusing slots"); refuse = True
+    if not refuse and 0 <= _sf < 6 * _bg:
+        log_fn(f"staging low (~{_sf:.0f}GB free < 6x pending {_bg:.0f}GB); refusing slots"); refuse = True
     return refuse, diag
