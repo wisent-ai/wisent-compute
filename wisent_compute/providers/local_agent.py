@@ -59,29 +59,29 @@ def _log(msg):
 
 
 def _reap_dead_pid_workdirs() -> int:
-    """Reap /tmp extraction workdirs whose owning PID is dead (wisent_act_*/
-    wisent_raw_*_pid<pid>), PLUS orphaned wisent_raw_stage_* dirs (no pid in
-    name) that no running process references in its cmdline — those leak on
-    /tmp (a tmpfs) when a job crashes. PID/ref-aware; safe every loop."""
+    """Reap dead-PID workdirs + unreferenced wisent_raw_stage_* across /tmp
+    and the staging root (TMPDIR may be off-tmpfs on a disk volume; orphans
+    there filled a 3.6T disk once). Skips the wisent_raw_pending pool."""
     reaped = 0
-    for d in glob.glob("/tmp/wisent_act_*") + glob.glob("/tmp/wisent_raw_*"):
-        if "_pid" not in d:
-            continue
-        try:
-            pid = int(d.rsplit("_pid", 1)[-1].split("_")[0])
-        except (ValueError, IndexError):
-            continue
-        try:
-            os.kill(pid, 0); continue
-        except OSError:
-            pass
-        shutil.rmtree(d, ignore_errors=True); reaped += 1
     import subprocess as _sp
     _cmd = _sp.run(["bash", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null"],
                    capture_output=True, text=True).stdout
-    for d in glob.glob("/tmp/wisent_raw_stage_*"):
-        if d not in _cmd:
-            shutil.rmtree(d, ignore_errors=True); reaped += 1
+    for base in {"/tmp", os.environ.get("TMPDIR", "/tmp")}:
+        for d in glob.glob(f"{base}/wisent_act_*") + glob.glob(f"{base}/wisent_raw_*"):
+            if "wisent_raw_pending" in d:
+                continue
+            if "_pid" in d:
+                try:
+                    pid = int(d.rsplit("_pid", 1)[-1].split("_")[0])
+                except (ValueError, IndexError):
+                    continue
+                try:
+                    os.kill(pid, 0); continue
+                except OSError:
+                    pass
+                shutil.rmtree(d, ignore_errors=True); reaped += 1
+            elif "wisent_raw_stage_" in d and d not in _cmd:
+                shutil.rmtree(d, ignore_errors=True); reaped += 1
     return reaped
 
 
