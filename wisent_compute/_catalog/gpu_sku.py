@@ -139,6 +139,12 @@ GPU_HOURLY_RATE_USD = {
     "amd-radeonpro-v520": 0.50,
     "amd-radeonpro-v710": 0.70,
     "nvidia-tesla-m60": 1.20,
+    # Owned RTX PRO 6000 Blackwell Workstation Edition (96 GB GDDR7,
+    # 600 W TGP). Hardware is sunk cost; the hourly rate models only
+    # marginal electricity at California commercial rates: 0.6 kW x
+    # $0.30/kWh = $0.18/hr at full GPU power. Used by scheduler/cost.py
+    # for per-job cost accounting on this box.
+    "nvidia-rtx-pro-6000": 0.18,
 }
 
 
@@ -162,6 +168,8 @@ SPOT_DISCOUNT = {
     "amd-radeonpro-v520": 0.30,
     "amd-radeonpro-v710": 0.30,
     "nvidia-tesla-m60": 0.30,
+    # Owned hardware — no spot tier; electricity costs the same regardless.
+    "nvidia-rtx-pro-6000": 1.0,
 }
 
 
