@@ -289,11 +289,12 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
                 "eligible_for_eviction": age is None or age > STALE_TRAINING_MAX_AGE_S,
             })
         diag["training_dir_candidates"] = candidates_diag
-    # staging-pressure backpressure: extraction outruns bandwidth-bound uploads, so refuse admissions when the TMPDIR pending pool leaves <~6 jobs' free disk (else it refills the volume -> ENOSPC).
+    # staging-pressure backpressure: refuse extraction admissions when the TMPDIR pending pool leaves too little headroom for an in-flight extraction to finish writing (else it refills the volume -> ENOSPC). Headroom = 2x the largest pending dir, CAPPED at half the volume so a single huge dir (e.g. 169GB ruler) can't demand more free space than the volume can ever offer and freeze extraction forever.
     import subprocess as _sp
-    _td = os.environ.get("TMPDIR", "/tmp"); _sf = _free_gb(_td)
+    _td = os.environ.get("TMPDIR", "/tmp"); _us = shutil.disk_usage(_td); _sf = _us.free / (1024 ** 3)
     _b = _sp.run(["bash", "-c", f"du -s {_td}/wisent_raw_pending/*/ 2>/dev/null | sort -rn | head -1 | cut -f1"], capture_output=True, text=True).stdout.strip()
     _bg = (int(_b) / (1024 ** 2)) if _b.isdigit() else 0.0
-    if not refuse and 0 <= _sf < 6 * _bg:
-        log_fn(f"staging low (~{_sf:.0f}GB free < 6x pending {_bg:.0f}GB); refusing slots"); refuse = True
+    _need = min(2 * _bg, 0.5 * _us.total / (1024 ** 3))
+    if not refuse and 0 <= _sf < _need:
+        log_fn(f"staging low (~{_sf:.0f}GB free < need {_need:.0f}GB; largest pending {_bg:.0f}GB); refusing slots"); refuse = True
     return refuse, diag
