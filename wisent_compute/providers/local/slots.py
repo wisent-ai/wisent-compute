@@ -270,7 +270,7 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
                                     "/tmp/wisent_fleet_staging")
     os.makedirs(fleet_staging, exist_ok=True)
     job_env = {**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1", "HF_HUB_DISABLE_XET": "1",
-               "WISENT_FLEET_STAGING_DIR": fleet_staging}
+               "WISENT_FLEET_STAGING_DIR": fleet_staging, "WC_JOB_ID": job.job_id}
     _hf = _hf_write_token(store)
     if _hf:
         job_env["HF_TOKEN"] = job_env["HUGGING_FACE_HUB_TOKEN"] = _hf

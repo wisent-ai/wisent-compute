@@ -295,6 +295,6 @@ class JobStorage:
 
     def list_all_jobs(self) -> dict[str, list[Job]]:
         result = {}
-        for prefix in ("queue", "running", "completed", "failed"):
+        for prefix in ("queue", "running", "completed", "uploaded", "failed"):
             result[prefix] = self.list_jobs(prefix)
         return result

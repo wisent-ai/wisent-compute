@@ -11,7 +11,13 @@ from datetime import datetime, timezone
 class JobState(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
+    # COMPLETED = extraction finished + handed off to the detached upload
+    # worker; activations are written to local staging but NOT yet on HF.
+    # Kept named "completed" so the coordinator Cloud Function and dashboard,
+    # which write/read this prefix, stay unchanged.
     COMPLETED = "completed"
+    # UPLOADED = the upload worker confirmed the dir landed on HF (terminal).
+    UPLOADED = "uploaded"
     FAILED = "failed"
 
 

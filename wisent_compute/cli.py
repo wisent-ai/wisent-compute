@@ -200,7 +200,7 @@ def _status_api(filter_id):
 
 
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{8}$")
-_STATES = ("running", "queue", "completed", "failed")
+_STATES = ("running", "queue", "completed", "uploaded", "failed")
 
 
 def _print_job_row(job, state):
@@ -236,7 +236,7 @@ def _status_gcs(filter_id):
             _print_job_row(job, state)
     counts = {k: len(v) for k, v in all_jobs.items()}
     click.echo(f"\n{counts['running']} running, {counts['queue']} queued, "
-               f"{counts['completed']} completed, {counts['failed']} failed")
+               f"{counts['completed']} extracted (awaiting upload), {counts['uploaded']} uploaded, {counts['failed']} failed")
 
 
 @main.command()
