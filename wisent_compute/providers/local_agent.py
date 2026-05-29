@@ -142,6 +142,13 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     while True:
         # Phase breadcrumbs for the 40GB a2-highgpu-1g first-iter hang.
         _log("loop: iter-start")
+        try:
+            from wisent.scripts.activations.raw.upload_worker import sweep as _upsweep
+            _upsweep()  # keep the detached upload pool populated even
+            # when extraction is gated and no live worker can chain-sweep
+            # (else a restart leaves the pending pool orphaned).
+        except Exception:
+            pass
         _reap_dead_pid_workdirs()
         if _last_cap is not None:
             try:
