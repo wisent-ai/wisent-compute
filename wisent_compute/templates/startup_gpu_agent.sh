@@ -40,8 +40,17 @@ _wc_ship_log() {
   || gcloud storage cp /var/log/wisent-agent.log \
     "gs://wisent-compute/agent_logs/${_WC_INST}.log" 2>/dev/null || true
 }
-trap '_wc_ship_log' EXIT
+_wc_shutdown_log_shipper() {
+  local -
+  set +x
+  _wc_ship_log
+  if [ -n "${_WC_LOG_SHIPPER_PID:-}" ]; then
+    kill "${_WC_LOG_SHIPPER_PID}" 2>/dev/null || true
+  fi
+}
+trap '_wc_shutdown_log_shipper' EXIT
 ( set +x; while true; do _wc_ship_log; sleep 20; done ) &
+_WC_LOG_SHIPPER_PID=$!
 
 # If /opt/wisent-agent/.venv is already populated by the baked image
 # (wisent-agent family, built via deploy/bake_agent_image.sh), skip the
@@ -124,11 +133,19 @@ export HF_HUB_DISABLE_TELEMETRY=1
 # to cache rather than block waiting on a rate-limited Hub.
 export HF_HUB_ETAG_TIMEOUT=1
 
-# Pre-warm the small auxiliary models so each claimed job skips the download.
-# Hard-fail on download error: a VM that can't fetch these will fail every
-# claimed job anyway, so fail fast at startup and let the VM recycle.
-huggingface-cli download cross-encoder/nli-deberta-v3-small
-huggingface-cli download sentence-transformers/all-MiniLM-L6-v2
+# Pre-warm the small auxiliary models so extraction jobs can skip the
+# download. Do not fail startup on Hugging Face rate limits: the agent can
+# still run non-HF jobs and cached-model jobs, while a hard failure prevents
+# it from publishing capacity or claiming anything.
+_hf_prewarm() {
+    local target="$1"
+    shift
+    if ! huggingface-cli download "$target" "$@"; then
+        echo "WARN: HF prewarm failed for ${target}; continuing agent startup"
+    fi
+}
+_hf_prewarm cross-encoder/nli-deberta-v3-small
+_hf_prewarm sentence-transformers/all-MiniLM-L6-v2
 
 # Pre-fetch tokenizer files for every extraction model. Without this,
 # each agent first-fetches the tokenizer at job-time; an interrupted
@@ -144,7 +161,7 @@ for _model in \
     "meta-llama/Llama-2-7b-chat-hf" \
     "Qwen/Qwen3-8B" \
     "openai/gpt-oss-20b"; do
-    huggingface-cli download "${_model}" \
+    _hf_prewarm "${_model}" \
         --include "tokenizer*" "*.json" "special_tokens_map.json"
 done
 
