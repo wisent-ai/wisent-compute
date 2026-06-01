@@ -155,6 +155,12 @@ class Job:
     # trusts ONLY peaks with this flag True so a poisoned historical
     # sample can never dominate the max(). Default False = legacy/untrusted.
     peak_vram_per_gpu: bool = False
+    # Set when this job was submitted by a recurring schedule
+    # (gs://<bucket>/schedules/<id>.json) rather than a one-shot
+    # `wc submit`. Records provenance and lets the schedule firer skip
+    # a new fire while a prior instance of the same schedule is still
+    # live (overlap_policy=skip). Empty = ad-hoc job (back-compat).
+    schedule_id: str = ""
 
     def __post_init__(self):
         if not self.created_at:

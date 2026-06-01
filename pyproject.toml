@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wisent-compute"
-version = "0.4.306"
+version = "0.4.307"
 description = "Job queue and compute management for Wisent GPU workloads"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,6 +20,12 @@ dependencies = [
     # cold start once this dep lands in the deployed PyPI release.
     "google-cloud-quotas>=0.1.0",
     "click>=8.0",
+    # Cron expression parsing for recurring jobs (`wc schedule`). The
+    # coordinator tick evaluates each schedule's 5-field cron to decide
+    # the next fire time; the CLI uses it to compute next_due_at on
+    # create. Imported lazily at the call sites so a deployment that
+    # never touches schedules still imports the package without it.
+    "croniter>=2.0.0",
 ]
 
 [project.optional-dependencies]

@@ -93,6 +93,14 @@ def _run_tick(store: JobStorage, secrets: dict) -> int:
     # write then preserves it. Correcting it here each tick makes the
     # coordinator the single sizing authority instead of waiting for
     # fleet-wide drift.
+    # Fire recurring (cron) schedules FIRST so any job submitted this tick
+    # is visible to the assignment + dispatch passes below, instead of
+    # waiting a full interval_seconds to be picked up.
+    from .schedules import fire_due_schedules
+    n_fired = fire_due_schedules(store, log_fn=_log)
+    if n_fired:
+        _log(f"schedules: fired {n_fired} due schedule(s)")
+
     from .sizing import normalize_queue_sizing
     n_sized = normalize_queue_sizing(store, log_fn=_log)
     if n_sized:

@@ -893,6 +893,187 @@ def profiles(name):
 
 
 @main.group()
+def schedule():
+    """Manage recurring (cron) jobs — submit a command on a cron schedule.
+
+    A schedule is evaluated every coordinator tick; when it comes due the
+    coordinator submits a fresh job (resolving the same routing/sizing
+    flags as `wc submit`). Schedules live in gs://<bucket>/schedules/.
+    """
+
+
+@schedule.command("create")
+@click.argument("command")
+@click.option("--cron", "cron_expr", required=True,
+              help='5-field cron expression, e.g. "0 2 * * *" (daily 02:00).')
+@click.option("--tz", default="UTC",
+              help="IANA timezone the cron is interpreted in (default UTC).")
+@click.option("--provider", default="gcp", help="Preferred provider.")
+@click.option("--pin-provider/--any-provider", "pin_provider", default=False,
+              help="Pin to --provider, or let any consumer claim (default).")
+@click.option("--spot/--no-spot", default=DEFAULT_PREEMPTIBLE,
+              help="Dispatch on Spot/Preemptible GPUs.")
+@click.option("--max-cost-per-hour", "max_cost_per_hour", type=float,
+              default=DEFAULT_MAX_COST_PER_HOUR_USD, help="Hard $/hour cap (0 = none).")
+@click.option("--priority", type=int, default=DEFAULT_PRIORITY,
+              help="Higher = scheduled first within FIFO bucket.")
+@click.option("--gpu-type", default="", help="Pin accelerator label (e.g. 'nvidia-l4').")
+@click.option("--vram-gb", type=int, default=0, help="Caller-declared VRAM (GB).")
+@click.option("--machine-type", default="", help="Pin machine type verbatim.")
+@click.option("--repo", default="", help="Git URL to clone before running.")
+@click.option("--repo-workdir", default="", help="Override cloned-repo dir.")
+@click.option("--repo-extras", default="train", help="pip extras on the clone.")
+@click.option("--pre-command", "pre_command", default="",
+              help="Shell snippet placed before the command in the same shell.")
+@click.option("--apt", "apt_packages", default="", help="Comma-separated apt packages.")
+@click.option("--output-uri", "output_uri", default="", help="Extra gs:// output destination.")
+@click.option("--verify", "verify_command", default="",
+              help="Command that must exit 0 after success (reverses to FAILED otherwise).")
+@click.option("--exclusive", is_flag=True, default=False, help="Claim the whole GPU.")
+@click.option("--overlap-policy",
+              type=click.Choice(["skip", "allow"]), default="skip",
+              help="skip (default): don't fire while the prior instance is "
+                   "still queued/running. allow: fire regardless.")
+@click.option("--disabled", is_flag=True, default=False,
+              help="Create the schedule paused (enable later with `wc schedule resume`).")
+def schedule_create(command, cron_expr, tz, provider, pin_provider, spot,
+                    max_cost_per_hour, priority, gpu_type, vram_gb, machine_type,
+                    repo, repo_workdir, repo_extras, pre_command, apt_packages,
+                    output_uri, verify_command, exclusive, overlap_policy, disabled):
+    """Create a recurring schedule that submits COMMAND on a cron schedule."""
+    from datetime import datetime, timezone
+    from .schedules import (
+        Schedule, compute_next_due, cron_is_valid, generate_schedule_id,
+    )
+    if not cron_is_valid(cron_expr):
+        raise click.ClickException(f"invalid cron expression: {cron_expr!r}")
+    apt_list = [p.strip() for p in apt_packages.split(",") if p.strip()]
+    now = datetime.now(timezone.utc)
+    try:
+        next_due = compute_next_due(cron_expr, now, tz)
+    except Exception as e:
+        raise click.ClickException(f"could not compute next run ({tz}): {e}")
+    sid = generate_schedule_id()
+    sched = Schedule(
+        schedule_id=sid, cron=cron_expr, command=command, tz=tz,
+        enabled=not disabled,
+        provider=provider, pin_to_provider=pin_provider, preemptible=spot,
+        max_cost_per_hour_usd=max_cost_per_hour, priority=priority,
+        gpu_type=gpu_type, vram_gb=vram_gb, machine_type=machine_type,
+        repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
+        pre_command=pre_command, apt_packages=apt_list,
+        output_uri=output_uri, verify_command=verify_command, exclusive=exclusive,
+        overlap_policy=overlap_policy,
+        created_by=os.environ.get("USER", "") or os.environ.get("LOGNAME", ""),
+        next_due_at=next_due.isoformat(),
+    )
+    from .schedules.store import write_schedule
+    write_schedule(JobStorage(BUCKET), sched)
+    state = "enabled" if sched.enabled else "DISABLED"
+    click.echo(f"created schedule {sid} ({state})")
+    click.echo(f"  cron:     {cron_expr}  ({tz})")
+    click.echo(f"  next run: {next_due.isoformat()}")
+    click.echo(f"  command:  {command[:80]}")
+
+
+@schedule.command("list")
+def schedule_list():
+    """List all schedules."""
+    from .schedules.store import list_schedules
+    scheds = sorted(list_schedules(JobStorage(BUCKET)), key=lambda s: s.next_due_at or "~")
+    if not scheds:
+        click.echo("(no schedules)")
+        return
+    click.echo(f"{'ID':<14} {'EN':<3} {'CRON':<16} {'TZ':<14} {'NEXT RUN (UTC)':<28} {'FIRED':>5} {'COMMAND'}")
+    click.echo("-" * 120)
+    for s in scheds:
+        en = "Y" if s.enabled else "n"
+        cmd = " ".join(s.command.split())
+        cmd = cmd[:34] + "…" if len(cmd) > 34 else cmd
+        click.echo(f"{s.schedule_id:<14} {en:<3} {s.cron:<16} {s.tz[:12]:<14} "
+                   f"{(s.next_due_at or '-')[:26]:<28} {s.fire_count:>5} {cmd}")
+    click.echo(f"\n{len(scheds)} schedule(s)")
+
+
+@schedule.command("show")
+@click.argument("schedule_id")
+def schedule_show(schedule_id):
+    """Print a schedule's full JSON."""
+    from .schedules.store import read_schedule
+    s = read_schedule(JobStorage(BUCKET), schedule_id)
+    if s is None:
+        raise click.ClickException(f"schedule {schedule_id} not found")
+    click.echo(s.to_json())
+
+
+@schedule.command("rm")
+@click.argument("schedule_id")
+def schedule_rm(schedule_id):
+    """Delete a schedule (does not affect jobs it already submitted)."""
+    from .schedules.store import delete_schedule
+    if delete_schedule(JobStorage(BUCKET), schedule_id):
+        click.echo(f"deleted schedule {schedule_id}")
+    else:
+        raise click.ClickException(f"schedule {schedule_id} not found")
+
+
+def _set_enabled(schedule_id, enabled):
+    from .schedules.store import read_schedule, write_schedule
+    from .schedules import compute_next_due
+    from datetime import datetime, timezone
+    store = JobStorage(BUCKET)
+    s = read_schedule(store, schedule_id)
+    if s is None:
+        raise click.ClickException(f"schedule {schedule_id} not found")
+    s.enabled = enabled
+    if enabled:
+        # Recompute next_due from now so a long-paused schedule doesn't
+        # fire immediately for a stale overdue slot.
+        s.next_due_at = compute_next_due(s.cron, datetime.now(timezone.utc), s.tz).isoformat()
+    write_schedule(store, s)
+    return s
+
+
+@schedule.command("pause")
+@click.argument("schedule_id")
+def schedule_pause(schedule_id):
+    """Disable a schedule without deleting it."""
+    _set_enabled(schedule_id, False)
+    click.echo(f"paused {schedule_id}")
+
+
+@schedule.command("resume")
+@click.argument("schedule_id")
+def schedule_resume(schedule_id):
+    """Re-enable a paused schedule (next run recomputed from now)."""
+    s = _set_enabled(schedule_id, True)
+    click.echo(f"resumed {schedule_id}; next run {s.next_due_at}")
+
+
+@schedule.command("run")
+@click.argument("schedule_id")
+def schedule_run(schedule_id):
+    """Fire a schedule once right now, regardless of its next run time."""
+    from .schedules.store import read_schedule, write_schedule
+    from .queue.submit import submit_job
+    from .queue.runs import generate_run_id
+    store = JobStorage(BUCKET)
+    s = read_schedule(store, schedule_id)
+    if s is None:
+        raise click.ClickException(f"schedule {schedule_id} not found")
+    run_id = generate_run_id()
+    job = submit_job(s.command, bucket=BUCKET, run_id=run_id,
+                     schedule_id=schedule_id, **s.submit_kwargs())
+    from datetime import datetime, timezone
+    s.last_fired_at = datetime.now(timezone.utc).isoformat()
+    s.last_run_id = run_id
+    s.last_job_id = job.job_id
+    s.fire_count += 1
+    write_schedule(store, s)
+    click.echo(f"fired {schedule_id} -> job {job.job_id} (run {run_id})")
+
+
+@main.group()
 def cost():
     """Per-job and per-batch cost reporting from observed wall-times."""
 
