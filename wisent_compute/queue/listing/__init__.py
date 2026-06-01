@@ -18,6 +18,13 @@ from concurrent.futures import ThreadPoolExecutor
 from ...models import Job
 
 
+def _download_or_none(store, path: str) -> str | None:
+    try:
+        return store._download_text(path)
+    except Exception:
+        return None
+
+
 def priority_key(job: Job) -> str:
     """Sortable name component: lower = higher real priority + older."""
     prio = max(0, min(99999999, int(getattr(job, "priority", 0) or 0)))
@@ -67,7 +74,7 @@ def list_top_n(store, prefix: str, *, top_n: int) -> list[Job]:
     for i in range(0, max_scan, chunk):
         paths = marker_paths[i:min(i + chunk, max_scan)]
         with ThreadPoolExecutor(max_workers=min(10, len(paths))) as pool:
-            bodies = list(pool.map(store._download_text, paths))
+            bodies = list(pool.map(lambda p: _download_or_none(store, p), paths))
         job_ids: list[tuple[str, str]] = []
         for path, body in zip(paths, bodies):
             if not body:
@@ -80,7 +87,7 @@ def list_top_n(store, prefix: str, *, top_n: int) -> list[Job]:
 
         job_paths = [f"{prefix}/{jid}.json" for _, jid in job_ids]
         with ThreadPoolExecutor(max_workers=min(10, len(job_paths))) as pool:
-            blobs = list(pool.map(store._download_text, job_paths))
+            blobs = list(pool.map(lambda p: _download_or_none(store, p), job_paths))
         for (marker_path, _jid), data in zip(job_ids, blobs):
             if data:
                 out.append(Job.from_json(data))
