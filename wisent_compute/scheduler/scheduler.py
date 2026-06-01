@@ -96,9 +96,44 @@ def schedule_queued_jobs(
     # and downloading every JSON blew the 60s function timeout. Pick by
     # GCS time_created ascending (FIFO) — anything past _dynamic_per_tick_cap's
     # ceiling × 8 wouldn't fit in this tick's budget anyway.
-    list_cap = _dynamic_per_tick_cap(10**9) * 8
-    queued = store.list_jobs_priority_first("queue", cap=list_cap)
-    queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
+    window_budget = _dynamic_per_tick_cap(10**9) * 8
+
+    # Metadata-only prefilter (NO body downloads): keep only jobs whose
+    # accelerator has available quota this tick, so a backlog of UNDISPATCHABLE
+    # jobs cannot saturate the per-tick window and starve dispatchable work.
+    # Confirmed live 2026-06-01: 435 jobs sized to nvidia-tesla-k80 (0 fleet
+    # k80 quota) filled the 200-job FIFO window every tick -> the only bucket
+    # formed was k80 -> "Skip: 0 quota" -> scheduled 0 for the WHOLE fleet,
+    # including brand-new t4/l4 jobs queued behind the stuck backlog. write_job
+    # stamps gpu_mem_gb + priority into blob metadata, so this filters + orders
+    # the whole queue cheaply and we read only the surviving window's bodies.
+    # The stuck backlog stays queued and untouched — it just stops blocking.
+    from ..config import lookup_instance_type as _lookup_it
+    in_quota = {a for a, v in available.items() if v > 0}
+    cand: list[tuple[int, float, str]] = []  # (-priority, updated_ts, job_id)
+    skipped_no_quota = 0
+    for info in store.list_blobs_with_meta("queue/"):
+        if not info.name.endswith(".json"):
+            continue
+        meta = info.metadata or {}
+        gm = int(meta.get("gpu_mem_gb", 0) or 0)
+        # gm<=0 jobs are kept: dispatch_agent_vms re-sizes them via its own
+        # observed/smallest_live_vram recovery. Only skip jobs with a concrete
+        # size that maps to an accelerator with zero available quota.
+        if gm > 0 and _lookup_it(provider_name, gm)[1] not in in_quota:
+            skipped_no_quota += 1
+            continue
+        prio = int(meta.get("priority", 0) or 0)
+        ts = info.updated.timestamp() if getattr(info, "updated", None) else 0.0
+        cand.append((-prio, ts, info.name.split("/")[-1][:-5]))
+    if skipped_no_quota:
+        _log(f"window: skipped {skipped_no_quota} undispatchable (0-quota-accel) queued jobs")
+    cand.sort(key=lambda t: (t[0], t[1]))  # priority desc, then oldest-first (FIFO)
+    queued = []
+    for _, _, jid in cand[:window_budget]:
+        j = store.read_job("queue", jid)
+        if j is not None:
+            queued.append(j)
     now_utc = datetime.now(timezone.utc)
     full_queue_depth = len(queued)
     per_tick_cap = _dynamic_per_tick_cap(full_queue_depth)
