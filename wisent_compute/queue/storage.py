@@ -56,7 +56,14 @@ _GSUTIL = _find_gsutil()
 
 
 def _gsutil_cp(src: str, dst: str):
-    subprocess.run([_GSUTIL, "cp", src, dst], capture_output=True)
+    # Raise on failure rather than swallowing it: a silent gsutil cp failure
+    # used to leave callers believing a blob was written when it wasn't.
+    r = subprocess.run([_GSUTIL, "cp", src, dst], capture_output=True)
+    if r.returncode:
+        raise RuntimeError(
+            f"gsutil cp failed rc={r.returncode}: "
+            f"{r.stderr.decode(errors='replace').strip()}"
+        )
 
 
 def _gsutil_cat(path: str) -> str | None:
@@ -231,6 +238,11 @@ class JobStorage:
         self._delete_blob(f"{from_prefix}/{job.job_id}.json")
         if from_prefix == "queue":
             self.delete_priority_marker(job.job_id)
+        # Live re-submission tracking: write a fixed/ or failed_again/
+        # tombstone when this move terminates a re-submitted job. Never
+        # raises into the caller (the agent loop) — see tracking.tombstone.
+        from .tracking import on_transition
+        on_transition(self, job, to_prefix)
 
     # ---- delegates to queue/listing/ ----
 

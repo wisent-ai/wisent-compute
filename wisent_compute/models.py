@@ -161,6 +161,13 @@ class Job:
     # a new fire while a prior instance of the same schedule is still
     # live (overlap_policy=skip). Empty = ad-hoc job (back-compat).
     schedule_id: str = ""
+    # Provenance for re-submissions. When this job was queued as a re-run of
+    # a prior failure, re_submission_of holds the ORIGINAL failed job_id.
+    # The tracker (.work/tracker/build_tracker.sh) joins on this field to
+    # report "for each entry in failed/, did its re-submission complete?".
+    # Without it, the tracker has to guess by (task, prompt_format) match.
+    # Empty string = not a re-submission (the default for fresh jobs).
+    re_submission_of: str = ""
 
     def __post_init__(self):
         if not self.created_at:

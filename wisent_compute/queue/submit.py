@@ -107,6 +107,7 @@ def submit_job(
     exclusive: bool = False,
     run_id: str = "",
     schedule_id: str = "",
+    re_submission_of: str = "",
 ) -> Job:
     """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
@@ -123,6 +124,7 @@ def submit_job(
         pre_command=pre_command, apt_packages=apt_packages or [],
         output_uri=output_uri, verify_command=verify_command,
         exclusive=exclusive, run_id=run_id, schedule_id=schedule_id,
+        re_submission_of=re_submission_of,
     )
 
 
@@ -189,6 +191,7 @@ def _submit_via_gcs(
     exclusive: bool = False,
     run_id: str = "",
     schedule_id: str = "",
+    re_submission_of: str = "",
 ) -> Job:
     """Submit directly to GCS queue (no API server needed).
 
@@ -293,6 +296,7 @@ def _submit_via_gcs(
         verify_command=verify_command,
         exclusive=exclusive,
         schedule_id=schedule_id,
+        re_submission_of=re_submission_of,
     )
 
     store = JobStorage(bucket)
