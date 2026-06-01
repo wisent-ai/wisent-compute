@@ -19,6 +19,29 @@ def _path(schedule_id: str) -> str:
     return f"{PREFIX}/{schedule_id}.json"
 
 
+def _read_fresh_text(store, path: str) -> str | None:
+    """Fresh, generation-pinned read of `path`.
+
+    A plain no-generation download on the wisent-compute bucket can return
+    a stale (edge-cached) copy of an object that was just overwritten in
+    place — confirmed live 2026-06-01: a schedule's next_due_at update read
+    back as the OLD value via store._download_text even though the new
+    generation was already the latest. The existing queue never hit this
+    because it is write-once-then-delete; schedules overwrite the same blob
+    every tick (read-modify-write of next_due_at), which is exactly the
+    pattern the cache breaks. get_blob() fetches current metadata including
+    the generation, and the subsequent download pins to it, so the bytes
+    are guaranteed to be the latest. Falls back to the plain read on the
+    gsutil/Azure paths where no SDK bucket is available.
+    """
+    if store._sdk_bucket is None:
+        return store._download_text(path)
+    blob = store._sdk_bucket.get_blob(path)
+    if blob is None:
+        return None
+    return blob.download_as_text()
+
+
 def list_schedule_ids(store) -> list[str]:
     out = []
     for name in store._list_paths(f"{PREFIX}/"):
@@ -29,7 +52,7 @@ def list_schedule_ids(store) -> list[str]:
 
 
 def read_schedule(store, schedule_id: str) -> Schedule | None:
-    data = store._download_text(_path(schedule_id))
+    data = _read_fresh_text(store, _path(schedule_id))
     return Schedule.from_json(data) if data else None
 
 
