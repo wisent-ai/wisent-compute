@@ -108,8 +108,19 @@ def submit_job(
     run_id: str = "",
     schedule_id: str = "",
     re_submission_of: str = "",
+    yieldable: bool = False,
+    yield_command: str = "",
+    yield_grace_seconds: int = 120,
 ) -> Job:
     """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
+    # Cooperative-yield contract: a yieldable job MUST declare how to save
+    # and step aside. No silent kill-and-lose-progress path — refuse here so
+    # the error surfaces at submit, not mid-eviction in prod.
+    if yieldable and not (yield_command or "").strip():
+        raise ValueError(
+            "yieldable=True requires a yield_command (the save-and-sync hook "
+            "run on eviction). Pass --on-yield '<command>' or drop --yieldable."
+        )
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
     if api_key:
         return _submit_via_api(command, api_key, provider)
@@ -125,6 +136,8 @@ def submit_job(
         output_uri=output_uri, verify_command=verify_command,
         exclusive=exclusive, run_id=run_id, schedule_id=schedule_id,
         re_submission_of=re_submission_of,
+        yieldable=yieldable, yield_command=yield_command,
+        yield_grace_seconds=yield_grace_seconds,
     )
 
 
@@ -192,6 +205,9 @@ def _submit_via_gcs(
     run_id: str = "",
     schedule_id: str = "",
     re_submission_of: str = "",
+    yieldable: bool = False,
+    yield_command: str = "",
+    yield_grace_seconds: int = 120,
 ) -> Job:
     """Submit directly to GCS queue (no API server needed).
 
@@ -297,6 +313,9 @@ def _submit_via_gcs(
         exclusive=exclusive,
         schedule_id=schedule_id,
         re_submission_of=re_submission_of,
+        yieldable=yieldable,
+        yield_command=yield_command,
+        yield_grace_seconds=yield_grace_seconds,
     )
 
     store = JobStorage(bucket)

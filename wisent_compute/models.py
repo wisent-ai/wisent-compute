@@ -168,6 +168,23 @@ class Job:
     # Without it, the tracker has to guess by (task, prompt_format) match.
     # Empty string = not a re-submission (the default for fresh jobs).
     re_submission_of: str = ""
+    # Cooperative-yield (background) job contract. When yieldable=True the
+    # local agent may EVICT this slot to make room for a strictly-higher-
+    # priority queued job that doesn't otherwise fit: it runs yield_command
+    # (the job's save-and-sync hook, with WC_JOB_PID set to the job's
+    # process-group leader), waits up to yield_grace_seconds for the process
+    # to exit cleanly, SIGKILLs the group only if the grace is blown, then
+    # requeues the job (running -> queue, state QUEUED, NOT failed). Resume
+    # is the job's own business (checkpoint pull, server-side state, etc.).
+    # yieldable is REFUSED at submit time unless yield_command is set — there
+    # is no silent kill-and-lose-progress path. yield_count is bookkeeping;
+    # after max_yields_before_protected yields the job stops being evictable
+    # so a stream of high-priority work can't starve it forever.
+    yieldable: bool = False
+    yield_command: str = ""
+    yield_grace_seconds: int = 120
+    yield_count: int = 0
+    max_yields_before_protected: int = 5
 
     def __post_init__(self):
         if not self.created_at:

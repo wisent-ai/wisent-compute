@@ -50,6 +50,10 @@ SETTLE_AFTER_CLAIM_SECONDS = 5
 # LAST line of defense — if the per-job estimate is wrong, this catches
 # it before the n+1th job OOMs the entire VM.
 VRAM_SAFETY_BUFFER_GB = 8
+# Cooperative-yield anti-thrash floor: never evict a yieldable slot that has
+# run for less than this, so a just-(re)started background job gets real work
+# done before it can be bumped again. Pairs with Job.max_yields_before_protected.
+MIN_RUNTIME_BEFORE_YIELD_S = 300
 
 
 def _log(msg):
@@ -97,6 +101,79 @@ def _reap_orphan_workdirs(hostname: str) -> None:
         shutil.rmtree(d, ignore_errors=True)
     if wc_dirs:
         _log(f"reaped {len(wc_dirs)} stale /tmp/wc-* dirs")
+
+
+def _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
+                              free_vram_gb, kind, consumer_id, log_fn) -> int:
+    """If a strictly-higher-priority eligible queued job can't fit in the
+    current free VRAM, cooperatively yield just enough lower-priority
+    yieldable slots to make room. Returns the number of slots yielded
+    (removed from `slots`); 0 means no action.
+
+    Inert by construction: returns immediately unless a yieldable job is
+    actually running, so existing (non-yieldable) prod workloads never enter
+    the queue scan or any eviction logic.
+    """
+    if not any(getattr(s["job"], "yieldable", False) for s in slots):
+        return 0
+    from .local.slots import request_yield
+    # Highest-priority queued job that needs MORE than current free VRAM but
+    # could fit on the full GPU, and is eligible for THIS agent.
+    candidates = store.list_jobs_fitting("queue", max_gpu_mem_gb=total_vram_gb, cap=200)
+    candidates.sort(key=lambda j: (-int(getattr(j, "priority", 0) or 0), j.created_at))
+    target = None
+    for j in candidates:
+        need_j = max(int(getattr(j, "gpu_mem_gb", 0) or 0),
+                     estimate_gpu_memory(getattr(j, "command", "") or ""))
+        if need_j <= free_vram_gb:
+            continue  # already fits — not a VRAM-eviction case
+        if not _job_eligible(j, gpu_type, total_vram_gb, kind=kind,
+                             consumer_id=consumer_id, active_slot_count=len(slots)):
+            continue
+        target, need = j, need_j
+        break
+    if target is None:
+        return 0
+    target_prio = int(getattr(target, "priority", 0) or 0)
+
+    now_mono = time.monotonic()
+    evictable = []
+    for s in slots:
+        j = s["job"]
+        if not getattr(j, "yieldable", False) or _slot_is_exclusive(s):
+            continue
+        if int(getattr(j, "priority", 0) or 0) >= target_prio:
+            continue
+        if int(getattr(j, "yield_count", 0) or 0) >= int(getattr(j, "max_yields_before_protected", 5) or 5):
+            continue
+        if now_mono - s.get("started_mono", now_mono) < MIN_RUNTIME_BEFORE_YIELD_S:
+            continue
+        evictable.append(s)
+    if not evictable:
+        return 0
+    # Evict lowest-priority first; among equal priority, free the largest slot
+    # first so we yield as few jobs as possible.
+    evictable.sort(key=lambda s: (int(getattr(s["job"], "priority", 0) or 0), -_slot_vram(s)))
+    freed, chosen = 0, []
+    for s in evictable:
+        chosen.append(s)
+        freed += _slot_vram(s)
+        if free_vram_gb + freed >= need:
+            break
+    if free_vram_gb + freed < need:
+        return 0  # even yielding every candidate won't fit it — don't waste a yield
+    n = 0
+    for s in chosen:
+        try:
+            if request_yield(s, store, log_fn):
+                slots.remove(s)
+                n += 1
+        except Exception as e:
+            log_fn(f"yield: request_yield raised for {s['job'].job_id}: {e}")
+    if n:
+        log_fn(f"yield: freed ~{freed}G via {n} slot(s) for higher-priority "
+               f"{target.job_id} (need={need}G prio={target_prio})")
+    return n
 
 
 def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "local"):
@@ -227,6 +304,14 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         publish_capacity(store, consumer_id, kind, free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
         _last_cap = {"free_slots": free_slots, "free_vram_gb": free_vram_gb, "total_vram_gb": total_vram_gb, "diag": dict(agent_diag)}
+
+        # Cooperative yield: if a higher-priority queued job can't fit, evict
+        # just enough lower-priority yieldable slots to make room. Runs BEFORE
+        # the full-GPU early-return below because that is exactly when it's
+        # needed. Inert (single any() over slots) unless a yieldable job runs.
+        if _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
+                                     free_vram_gb, kind, consumer_id, _log):
+            continue  # re-loop: recompute free VRAM, then claim the freed room
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
             time.sleep(10)

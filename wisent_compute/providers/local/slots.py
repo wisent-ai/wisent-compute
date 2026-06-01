@@ -277,13 +277,103 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     proc = subprocess.Popen(
         full_command, shell=True, stdout=log_file, stderr=subprocess.STDOUT,
         cwd=work_dir, env=job_env,
+        # Own session/process group so a cooperative yield (request_yield)
+        # can signal the WHOLE job tree via the group, and SIGKILL it
+        # cleanly if the grace is blown — without that, killing only the
+        # shell pid would orphan the GPU process and never free its VRAM.
+        # The existing Vast SIGSTOP/SIGCONT still target proc.pid directly,
+        # so their behavior is unchanged.
+        start_new_session=True,
     )
     log_fn(f"Started job {job.job_id}: {job.command[:60]}")
     _write_heartbeat(store, job.job_id)
     _start_heartbeat_thread(store, job.job_id, proc)
     last_hb = time.time()
     return {"proc": proc, "job": job, "log_file": log_file,
-            "last_hb": last_hb, "paused": False, "peak_vram_gb": 0}
+            "last_hb": last_hb, "paused": False, "peak_vram_gb": 0,
+            "started_mono": time.monotonic()}
+
+
+def request_yield(slot: dict, store: JobStorage, log_fn) -> bool:
+    """Cooperatively yield a running slot to free its VRAM for higher-priority
+    work. Returns True once the job has been requeued.
+
+    Sequence (total bounded by job.yield_grace_seconds):
+      1. Run the job's yield_command (the save-and-sync hook) in the job
+         workdir with WC_JOB_PID set to the process-group leader, so the hook
+         can signal the job, persist state + artifacts externally, and let it
+         exit.
+      2. Wait for the process to exit on its own within the remaining grace.
+      3. SIGKILL the whole process group only if the grace is blown (logged
+         loudly — a timed-out yield means the hook didn't actually stop it).
+      4. Requeue: running -> queue, state QUEUED, yield_count++, clear
+         instance_ref/started_at. NOT marked FAILED — resume is the job's own
+         business (checkpoint pull, server-side state, ...).
+
+    The slot's process was started with start_new_session=True, so proc.pid
+    is the process-group id.
+    """
+    proc = slot["proc"]
+    job = slot["job"]
+    pgid = proc.pid
+    grace = int(getattr(job, "yield_grace_seconds", 120) or 120)
+    hook = (getattr(job, "yield_command", "") or "").strip()
+    work_dir = f"/tmp/wc-{job.job_id}"
+    deadline = time.time() + grace
+    log_fn(f"yield: requesting yield of {job.job_id} (grace={grace}s, pgid={pgid})")
+
+    if hook:
+        hook_env = {**os.environ, "WC_JOB_ID": job.job_id, "WC_JOB_PID": str(pgid)}
+        remaining = max(1, int(deadline - time.time()))
+        try:
+            hres = subprocess.run(
+                hook, shell=True,
+                cwd=work_dir if Path(work_dir).exists() else None,
+                env=hook_env, capture_output=True, text=True, timeout=remaining,
+            )
+            if hres.returncode != 0:
+                log_fn(f"yield: on-yield hook {job.job_id} rc={hres.returncode}: "
+                       f"{(hres.stderr or hres.stdout or '')[:200]}")
+        except subprocess.TimeoutExpired:
+            log_fn(f"yield: on-yield hook {job.job_id} exceeded grace; terminating")
+        except Exception as e:
+            log_fn(f"yield: on-yield hook {job.job_id} raised: {e}")
+
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(1)
+    if proc.poll() is None:
+        log_fn(f"yield: {job.job_id} still alive after grace — SIGKILL group {pgid}")
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+
+    try:
+        slot["log_file"].flush()
+        slot["log_file"].close()
+    except Exception:
+        pass
+
+    job.yield_count = int(getattr(job, "yield_count", 0) or 0) + 1
+    job.state = JobState.QUEUED.value
+    job.instance_ref = None
+    job.started_at = None
+    _write_status(store, job.job_id, f"YIELDED {datetime.now(timezone.utc).isoformat()}")
+    output_dir = f"/tmp/wc-{job.job_id}/output"
+    try:
+        if Path(output_dir).exists():
+            _upload_output(store, job.job_id, output_dir)
+    except Exception as e:
+        log_fn(f"yield: output upload {job.job_id} failed (non-fatal): {e}")
+    # running -> queue (NOT a terminal state, so the tracking tombstone hook
+    # is a no-op and the CF monitor leaves it alone once out of running/).
+    store.move_job(job, "running", "queue")
+    log_fn(f"yield: {job.job_id} requeued (yield_count={job.yield_count})")
+    return True
 
 
 def _tail_log(path: str, max_bytes: int = 4096) -> str:

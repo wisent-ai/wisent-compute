@@ -87,6 +87,20 @@ def main():
                    "empty slot and refuses to admit any other job while it runs. "
                    "Use for diffusion training / full-finetunes whose peak VRAM "
                    "can't be safely co-tenanted.")
+@click.option("--yieldable", is_flag=True, default=False,
+              help="Background job: the local agent may EVICT this slot for a "
+                   "strictly-higher-priority queued job that doesn't otherwise "
+                   "fit. Requires --on-yield. The agent runs that hook (with "
+                   "WC_JOB_PID set), waits --yield-grace, then requeues the job "
+                   "(resumes from wherever the hook saved state).")
+@click.option("--on-yield", "yield_command", default="",
+              help="Save-and-sync command run when the agent yields this job. "
+                   "Responsible for telling the job to stop, persisting state "
+                   "+ artifacts (server/GCS/HF), and letting it exit. Required "
+                   "with --yieldable.")
+@click.option("--yield-grace", "yield_grace_seconds", type=int, default=120,
+              help="Seconds the --on-yield hook + clean exit get before the "
+                   "agent SIGKILLs the process group (default 120).")
 @click.option("--profile", "profile_name", default="",
               help="Apply a named profile from wisent_compute/profiles/ (or "
                    "$WC_PROFILES_DIR). CLI flags override profile fields. "
@@ -96,8 +110,15 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
            gpu_type, vram_gb, machine_type,
            pre_command, apt_packages, output_uri, verify_command,
            exclusive,
+           yieldable, yield_command, yield_grace_seconds,
            profile_name):
     """Submit a job (or batch) to the queue."""
+    if yieldable and not yield_command.strip():
+        raise click.ClickException(
+            "--yieldable requires --on-yield '<command>': a yieldable job must "
+            "declare how it saves state and steps aside. There is no silent "
+            "kill-and-restart path."
+        )
     apt_list = [p.strip() for p in apt_packages.split(",") if p.strip()]
 
     # Profile merge — CLI args win on conflict. The submit_job kwargs
@@ -155,6 +176,8 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         pre_command=pre_command, apt_packages=apt_list,
         output_uri=output_uri, verify_command=verify_command,
         exclusive=exclusive,
+        yieldable=yieldable, yield_command=yield_command,
+        yield_grace_seconds=yield_grace_seconds,
     )
     click.echo(f"  submitted {n}/{len(commands)} jobs")
     mode = "API" if _api_key() else "GCS"
