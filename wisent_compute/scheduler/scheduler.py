@@ -199,7 +199,17 @@ def schedule_queued_jobs(
             score = (wall_s / 3600.0) * rate / need  # $-saved per GB on this job
             scored.append((score, need, j))
         scored.sort(key=lambda t: -t[0])
-        local_remaining = dict(local_vram_pool)
+        # Reserve the local agent's admission safety buffer (VRAM_SAFETY_BUFFER_GB
+        # = 8 in providers/local_agent.py) so we don't yield a job the agent then
+        # REFUSES at admission (it rejects when projected_used > total - buffer).
+        # Over-committing on raw broadcast free_vram stranded jobs: yielded to the
+        # local agent but rejected by it, AND skipped by cloud dispatch because
+        # they were yielded. Confirmed live 2026-06-01: a 16GB job yielded to
+        # local-ubuntu-server (75/98 GB used, ~22 free) sat unclaimed forever
+        # (22 - 8 = 14 < 16). Reserving the buffer routes such jobs to cloud.
+        LOCAL_ADMISSION_BUFFER_GB = 8
+        local_remaining = {cid: max(0, v - LOCAL_ADMISSION_BUFFER_GB)
+                           for cid, v in local_vram_pool.items()}
         for score, need, j in scored:
             best_cid = None
             best_free = -1
