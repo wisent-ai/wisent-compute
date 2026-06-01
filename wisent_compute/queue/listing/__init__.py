@@ -52,28 +52,40 @@ def list_top_n(store, prefix: str, *, top_n: int) -> list[Job]:
         return []
     marker_paths = sorted(
         p for p in store._list_paths("queue_priority/") if p.endswith(".json")
-    )[:top_n]
+    )
     if not marker_paths:
         return []
-    workers = min(10, max(1, len(marker_paths)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        bodies = list(pool.map(store._download_text, marker_paths))
-    job_ids: list[str] = []
-    for b in bodies:
-        if not b:
-            continue
-        jid = json.loads(b).get("job_id")
-        if jid:
-            job_ids.append(jid)
-    if not job_ids:
-        return []
-    job_paths = [f"{prefix}/{j}.json" for j in job_ids]
-    with ThreadPoolExecutor(max_workers=min(10, len(job_paths))) as pool:
-        blobs = list(pool.map(store._download_text, job_paths))
+
+    # Stale priority markers are expected: a job can move out of queue/ after
+    # its marker was written, and older versions only deleted markers on the
+    # queue -> running path. Do not let stale top markers consume the whole
+    # top_n budget, or high-priority fresh jobs disappear behind dead markers.
+    # Keep the scan bounded because agents call this in their polling loop.
     out: list[Job] = []
-    for data in blobs:
-        if data:
-            out.append(Job.from_json(data))
+    chunk = max(50, top_n)
+    max_scan = min(len(marker_paths), max(top_n * 20, top_n))
+    for i in range(0, max_scan, chunk):
+        paths = marker_paths[i:min(i + chunk, max_scan)]
+        with ThreadPoolExecutor(max_workers=min(10, len(paths))) as pool:
+            bodies = list(pool.map(store._download_text, paths))
+        job_ids: list[tuple[str, str]] = []
+        for path, body in zip(paths, bodies):
+            if not body:
+                continue
+            jid = json.loads(body).get("job_id")
+            if jid:
+                job_ids.append((path, jid))
+        if not job_ids:
+            continue
+
+        job_paths = [f"{prefix}/{jid}.json" for _, jid in job_ids]
+        with ThreadPoolExecutor(max_workers=min(10, len(job_paths))) as pool:
+            blobs = list(pool.map(store._download_text, job_paths))
+        for (marker_path, _jid), data in zip(job_ids, blobs):
+            if data:
+                out.append(Job.from_json(data))
+                if len(out) >= top_n:
+                    return out
     return out
 
 
