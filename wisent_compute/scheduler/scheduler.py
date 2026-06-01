@@ -105,8 +105,9 @@ def schedule_queued_jobs(
     # k80 quota) filled the 200-job FIFO window every tick -> the only bucket
     # formed was k80 -> "Skip: 0 quota" -> scheduled 0 for the WHOLE fleet,
     # including brand-new t4/l4 jobs queued behind the stuck backlog. write_job
-    # stamps gpu_mem_gb + priority into blob metadata, so this filters + orders
-    # the whole queue cheaply and we read only the surviving window's bodies.
+    # stamps gpu_mem_gb, gpu_type, and priority into blob metadata, so this
+    # filters + orders the whole queue cheaply and we read only the surviving
+    # window's bodies.
     # The stuck backlog stays queued and untouched — it just stops blocking.
     from ..config import lookup_instance_type as _lookup_it
     in_quota = {a for a, v in available.items() if v > 0}
@@ -117,10 +118,12 @@ def schedule_queued_jobs(
             continue
         meta = info.metadata or {}
         gm = int(meta.get("gpu_mem_gb", 0) or 0)
+        explicit_accel = (meta.get("gpu_type") or "").strip()
         # gm<=0 jobs are kept: dispatch_agent_vms re-sizes them via its own
         # observed/smallest_live_vram recovery. Only skip jobs with a concrete
         # size that maps to an accelerator with zero available quota.
-        if gm > 0 and _lookup_it(provider_name, gm)[1] not in in_quota:
+        accel_for_filter = explicit_accel or (_lookup_it(provider_name, gm)[1] if gm > 0 else "")
+        if accel_for_filter and accel_for_filter not in in_quota:
             skipped_no_quota += 1
             continue
         prio = int(meta.get("priority", 0) or 0)

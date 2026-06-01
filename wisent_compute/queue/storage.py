@@ -205,6 +205,7 @@ class JobStorage:
         meta = {
             "gpu_mem_gb": str(int(getattr(job, "gpu_mem_gb", 0) or 0)),
             "priority": str(int(getattr(job, "priority", 0) or 0)),
+            "gpu_type": str(getattr(job, "gpu_type", "") or ""),
         }
         if self._azure_backend is not None:
             self._azure_backend.set_metadata(blob_path, meta)
