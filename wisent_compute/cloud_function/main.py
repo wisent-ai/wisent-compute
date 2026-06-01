@@ -56,6 +56,16 @@ def monitor_jobs(request=None):
     if _publisher is None:
         _publisher = pubsub_v1.PublisherClient()
 
+    # Fire due recurring (cron) schedules FIRST so any job submitted this
+    # tick flows through the sizing -> assign -> dispatch passes below
+    # instead of waiting a full Cloud Scheduler interval. This is the
+    # DEPLOYED prod path; coordinator._run_tick mirrors it for the
+    # `wc coordinator` daemon.
+    from wisent_compute.schedules import fire_due_schedules
+    n_fired = fire_due_schedules(store, log_fn=_log)
+    if n_fired:
+        _log(f"schedules: fired {n_fired} due schedule(s)")
+
     # Coordinator-authoritative sizing, BEFORE assignment. A pre-0.4.237
     # agent that requeues a job writes the OLD hardcoded
     # estimate_gpu_memory value (gpt-oss-20b 64/12/80); makespan's
