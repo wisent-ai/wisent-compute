@@ -68,8 +68,12 @@ def _live_agents(store: JobStorage, now: dt.datetime) -> dict[str, dict]:
         # 2026-05-17). Skip an agent with no free VRAM AND no free slots.
         if int(doc.get("free_vram_gb") or 0) <= 0 and not (doc.get("free_slots") or {}):
             continue
-        agents[cid] = {"total_vram_gb": int(doc.get("total_vram_gb") or 0),
-                       "active_slots": []}
+        agents[cid] = {
+            "kind": doc.get("kind") or cid.split("-", 1)[0],
+            "free_slots": dict(doc.get("free_slots") or {}),
+            "total_vram_gb": int(doc.get("total_vram_gb") or 0),
+            "active_slots": [],
+        }
     return agents
 
 
@@ -162,8 +166,21 @@ def _assign_one(job, agents: dict[str, dict], runtime: float, vram: int) -> Opti
     best_cid: Optional[str] = None
     best_finish: Optional[float] = None
     for cid, info in agents.items():
+        # Keep optimizer-side assignment aligned with agent-side eligibility.
+        # A provider-pinned job assigned to a different consumer kind becomes
+        # unclaimable: the pinned agent refuses it, and the assigned agent
+        # also refuses it. Confirmed live with a gcp-pinned smoke assigned to
+        # local-ubuntu-server.
+        if getattr(job, "pin_to_provider", False) and job.provider != info.get("kind"):
+            continue
         if info["total_vram_gb"] < vram:
             continue
+        accel = getattr(job, "gpu_type", "") or ""
+        free_slots = info.get("free_slots") or {}
+        if accel and accel not in free_slots:
+            from ...providers.local.helpers import _compat_accel_types
+            if accel not in _compat_accel_types(info["total_vram_gb"]):
+                continue
         start = _earliest_start(info["active_slots"], vram, info["total_vram_gb"])
         finish = start + runtime
         if best_finish is None or finish < best_finish:
