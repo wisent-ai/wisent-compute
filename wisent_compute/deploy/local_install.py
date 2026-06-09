@@ -124,6 +124,19 @@ def _wc_fix_bin() -> str:
     return "wc-fix"
 
 
+def _wc_watchdog_bin() -> str:
+    found = shutil.which("wc-watchdog")
+    if found:
+        return found
+    for cand in (
+        Path.home() / "Library" / "Python" / "3.12" / "bin" / "wc-watchdog",
+        Path.home() / ".local" / "bin" / "wc-watchdog",
+    ):
+        if cand.is_file():
+            return str(cand)
+    return "wc-watchdog"
+
+
 def _exec_args_for(entry, kind: str) -> list[str]:
     bin_path = _wc_bin()
     if kind == "agent":
@@ -149,6 +162,8 @@ def _exec_args_for(entry, kind: str) -> list[str]:
             "/bin/bash", "-c",
             f"while true; do {wc_fix} scan-dispatch --execute {pat_arg}; sleep {_tick}; done",
         ]
+    if kind == "watchdog":
+        return [_wc_watchdog_bin()]
     raise ValueError(f"unknown install kind: {kind}")
 
 
@@ -211,7 +226,7 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
     # returns 0 failed/ blobs every tick (confirmed 2026-05-22, 273
     # quota-burn ticks all emitted {"results": [], "count": 0}). HF
     # token is forwarded so the verify_command's curl HEAD works.
-    if kind == "failure-fixer":
+    if kind in ("failure-fixer", "watchdog"):
         env["PATH"] = os.environ.get(
             "PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         )
@@ -219,6 +234,7 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
             v = os.environ.get(k, "")
             if v:
                 env[k] = v
+        env["WC_BUCKET"] = os.environ.get("WC_BUCKET", "wisent-compute")
 
     if dry_run:
         echo(f"[dry-run] {kind}={entry.name} on {platform.system()}")

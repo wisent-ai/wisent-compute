@@ -49,6 +49,7 @@ dev = ["functions-framework>=3.0.0"]
 wc = "wisent_compute.cli:main"
 wc-coverage = "wisent_compute.coverage.cli:main"
 wc-fix = "wisent_compute.failure_fixer.cli:main"
+wc-watchdog = "wisent_compute.deploy.watchdog.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["wisent_compute*"]

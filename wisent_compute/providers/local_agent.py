@@ -191,10 +191,10 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     """
     from .local.slots import advance_slot, start_slot
     from ..targets import lookup_self
-    if not gpu_type:
-        gpu_type = _detect_gpu_type()
+    if not gpu_type: gpu_type = _detect_gpu_type()
     total_vram_gb = max(1, _detect_local_vram_gb())
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
+    if kind == "local" and hard_slot_cap <= 0: hard_slot_cap = 1
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
     setup_agent_staging(_log)
 

@@ -33,6 +33,26 @@ User={user}
 WantedBy=multi-user.target
 """
 
+WATCHDOG_UNIT_TEMPLATE = """[Unit]
+Description=Wisent Compute diagnostics watchdog ({name})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+Environment=GOOGLE_CLOUD_PROJECT=wisent-480400
+Environment=GCP_PROJECT=wisent-480400
+Environment=WC_BUCKET=wisent-compute
+ExecStart={watchdog_bin}
+Restart=on-failure
+RestartSec=30
+User={user}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
 REMOTE_INSTALL_SCRIPT = """set -euo pipefail
 python3 -m pip install --upgrade --user wisent-compute >/tmp/wc_install.log 2>&1
 WC_BIN="$(python3 -c 'import shutil,sys; sys.stdout.write(shutil.which(\"wc\") or \"\")')"
@@ -58,16 +78,24 @@ def _resolve_remote_wc(ssh_target: str) -> str:
     return out[-1] if out else ""
 
 
-def _write_unit(ssh_target: str, unit_text: str) -> None:
+def _write_unit(ssh_target: str, unit_name: str, unit_text: str) -> None:
     payload = unit_text.replace("\\", "\\\\").replace("'", "'\\''")
+    unit_path = shlex.quote(f"/etc/systemd/system/{unit_name}")
+    unit_arg = shlex.quote(unit_name)
     cmd = (
-        f"echo '{payload}' | sudo tee /etc/systemd/system/wisent-compute-agent.service "
+        f"echo '{payload}' | sudo tee {unit_path} "
         f">/dev/null && sudo systemctl daemon-reload && "
-        f"sudo systemctl enable --now wisent-compute-agent.service"
+        f"sudo systemctl enable --now {unit_arg}"
     )
     r = _run_ssh(ssh_target, cmd)
     if r.returncode != 0:
         raise RuntimeError(f"unit install failed: {r.stderr or r.stdout}")
+
+
+def _sibling_bin(wc_bin: str, name: str) -> str:
+    if wc_bin.endswith("/wc"):
+        return wc_bin[:-2] + name
+    return name
 
 
 def _provision(target, dry_run: bool, echo: Callable[[str], None]) -> None:
@@ -89,16 +117,26 @@ def _provision(target, dry_run: bool, echo: Callable[[str], None]) -> None:
         wc_bin=wc_bin,
         user=user,
     )
+    watchdog_text = WATCHDOG_UNIT_TEMPLATE.format(
+        name=target.name,
+        watchdog_bin=_sibling_bin(wc_bin, "wc-watchdog"),
+        user=user,
+    )
 
     if dry_run:
         echo(f"--- {target.name} systemd unit ---")
         for line in unit_text.splitlines():
             echo(f"  {line}")
+        echo(f"--- {target.name} watchdog systemd unit ---")
+        for line in watchdog_text.splitlines():
+            echo(f"  {line}")
         echo(f"--- ssh command (would run): ssh {shlex.quote(ssh_target)} 'install + enable' ---")
         return
 
     echo(f"[unit] {target.name}: writing /etc/systemd/system/wisent-compute-agent.service")
-    _write_unit(ssh_target, unit_text)
+    _write_unit(ssh_target, "wisent-compute-agent.service", unit_text)
+    echo(f"[unit] {target.name}: writing /etc/systemd/system/wisent-compute-watchdog.service")
+    _write_unit(ssh_target, "wisent-compute-watchdog.service", watchdog_text)
     echo(f"[ok]   {target.name}: enabled, agent running with WC_LOCAL_SLOTS={target.slots}")
 
 
@@ -131,6 +169,11 @@ def run_bootstrap(target, dry_run: bool, local_install: bool,
             from types import SimpleNamespace
             install_local(SimpleNamespace(name="failure-fixer"),
                           "failure-fixer", dry_run, echo)
+            return
+        if target == "watchdog":
+            from types import SimpleNamespace
+            install_local(SimpleNamespace(name="watchdog"),
+                          "watchdog", dry_run, echo)
             return
         t = lookup(target)
         if t and t.kind == "local":
