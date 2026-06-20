@@ -25,6 +25,11 @@ from ..models import Job
 _SENTINEL_PATH = "queue_priority/.migration.json"
 BACKFILL_BATCH = 500
 _DOWNLOAD_WORKERS = 10
+CURSOR_KEY = "cursor"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
 
 
 def _read_sentinel(store) -> dict:
@@ -62,7 +67,7 @@ def backfill_priority_markers(store, *, batch: int = BACKFILL_BATCH) -> bool:
     if state.get("done"):
         return True
     paths = sorted(p for p in store._list_paths("queue/") if p.endswith(".json"))
-    cursor = state.get("cursor", "") or ""
+    cursor = _dict_value(state, CURSOR_KEY, "") or ""
     if cursor:
         paths = paths[bisect_right(paths, cursor):]
     if not paths:

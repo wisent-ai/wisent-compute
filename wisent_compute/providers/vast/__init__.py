@@ -28,6 +28,16 @@ import urllib.request
 
 _VAST_BASE = "https://console.vast.ai/api/v0"
 _AUTO_LIST_THREAD_RUNNING = False  # set True when auto_list_loop starts
+ID_KEY = "id"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 class VastConfigError(RuntimeError):
@@ -146,7 +156,7 @@ def machine_status() -> dict:
     resp = _request("GET", "/machines/?owner=me", None)
     machines = resp.get("machines") or resp.get("results") or []
     for m in machines:
-        if int(m.get("id", -1)) == mid:
+        if _dict_number(m, ID_KEY, -1) == mid:
             return m
     return {"id": mid, "error": "not found in /machines/?owner=me response"}
 

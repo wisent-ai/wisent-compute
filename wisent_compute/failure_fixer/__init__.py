@@ -43,6 +43,16 @@ DISPATCH_FAILED = "dispatch_failed"
 DRY_RUN = "dry_run"
 ALREADY_DISPATCHED = "already_dispatched"
 CLAUDE_NOT_FOUND = "claude_cli_not_found"
+ATTEMPTS_KEY = "attempts"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 @dataclass
@@ -151,7 +161,7 @@ def dispatch_fix(rec: FailureRecord, *, store: JobStorage | None = None, execute
     dispatch payload without exec'ing."""
     store = store or JobStorage(BUCKET)
     state = state_load(store, rec.job_id)
-    attempts = state.get("attempts", 0)
+    attempts = _dict_number(state, ATTEMPTS_KEY)
     if attempts >= FAILURE_FIXER_ATTEMPT_CAP:
         return {"job_id": rec.job_id, "status": EXHAUSTED, "attempts": attempts}
     prompt = format_fix_prompt(rec)
@@ -216,7 +226,7 @@ def scan_and_dispatch(
     ):
         if skip_dispatched:
             prior = state_load(store, rec.job_id)
-            if prior.get("attempts", 0) > 0:
+            if _dict_number(prior, ATTEMPTS_KEY) > 0:
                 out.append({"job_id": rec.job_id, "status": ALREADY_DISPATCHED,
                             "attempts": prior["attempts"]})
                 continue

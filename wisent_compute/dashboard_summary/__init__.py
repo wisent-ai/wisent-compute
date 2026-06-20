@@ -21,6 +21,23 @@ from ..queue.storage import JobStorage
 
 _MODEL_RE = re.compile(r"--model\s+['\"]?([^'\"\s]+)")
 _TASK_RE = re.compile(r"--task\s+(\S+)")
+PUBLISHED_AT_KEY = "published_at"
+COMPLETED_AT_KEY = "completed_at"
+QUEUE_KEY = "queue"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
+
+
+def _dict_text(data: dict, key: str, default: str = "") -> str:
+    value = _dict_value(data, key, default)
+    return str(value if value is not None else default)
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -60,7 +77,7 @@ def _read_capacity_blobs(store: JobStorage) -> list[dict]:
         data["_blob_name"] = blob.name
         data["_blob_updated"] = blob.updated.isoformat() if blob.updated else None
         blobs.append(data)
-    blobs.sort(key=lambda d: d.get("published_at") or "", reverse=True)
+    blobs.sort(key=lambda d: _dict_text(d, PUBLISHED_AT_KEY), reverse=True)
     return blobs
 
 
@@ -113,7 +130,7 @@ def _summarize(store: JobStorage) -> dict[str, Any]:
                 })
 
     completed_recent.sort(
-        key=lambda r: r.get("completed_at") or "", reverse=True)
+        key=lambda r: _dict_text(r, COMPLETED_AT_KEY), reverse=True)
 
     capacity = _read_capacity_blobs(store)
     now = datetime.now(timezone.utc)
@@ -146,7 +163,7 @@ def _summarize(store: JobStorage) -> dict[str, Any]:
     for a in live_agents:
         for n in (a.get("free_slots") or {}).values():
             live_slots += int(n)
-    queue_depth = counts.get("queue", 0)
+    queue_depth = _dict_number(counts, QUEUE_KEY)
     projected_remaining_seconds: float | None = None
     if avg_wall and live_slots > 0:
         projected_remaining_seconds = avg_wall * queue_depth / live_slots

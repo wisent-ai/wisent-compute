@@ -17,6 +17,10 @@ from ...models import Job, JobState
 from ...queue.storage import JobStorage
 
 
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
+
+
 def safe_delete_vm_by_hostname(provider, hostname, vm_cache, log_fn) -> bool:
     """Best-effort delete of a GCE VM named `hostname`.
 
@@ -37,7 +41,7 @@ def safe_delete_vm_by_hostname(provider, hostname, vm_cache, log_fn) -> bool:
     a delete call returned cleanly. Idempotent and safe on a VM that is
     truly gone (returns False).
     """
-    full_ref = vm_cache.get(hostname) if isinstance(vm_cache, dict) else None
+    full_ref = _dict_value(vm_cache, hostname, None) if isinstance(vm_cache, dict) else None
     if not full_ref:
         try:
             for r, _age in provider.list_running_instance_refs_with_age():

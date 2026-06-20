@@ -28,10 +28,24 @@ from .reap.helpers import (
     safety_is_real_race, requeue_dead_local_host_orphan,
 )
 
+JOB_HEARTBEAT_FRESH_SECONDS = 1800
+CHECKPOINT_FRESH_SECONDS = 5400
+
 
 def _log(msg):
     sys.stderr.write(f"[monitor] {msg}\n")
     sys.stderr.flush()
+
+
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
+
+
+def _ref_job_ids(ref_to_jids: dict, *refs) -> list:
+    out: list = []
+    for ref in refs:
+        out.extend(_dict_value(ref_to_jids, ref, []))
+    return out
 
 
 def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
@@ -206,7 +220,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     # CAPACITY_STALE_SECONDS).
     from .heartbeat_guard import any_job_heartbeat_fresh, build_ref_to_jids, any_job_checkpoint_fresh_jids, fresh_jids_pointing_to_ref
     _ref_to_jids = build_ref_to_jids(store)
-    _hb_threshold = 1800
+    _hb_threshold = JOB_HEARTBEAT_FRESH_SECONDS
     for ref, age_seconds in refs:
         name = ref.split("@", 1)[0]
         consumer_id = f"{kind}-{name}"
@@ -214,8 +228,8 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
         if consumer_id not in live:
             if age_seconds < BOOT_GRACE_SECONDS:
                 continue  # still installing, give it time
-            _jids = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
-            if any_job_heartbeat_fresh(store, _jids, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids, 5400):
+            _jids = _ref_job_ids(_ref_to_jids, ref, instance_ref)
+            if any_job_heartbeat_fresh(store, _jids, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids, CHECKPOINT_FRESH_SECONDS):
                 _log(
                     f"defer reap of {ref}: capacity stale "
                     f"(age={age_seconds:.0f}s) but job heartbeat fresh for {_jids}"
@@ -243,8 +257,8 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
             # via the 0.4.224 daemon thread) was reaped here as
             # "never-worked" at 2026-05-15T23:14:01 (restart 8). A fresh
             # job heartbeat is proof the VM is productive — never reap.
-            _jids_b = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
-            if any_job_heartbeat_fresh(store, _jids_b, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids_b, 5400):
+            _jids_b = _ref_job_ids(_ref_to_jids, ref, instance_ref)
+            if any_job_heartbeat_fresh(store, _jids_b, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids_b, CHECKPOINT_FRESH_SECONDS):
                 _log(f"defer never-worked reap of {ref}: job heartbeat fresh for {_jids_b}")
                 continue
             if (_safety := fresh_jids_pointing_to_ref(store, instance_ref)):
@@ -257,7 +271,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
                 f"> grace {IDLE_GRACE_SECONDS}s)"
             )
             deleted += 1
-            _jids = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
+            _jids = _ref_job_ids(_ref_to_jids, ref, instance_ref)
             _requeue_jids_after_reap(store, _jids, "VM reaped (never-worked)")
             continue
         # Branch C (wedged): fresh capacity but structurally stuck. ALL of:
@@ -279,8 +293,8 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
                     _stale = False
             if not _stale:
                 continue
-            _jids_c = _ref_to_jids.get(ref, []) + _ref_to_jids.get(instance_ref, [])
-            if any_job_heartbeat_fresh(store, _jids_c, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids_c, 5400):
+            _jids_c = _ref_job_ids(_ref_to_jids, ref, instance_ref)
+            if any_job_heartbeat_fresh(store, _jids_c, _hb_threshold) or any_job_checkpoint_fresh_jids(store, _jids_c, CHECKPOINT_FRESH_SECONDS):
                 _log(f"defer wedged reap of {ref}: job heartbeat fresh for {_jids_c}")
                 continue
             if (_safety := fresh_jids_pointing_to_ref(store, instance_ref)):

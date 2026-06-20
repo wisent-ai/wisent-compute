@@ -40,6 +40,14 @@ _BLOB = "billing_health/credits.json"
 # shape so an env override can never inject SQL.
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _ARM = "https://management.azure.com"
+BILLING_ACCOUNT_KEY = "billing_account"
+BILLING_PROFILE_KEY = "billing_profile"
+SUBSCRIPTION_ID_KEY = "subscription_id"
+PROPERTIES_KEY = "properties"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
 
 
 def _log(msg: str) -> None:
@@ -168,8 +176,9 @@ def _azure_section() -> dict:
         return {"status": "auth_error",
                 "detail": f"{type(e).__name__}: {e}"}
 
-    ba, bp = sp.get("billing_account"), sp.get("billing_profile")
-    sub = sp.get("subscription_id")
+    ba = _dict_value(sp, BILLING_ACCOUNT_KEY, None)
+    bp = _dict_value(sp, BILLING_PROFILE_KEY, None)
+    sub = _dict_value(sp, SUBSCRIPTION_ID_KEY, None)
     if ba and bp:
         url = (f"{_ARM}/providers/Microsoft.Billing/billingAccounts/{ba}"
                f"/billingProfiles/{bp}/availableBalance"
@@ -193,7 +202,7 @@ def _azure_section() -> dict:
         return {"status": "arm_error", "detail": f"{e.reason}",
                 "endpoint": url}
 
-    props = body.get("properties", body)
+    props = _dict_value(body, PROPERTIES_KEY, body)
     amount = None
     if isinstance(props, dict):
         amt = props.get("amount") or props.get("availableBalance")

@@ -11,6 +11,18 @@ from .base import Provider
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 AZ_ORDER = [f"{REGION}a", f"{REGION}c", f"{REGION}d", f"{REGION}b"]
+ERROR_KEY = "Error"
+CODE_KEY = "Code"
+INVALID_INSTANCE_ID_NOT_FOUND = "InvalidInstanceID.NotFound"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _client_error_code(exc) -> str:
+    error = _dict_value(exc.response, ERROR_KEY, {})
+    return str(_dict_value(error, CODE_KEY, ""))
 
 
 def _log(msg):
@@ -73,7 +85,7 @@ class AWSProvider(Provider):
         except ClientError as exc:
             # InvalidInstanceID.NotFound is the desired terminal state.
             # Anything else propagates.
-            if exc.response.get("Error", {}).get("Code") != "InvalidInstanceID.NotFound":
+            if _client_error_code(exc) != INVALID_INSTANCE_ID_NOT_FOUND:
                 raise
 
     def instance_exists(self, instance_ref: str) -> bool:
@@ -81,7 +93,7 @@ class AWSProvider(Provider):
         try:
             r = self.ec2.describe_instances(InstanceIds=[instance_ref])
         except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") == "InvalidInstanceID.NotFound":
+            if _client_error_code(exc) == INVALID_INSTANCE_ID_NOT_FOUND:
                 return False
             raise
         state = r["Reservations"][0]["Instances"][0]["State"]["Name"]

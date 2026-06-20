@@ -41,6 +41,18 @@ _GCP_ACCEL_TO_GPU_FAMILY = {
     "nvidia-tesla-a100": "NVIDIA_A100",
     "nvidia-a100-80gb": "NVIDIA_A100_80GB",
 }
+AVAILABLE_KEY = "available"
+REASON_KEY = "reason"
+NOT_AVAILABLE_REASON = "not available"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_text(data: dict, key: str, default: str = "") -> str:
+    value = _dict_value(data, key, default)
+    return str(value if value is not None else default)
 
 
 def _gcp_request_for_family(
@@ -213,11 +225,11 @@ def _azure_fanout(
                 r = _azure_request_increase(
                     AZURE_SUBSCRIPTION_ID, loc, fam, new_limit,
                 )
-                if not r.get("available", True):
+                if not _dict_value(r, AVAILABLE_KEY, True):
                     out.append({
                         "provider": "azure", "location": loc,
                         "family": fam, "ok": False,
-                        "error": r.get("reason", "not available"),
+                        "error": _dict_text(r, REASON_KEY, NOT_AVAILABLE_REASON),
                     })
                 else:
                     out.append({

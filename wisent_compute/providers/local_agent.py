@@ -54,6 +54,11 @@ VRAM_SAFETY_BUFFER_GB = 8
 # run for less than this, so a just-(re)started background job gets real work
 # done before it can be bumped again. Pairs with Job.max_yields_before_protected.
 MIN_RUNTIME_BEFORE_YIELD_S = 300
+STARTED_MONO_KEY = "started_mono"
+
+
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
 
 
 def _log(msg):
@@ -146,7 +151,7 @@ def _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
             continue
         if int(getattr(j, "yield_count", 0) or 0) >= int(getattr(j, "max_yields_before_protected", 5) or 5):
             continue
-        if now_mono - s.get("started_mono", now_mono) < MIN_RUNTIME_BEFORE_YIELD_S:
+        if now_mono - _dict_value(s, STARTED_MONO_KEY, now_mono) < MIN_RUNTIME_BEFORE_YIELD_S:
             continue
         evictable.append(s)
     if not evictable:
@@ -250,7 +255,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             registry_env = t.env_overrides or {}
             env_delta = {
                 k: str(v) for k, v in registry_env.items()
-                if str(initial_env.get(k, "")) != str(v)
+                if str(_dict_value(initial_env, k, "")) != str(v)
             }
             if env_delta and not slots:
                 _log(f"Registry env override delta {env_delta}; pip_upgrade_and_exec for restart")

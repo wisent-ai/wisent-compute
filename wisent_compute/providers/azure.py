@@ -20,6 +20,12 @@ from ..models import AZURE_VM_TO_ACCEL
 from .azure_helpers import network as _net
 from .base import Provider
 
+WISENT_CREATED_TAG = "wisent_created"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
 
 def _log(msg):
     sys.stderr.write(f"[azure] {msg}\n")
@@ -242,7 +248,7 @@ class AzureProvider(Provider):
             if not name.startswith(f"{INSTANCE_PREFIX}-agent-"):
                 continue
             tags = dict(vm.tags or {})
-            created = tags.get("wisent_created", "")
+            created = _dict_value(tags, WISENT_CREATED_TAG, "")
             age = 0.0
             if created:
                 ct = datetime.fromisoformat(created.replace("Z", "+00:00"))

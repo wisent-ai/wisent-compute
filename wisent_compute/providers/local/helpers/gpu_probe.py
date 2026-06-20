@@ -14,6 +14,10 @@ from __future__ import annotations
 import subprocess
 
 
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
+
+
 def _proc_tree_pids(root_pid: int) -> set[int]:
     """root_pid plus all descendants, from `ps -eo pid=,ppid=`.
 
@@ -47,7 +51,7 @@ def _proc_tree_pids(root_pid: int) -> set[int]:
         if p in seen:
             continue
         seen.add(p)
-        stack.extend(children.get(p, ()))
+        stack.extend(_dict_value(children, p, ()))
     return seen
 
 

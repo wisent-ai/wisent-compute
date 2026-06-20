@@ -25,6 +25,12 @@ from . import (
 from ..config import BUCKET
 from ..queue.storage import JobStorage
 
+ATTEMPTS_KEY = "attempts"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
 
 @click.group()
 def main() -> None:
@@ -44,7 +50,7 @@ def cmd_scan(since: str | None) -> None:
             "job_id": rec.job_id,
             "batch_id": rec.batch_id,
             "failed_at": rec.failed_at,
-            "attempts": st.get("attempts", 0),
+            "attempts": _dict_value(st, ATTEMPTS_KEY, 0),
             "command_head": rec.command[:160],
         })
     click.echo(json.dumps({

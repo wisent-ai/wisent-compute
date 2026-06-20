@@ -26,6 +26,16 @@ from ...queue.storage import JobStorage
 from .helpers.gpu_probe import smi_job_used_gb
 
 _HF_WRITE_TOK: dict = {}
+PEAK_VRAM_GB_KEY = "peak_vram_gb"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 def _hf_write_token(store) -> str:
@@ -449,7 +459,7 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # raises on real SDK errors; a missing output_dir is a normal
         # happy-path case (job wrote nothing).
         job.peak_vram_gb = max(int(getattr(job, "peak_vram_gb", 0) or 0),
-                               int(slot.get("peak_vram_gb", 0) or 0))
+                               _dict_number(slot, PEAK_VRAM_GB_KEY))
         # Stamp the per-GPU-probe marker: this agent is 0.4.241+,
         # so smi_job_used_gb measured the MAX single-GPU footprint
         # (grouped by gpu_uuid), not a cross-GPU sum. observed_vram_gb
@@ -474,7 +484,7 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         return False
     now = time.time()
     _used = smi_job_used_gb(proc.pid)
-    if _used > slot.get("peak_vram_gb", 0):
+    if _used > _dict_number(slot, PEAK_VRAM_GB_KEY):
         slot["peak_vram_gb"] = _used
     if not slot["paused"] and now - slot["last_hb"] > HEARTBEAT_INTERVAL:
         _write_heartbeat(store, job.job_id)

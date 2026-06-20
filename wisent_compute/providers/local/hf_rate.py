@@ -36,6 +36,12 @@ _COMMIT_MAX = 128
 _COMMIT_REFILL_PER_SECOND = 128.0 / 3600.0  # 128 commits/hour
 _POLL_BACKOFF_BASE = 0.5
 _POLL_BACKOFF_MAX = 30.0
+REFILLED_AT_KEY = "refilled_at"
+TOKENS_KEY = "tokens"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
 
 
 def _get_bucket():
@@ -66,8 +72,8 @@ def _read_state(bucket, obj: str, max_tokens: int):
 
 def _refill(state: dict, max_tokens: int, refill_per_sec: float) -> dict:
     now = _now()
-    elapsed = max(0.0, now - float(state.get("refilled_at", now)))
-    tokens = min(max_tokens, float(state.get("tokens", 0)) + elapsed * refill_per_sec)
+    elapsed = max(0.0, now - float(_dict_value(state, REFILLED_AT_KEY, now)))
+    tokens = min(max_tokens, float(_dict_value(state, TOKENS_KEY, 0)) + elapsed * refill_per_sec)
     return {"tokens": tokens, "refilled_at": now}
 
 

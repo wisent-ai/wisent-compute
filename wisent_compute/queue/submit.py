@@ -14,6 +14,8 @@ from ..config import estimate_gpu_memory, lookup_instance_type, BUCKET
 
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 COMPUTE_API = os.environ.get("COMPUTE_API_URL", "https://compute.wisent.com")
+BUCKET_KWARG_KEY = "bucket"
+ID_KEY = "id"
 
 
 def _generate_job_id() -> str:
@@ -26,6 +28,10 @@ def _render_template(template_name: str, variables: dict) -> str:
     for key, value in variables.items():
         content = content.replace(f"${{{key}}}", str(value))
     return content
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
 
 
 def _render_repo_block(repo: str, workdir: str, extras: str) -> str:
@@ -72,7 +78,8 @@ def submit_batch(commands: list[str], **kwargs) -> int:
     if not os.environ.get("COMPUTE_API_KEY", "").strip():
         import platform
         from .storage import JobStorage
-        store = JobStorage(kwargs.get("bucket", "") or BUCKET)
+        bucket_name = _dict_value(kwargs, BUCKET_KWARG_KEY, "")
+        store = JobStorage(bucket_name if bucket_name else BUCKET)
         write_run_manifest(
             store, run_id,
             os.environ.get("WC_RUN_NAME", ""),
@@ -171,13 +178,14 @@ def _submit_via_api(command: str, api_key: str, provider: str) -> Job:
     try:
         resp = urllib.request.urlopen(req)
         data = json.loads(resp.read())
+        api_job_id = _dict_value(data, ID_KEY, _generate_job_id())
         return Job(
-            job_id=data.get("id", _generate_job_id()),
+            job_id=api_job_id,
             command=command,
             gpu_mem_gb=gpu_mem,
             provider=provider,
             state="running",
-            instance_ref=data.get("id", ""),
+            instance_ref=_dict_value(data, ID_KEY, ""),
         )
     except urllib.error.HTTPError as e:
         body = e.read().decode()
@@ -246,7 +254,7 @@ def _submit_via_gcs(
         elif gpu_type and not vram_gb:
             # Caller pinned the accelerator but not the size — pick the
             # machine_type from GPU_SIZING by matching accel label.
-            sizing = GPU_SIZING.get(provider, {})
+            sizing = _dict_value(GPU_SIZING, provider, {})
             match = next(
                 ((mt, mem) for mem, (mt, ac) in sizing.items() if ac == gpu_type),
                 None,
