@@ -12,6 +12,16 @@ from ..models import AZURE_QUOTA_FAMILY_TO_ACCEL
 from ..queue.storage import JobStorage
 from ..providers.base import Provider
 
+PROVIDER_GCP = "gcp"
+PROVIDER_AZURE = "azure"
+GCP_PROJECT_ENV = "GCP_PROJECT"
+DEFAULT_GCP_PROJECT = "wisent-480400"
+RESERVED_KEY = "reserved"
+TOTAL_KEY = "total"
+USED_KEY = "used"
+AVAILABLE_KEY = "available"
+CONFIG_QUOTAS_PATH = "config/quotas.json"
+
 
 # Map GCP regional-quota metric names to the accel_type strings the scheduler
 # uses internally. Tracks the ON-DEMAND quotas now that the dispatcher forces
@@ -43,9 +53,10 @@ def _fetch_quotas_gcp(project: str, regions: list[str]) -> dict[str, int]:
     for region in regions:
         region_obj = client.get(project=project, region=region)
         for q in region_obj.quotas:
-            accel = _GCP_METRIC_TO_ACCEL.get(q.metric)
-            if accel:
-                out[accel] = out.get(accel, 0) + int(q.limit)
+            if q.metric not in _GCP_METRIC_TO_ACCEL:
+                continue
+            accel = _GCP_METRIC_TO_ACCEL[q.metric]
+            out[accel] = _dict_number(out, accel) + int(q.limit)
     return out
 
 
@@ -79,9 +90,11 @@ def _fetch_quotas_azure(subscription: str, locations: list[str]) -> dict[str, in
             # NCasT4_v3 (NC4) up to 64 vCPU (NC64). The family quota counts
             # vCPU, not GPUs — divide by the smallest member's vCPU to get
             # the upper bound on parallel 1-GPU VMs of that family.
-            vcpu_per_smallest = _AZURE_FAMILY_MIN_VCPU.get(family, 4)
+            if family not in _AZURE_FAMILY_MIN_VCPU:
+                raise KeyError(f"missing Azure vCPU mapping for {family}")
+            vcpu_per_smallest = _AZURE_FAMILY_MIN_VCPU[family]
             slots = int(u.limit) // max(1, vcpu_per_smallest)
-            out[accel] = out.get(accel, 0) + slots
+            out[accel] = _dict_number(out, accel) + slots
     return out
 
 
@@ -125,11 +138,20 @@ def _load_overlay(store: JobStorage) -> dict:
     Reservations subtract from the live cloud limit so non-wisent workloads
     can keep some headroom without lowering the actual cloud quota.
     """
-    raw = store._download_text("config/quotas.json")
+    raw = store._download_text(CONFIG_QUOTAS_PATH)
     return json.loads(raw) if raw else {}
 
 
-def load_quotas(store: JobStorage, provider_name: str = "gcp") -> dict:
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
+
+
+def load_quotas(store: JobStorage, provider_name: str = PROVIDER_GCP) -> dict:
     """Compose live cloud quota limits with the storage-backed reservation overlay.
 
     Dispatches per provider_name:
@@ -142,11 +164,11 @@ def load_quotas(store: JobStorage, provider_name: str = "gcp") -> dict:
     (offline / dev).
     """
     overlay = _load_overlay(store)
-    if provider_name == "gcp":
+    if provider_name == PROVIDER_GCP:
         from ..config import REGIONS
-        project = os.environ.get("GCP_PROJECT", "wisent-480400")
+        project = os.environ.get(GCP_PROJECT_ENV, DEFAULT_GCP_PROJECT)
         live = _fetch_quotas_gcp(project, REGIONS)
-    elif provider_name == "azure":
+    elif provider_name == PROVIDER_AZURE:
         from ..config import AZURE_LOCATIONS, AZURE_SUBSCRIPTION_ID
         live = _fetch_quotas_azure(AZURE_SUBSCRIPTION_ID, AZURE_LOCATIONS)
     else:
@@ -154,24 +176,25 @@ def load_quotas(store: JobStorage, provider_name: str = "gcp") -> dict:
     if not live:
         return overlay
     out: dict = {provider_name: {}}
-    overlay_p = overlay.get(provider_name, {})
+    overlay_p = _dict_value(overlay, provider_name, {})
     for accel, total in live.items():
-        reserved = int(overlay_p.get(accel, {}).get("reserved", 0))
-        out[provider_name][accel] = {"total": total, "reserved": reserved}
+        overlay_accel = _dict_value(overlay_p, accel, {})
+        reserved = _dict_number(overlay_accel, RESERVED_KEY)
+        out[provider_name][accel] = {TOTAL_KEY: total, RESERVED_KEY: reserved}
     return out
 
 
 def get_available_slots(store: JobStorage, provider: Provider, provider_name: str) -> dict[str, int]:
     """Count available GPU slots: total - reserved - running."""
     quotas = load_quotas(store, provider_name)
-    provider_quotas = quotas.get(provider_name, {})
+    provider_quotas = _dict_value(quotas, provider_name, {})
     running_counts = provider.list_running_instances()
 
     available = {}
     for accel_type, config in provider_quotas.items():
-        total = config.get("total", 0)
-        reserved = config.get("reserved", 0)
-        used = running_counts.get(accel_type, 0)
+        total = _dict_number(config, TOTAL_KEY)
+        reserved = _dict_number(config, RESERVED_KEY)
+        used = _dict_number(running_counts, accel_type)
         available[accel_type] = max(0, total - reserved - used)
 
     return available
@@ -194,7 +217,7 @@ def summarize_quotas(store: JobStorage) -> dict[str, dict[str, dict[str, int]]]:
     from ..providers import get_provider
     out: dict[str, dict[str, dict[str, int]]] = {}
     for provider_name in WC_PROVIDERS:
-        quotas = load_quotas(store, provider_name).get(provider_name, {})
+        quotas = _dict_value(load_quotas(store, provider_name), provider_name, {})
         if not quotas:
             out[provider_name] = {}
             continue
@@ -205,14 +228,14 @@ def summarize_quotas(store: JobStorage) -> dict[str, dict[str, dict[str, int]]]:
             running = {}
         rows: dict[str, dict[str, int]] = {}
         for accel, cfg in quotas.items():
-            total = int(cfg.get("total", 0))
-            reserved = int(cfg.get("reserved", 0))
-            used = int(running.get(accel, 0))
+            total = _dict_number(cfg, TOTAL_KEY)
+            reserved = _dict_number(cfg, RESERVED_KEY)
+            used = _dict_number(running, accel)
             rows[accel] = {
-                "total": total,
-                "reserved": reserved,
-                "used": used,
-                "available": max(0, total - reserved - used),
+                TOTAL_KEY: total,
+                RESERVED_KEY: reserved,
+                USED_KEY: used,
+                AVAILABLE_KEY: max(0, total - reserved - used),
             }
         out[provider_name] = rows
     return out

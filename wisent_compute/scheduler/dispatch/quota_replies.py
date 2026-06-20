@@ -38,6 +38,23 @@ _MS_SENDER = (
     "techsupport.microsoft.com",
     "microsoft.com",
 )
+TICKET_STATUS_OPEN = "Open"
+PROBLEM_QUOTA_TOKEN = "quota"
+PROBLEM_SUBSCRIPTION_LIMIT = "subscription limit"
+NAME_KEY = "name"
+TITLE_KEY = "title"
+PROBLEM_KEY = "problem"
+REGION_KEY = "region"
+SENDER_KEY = "sender"
+CREATED_DATE_KEY = "createdDate"
+SUBJECT_KEY = "subject"
+BODY_SNIPPET_KEY = "body_snippet"
+AWAITING_CUSTOMER_KEY = "awaiting_customer"
+LAST_SENDER_KEY = "last_sender"
+LAST_SENT_KEY = "last_sent"
+LAST_SUBJECT_KEY = "last_subject"
+LAST_BODY_SNIPPET_KEY = "last_body_snippet"
+
 
 # Patterns Azure Capacity CX uses when the issue is BILLING (payment
 # history, bank decline, outstanding balance), not a request for
@@ -50,6 +67,19 @@ _BILLING_DECLINE_RE = re.compile(
     r"unpaid invoice|payment issues|pay now to resolve|billing issue",
     re.IGNORECASE,
 )
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_text(data: dict, key: str, default: str = "") -> str:
+    value = _dict_value(data, key, default)
+    return str(value if value is not None else default)
+
+
+def _dict_truthy(data: dict, key: str) -> bool:
+    return bool(data[key]) if key in data else False
 
 
 def _az(args: list[str]) -> dict | list:
@@ -96,15 +126,15 @@ def _open_quota_tickets() -> list[dict]:
     rows = _az([
         "support", "in-subscription", "tickets", "list",
         "--query",
-        "[?status=='Open'].{name:name, title:title, "
+        f"[?status=='{TICKET_STATUS_OPEN}'].{{name:name, title:title, "
         "problem:problemClassificationDisplayName}",
     ])
     if not isinstance(rows, list):
         return []
     return [
         r for r in rows
-        if "quota" in (r.get("problem") or "").lower()
-        or "subscription limit" in (r.get("problem") or "").lower()
+        if PROBLEM_QUOTA_TOKEN in _dict_text(r, PROBLEM_KEY).lower()
+        or PROBLEM_SUBSCRIPTION_LIMIT in _dict_text(r, PROBLEM_KEY).lower()
     ]
 
 
@@ -132,18 +162,18 @@ def list_open_azure_tickets() -> list[dict]:
     """
     out: list[dict] = []
     for t in _open_quota_tickets():
-        last = _last_communication(t.get("name", ""))
-        sender = (last.get("sender") or "").lower()
+        last = _last_communication(_dict_text(t, NAME_KEY))
+        sender = _dict_text(last, SENDER_KEY).lower()
         awaiting = any(d in sender for d in _MS_SENDER)
         out.append({
-            "name": t.get("name", ""),
-            "title": t.get("title", ""),
-            "region": _region_from_title(t.get("title", "")),
-            "last_sender": last.get("sender", ""),
-            "last_sent": last.get("createdDate", ""),
-            "last_subject": last.get("subject", ""),
-            "last_body_snippet": last.get("body_snippet", ""),
-            "awaiting_customer": awaiting,
+            NAME_KEY: _dict_text(t, NAME_KEY),
+            TITLE_KEY: _dict_text(t, TITLE_KEY),
+            REGION_KEY: _region_from_title(_dict_text(t, TITLE_KEY)),
+            LAST_SENDER_KEY: _dict_text(last, SENDER_KEY),
+            LAST_SENT_KEY: _dict_text(last, CREATED_DATE_KEY),
+            LAST_SUBJECT_KEY: _dict_text(last, SUBJECT_KEY),
+            LAST_BODY_SNIPPET_KEY: _dict_text(last, BODY_SNIPPET_KEY),
+            AWAITING_CUSTOMER_KEY: awaiting,
         })
     return out
 
@@ -245,7 +275,7 @@ def respond_to_open_quota_tickets(
             out.append({
                 "name": name, "ok": False,
                 "action": "skip_no_region_in_title",
-                "title": t.get("title", ""),
+                "title": _dict_text(t, TITLE_KEY),
             })
             continue
         if not t["awaiting_customer"]:
@@ -254,12 +284,12 @@ def respond_to_open_quota_tickets(
                 "action": "skip_customer_already_replied",
             })
             continue
-        is_billing = bool(_BILLING_DECLINE_RE.search(t.get("last_body_snippet", "") or ""))
+        is_billing = bool(_BILLING_DECLINE_RE.search(_dict_text(t, LAST_BODY_SNIPPET_KEY)))
         if is_billing and not escalate_billing:
             out.append({
                 "name": name, "region": region, "ok": True,
                 "action": "skip_billing_decline",
-                "last_body_snippet": t.get("last_body_snippet", ""),
+                "last_body_snippet": _dict_text(t, LAST_BODY_SNIPPET_KEY),
             })
             continue
         if is_billing:
