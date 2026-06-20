@@ -15,6 +15,12 @@ from .stockout import (
     QUOTA_TTL_S as _QUOTA_TTL_S,
 )
 
+BAKED_AGENT_IMAGE_FAMILY = "wisent-agent"
+
+
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
+
 
 def _log(msg):
     sys.stderr.write(f"[gcp] {msg}\n")
@@ -37,7 +43,7 @@ class GCPProvider(Provider):
         # deeplearning-platform-release base, dropping boot time from
         # ~5-10 install-rotations to ~30 install-secs.
         from google.api_core.exceptions import NotFound as _NotFound
-        baked_family = "wisent-agent"
+        baked_family = BAKED_AGENT_IMAGE_FAMILY
         baked_present = False
         from google.cloud import compute_v1 as _cv1
         images_client = _cv1.ImagesClient()
@@ -53,7 +59,7 @@ class GCPProvider(Provider):
             image = latest.name
             image_project = self.project
             baked_present = True
-        zones = MACHINE_TYPE_ZONES.get(machine_type, ZONE_ROTATION)
+        zones = _dict_value(MACHINE_TYPE_ZONES, machine_type, ZONE_ROTATION)
         # Track regions with confirmed QUOTA_EXCEEDED this call. GCP enforces
         # GPU quota at the regional level, so a 403 in one zone means every
         # other zone in the same region will also fail. Without this short-

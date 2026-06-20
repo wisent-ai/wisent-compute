@@ -42,6 +42,13 @@ _MODEL_RE = re.compile(r"--model\s+(\S+)")
 
 _COMPLETED_SAMPLE_CAP = 6000
 _TTL_S = 600
+COMPLETED_PREFIX = "completed"
+COMPLETED_BLOB_PREFIX = f"{COMPLETED_PREFIX}/"
+CAPACITY_BLOB_PREFIX = "capacity/"
+QUEUE_PREFIX = "queue"
+RUNNING_PREFIX = "running"
+CAPS_CACHE_TTL_SECONDS = 30
+OBSERVED_FETCH_WORKERS = 32
 _cache: dict = {"map": None, "built_at": 0.0}
 
 
@@ -65,7 +72,7 @@ def _build_observed_map() -> dict[str, int]:
 
     bucket = storage.Client().bucket(BUCKET)
     blobs = []
-    for blob in bucket.list_blobs(prefix="completed/"):
+    for blob in bucket.list_blobs(prefix=COMPLETED_BLOB_PREFIX):
         blobs.append(blob)
         if len(blobs) >= _COMPLETED_SAMPLE_CAP:
             break
@@ -81,7 +88,7 @@ def _build_observed_map() -> dict[str, int]:
         except NotFound:
             return None
 
-    with ThreadPoolExecutor(max_workers=32) as ex:
+    with ThreadPoolExecutor(max_workers=OBSERVED_FETCH_WORKERS) as ex:
         texts = list(ex.map(_fetch, blobs))
 
     peaks: dict[str, list[int]] = {}
@@ -89,7 +96,7 @@ def _build_observed_map() -> dict[str, int]:
         if text is None:
             continue
         doc = json.loads(text)
-        if doc.get("state") != "completed":
+        if doc.get("state") != COMPLETED_PREFIX:
             continue
         peak = doc.get("peak_vram_gb")
         if not isinstance(peak, int) or peak <= 0:
@@ -156,7 +163,7 @@ def _live_total_vrams() -> list[int]:
     """
     now = time.time()
     if (_caps_cache["vrams"] is not None
-            and now - _caps_cache["built_at"] < 30):
+            and now - _caps_cache["built_at"] < CAPS_CACHE_TTL_SECONDS):
         return _caps_cache["vrams"]
     import datetime as _dt
     from google.cloud import storage
@@ -164,7 +171,7 @@ def _live_total_vrams() -> list[int]:
 
     vrams: set[int] = set()
     bucket = storage.Client().bucket(BUCKET)
-    for blob in bucket.list_blobs(prefix="capacity/"):
+    for blob in bucket.list_blobs(prefix=CAPACITY_BLOB_PREFIX):
         try:
             doc = json.loads(blob.download_as_text())
         except NotFound:
@@ -243,7 +250,7 @@ def escalate_on_oom(store, job, error_text: str) -> bool:
     job.error = None
     job.instance_ref = None
     job.started_at = None
-    store.move_job(job, "running", "queue")
+    store.move_job(job, RUNNING_PREFIX, QUEUE_PREFIX)
     store.cleanup_status(job.job_id)
     return True
 
@@ -275,7 +282,7 @@ def normalize_queue_sizing(store, log_fn=None) -> int:
     if log_fn is None:
         log_fn = lambda _m: None  # noqa: E731
     corrected = 0
-    for j in store.list_jobs("queue"):
+    for j in store.list_jobs(QUEUE_PREFIX):
         model = _model_of(getattr(j, "command", "") or "")
         if not model:
             continue
@@ -283,13 +290,13 @@ def normalize_queue_sizing(store, log_fn=None) -> int:
         desired = peak if peak is not None else 0
         if int(getattr(j, "gpu_mem_gb", 0) or 0) == desired:
             continue
-        fresh = store.read_job("queue", j.job_id)
+        fresh = store.read_job(QUEUE_PREFIX, j.job_id)
         if fresh is None:
             continue  # claimed/moved since tick start
         if int(getattr(fresh, "gpu_mem_gb", 0) or 0) == desired:
             continue
         fresh.gpu_mem_gb = desired
-        store.write_job("queue", fresh)
+        store.write_job(QUEUE_PREFIX, fresh)
         corrected += 1
     if corrected:
         log_fn(

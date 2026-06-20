@@ -48,6 +48,23 @@ PRESENT = "present"
 MISSING = "missing"
 UNFIXABLE = "unfixable"
 ENTRY_POINT_GROUP = "wisent_compute.coverage_universes"
+ATTEMPTS_KEY = "attempts"
+LAST_ERROR_KEY = "last_error"
+VERIFY_COMMAND_KEY = "verify_command"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
+
+
+def _dict_text(data: dict, key: str, default: str = "") -> str:
+    value = _dict_value(data, key, default)
+    return str(value if value is not None else default)
 
 
 @dataclass(frozen=True)
@@ -77,6 +94,9 @@ class Verifier(ABC):
 class URIExistsVerifier(Verifier):
     """HEAD against an http(s) URI; optional bearer token for HF/private."""
 
+    HTTP_NOT_FOUND = 404
+    HTTP_RATE_LIMITED = 429
+
     def __init__(self, bearer_token: str = ""):
         self._token = bearer_token
 
@@ -86,11 +106,11 @@ class URIExistsVerifier(Verifier):
         for attempt in range(COVERAGE_HTTP_RETRY_CAP):
             try:
                 with urllib.request.urlopen(req) as r:
-                    return PRESENT if r.status < 400 else MISSING
+                    return PRESENT if r.status < self.HTTP_NOT_FOUND else MISSING
             except urllib.error.HTTPError as e:
-                if e.code == 404:
+                if e.code == self.HTTP_NOT_FOUND:
                     return MISSING
-                if e.code == 429:
+                if e.code == self.HTTP_RATE_LIMITED:
                     time.sleep(COVERAGE_VERIFY_BACKOFF_BASE ** attempt)
                     continue
                 raise
@@ -100,13 +120,15 @@ class URIExistsVerifier(Verifier):
 class GCSBlobExistsVerifier(Verifier):
     """Existence check for gs://<bucket>/<path> via JobStorage."""
 
+    GCS_URI_PREFIX = "gs://"
+
     def __init__(self, store: JobStorage | None = None):
         self._store = store or JobStorage(BUCKET)
 
     def check(self, expected_uri: str) -> str:
-        if not expected_uri.startswith("gs://"):
+        if not expected_uri.startswith(self.GCS_URI_PREFIX):
             raise ValueError(f"GCSBlobExistsVerifier expects gs:// URI, got {expected_uri}")
-        rest = expected_uri[len("gs://"):]
+        rest = expected_uri[len(self.GCS_URI_PREFIX):]
         bucket, _, path = rest.partition("/")
         if bucket != self._store.bucket_name:
             raise ValueError(
@@ -219,9 +241,10 @@ def verify(
                 log(f"[{universe.id}] {done}/{len(entries)}")
             if status == PRESENT:
                 present_n += 1; continue
-            attempts = state.get(entry.group_key, {}).get("attempts", 0)
+            entry_state = _dict_value(state, entry.group_key, {})
+            attempts = _dict_number(entry_state, ATTEMPTS_KEY)
             if attempts >= COVERAGE_ATTEMPT_CAP:
-                last_err = state[entry.group_key].get("last_error", "")
+                last_err = _dict_text(entry_state, LAST_ERROR_KEY)
                 unfix.append((entry.group_key, last_err)); continue
             gaps.append(entry)
     return CoverageReport(
@@ -254,7 +277,7 @@ def retry_gaps(
     for g in report.gaps:
         submit_job(
             g.command, batch_id=batch_id, bucket=BUCKET,
-            verify_command=g.extra.get("verify_command", ""),
+            verify_command=_dict_text(g.extra, VERIFY_COMMAND_KEY),
             **kwargs,
         )
         submitted += 1

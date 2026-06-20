@@ -23,6 +23,12 @@ import shutil
 import subprocess
 import tempfile
 
+TMPFS_TYPE = "tmpfs"
+PROC_MOUNTS_FIELD_COUNT = 4
+BYTES_PER_GIB = 1024 ** 3
+STAGING_MIN_FREE_MULTIPLIER = 1.5
+STAGING_MIN_FREE_GB = 50.0
+
 
 def _tmp_is_tmpfs() -> bool:
     try:
@@ -32,11 +38,11 @@ def _tmp_is_tmpfs() -> bool:
         ).stdout.strip()
     except Exception:
         return False
-    return out == "tmpfs"
+    return out == TMPFS_TYPE
 
 
 _BAD_FS = {
-    "tmpfs", "devtmpfs", "proc", "sysfs", "cgroup", "cgroup2",
+    TMPFS_TYPE, "devtmpfs", "proc", "sysfs", "cgroup", "cgroup2",
     "fusectl", "configfs", "debugfs", "pstore", "bpf", "ramfs",
     "mqueue", "tracefs", "securityfs", "autofs", "nsfs",
     "binfmt_misc", "hugetlbfs", "rpc_pipefs", "fuse.gvfsd-fuse",
@@ -51,7 +57,7 @@ def _candidate_mounts() -> list[str]:
         with open("/proc/mounts") as f:
             for line in f:
                 parts = line.split()
-                if len(parts) < 4:
+                if len(parts) < PROC_MOUNTS_FIELD_COUNT:
                     continue
                 mnt, fstype, opts = parts[1], parts[2], parts[3]
                 if fstype in _BAD_FS:
@@ -68,7 +74,7 @@ def _candidate_mounts() -> list[str]:
 
 def _free_gb(path: str) -> float:
     try:
-        return shutil.disk_usage(path).free / (1024 ** 3)
+        return shutil.disk_usage(path).free / BYTES_PER_GIB
     except OSError:
         return -1.0
 
@@ -161,7 +167,7 @@ def setup_agent_staging(log_fn) -> str | None:
                 )
                 continue
         free = _free_gb(target)
-        if free <= max(tmp_free * 1.5, 50.0):
+        if free <= max(tmp_free * STAGING_MIN_FREE_MULTIPLIER, STAGING_MIN_FREE_GB):
             continue
         if best is None or free > best[1]:
             best = (target, free)

@@ -26,6 +26,13 @@ from typing import Iterable
 _TS_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)"
 )
+GCS_URI_PREFIX = "gs://"
+RUNNING_PREFIX = "running"
+QUEUE_PREFIX = "queue"
+COMPLETED_PREFIX = "completed"
+PKILL_COMMAND = "pkill"
+KILL_COMMAND_WITH_SPACE = "kill "
+WC_AGENT_COMMAND = "wc agent"
 
 
 def _parse_heartbeat_ts(text: str) -> float | None:
@@ -114,9 +121,9 @@ def _ckpt_prefix_from_command(cmd: str) -> str | None:
     if not m:
         return None
     uri = m.group(1).strip()
-    if not uri.startswith("gs://"):
+    if not uri.startswith(GCS_URI_PREFIX):
         return None
-    rest = uri[len("gs://"):]
+    rest = uri[len(GCS_URI_PREFIX):]
     parts = rest.split("/", 1)
     if len(parts) < 2 or not parts[1]:
         return None
@@ -195,7 +202,7 @@ def fresh_jids_pointing_to_ref(store, ref: str) -> list:
     """
     try:
         out = []
-        for j in store.list_jobs("running"):
+        for j in store.list_jobs(RUNNING_PREFIX):
             if getattr(j, "instance_ref", None) == ref:
                 jid = getattr(j, "job_id", None)
                 if jid:
@@ -210,7 +217,7 @@ def _job_command_for_jid(store, jid: str) -> str:
     queue/ blob, given only the job id (the reaper has jids, not job
     objects)."""
     import json
-    for pfx in ("running", "queue"):
+    for pfx in (RUNNING_PREFIX, QUEUE_PREFIX):
         try:
             txt = store._download_text(f"{pfx}/{jid}.json")
         except Exception:
@@ -262,7 +269,7 @@ def is_self_terminating_command(cmd: str) -> bool:
     """
     if not cmd:
         return False
-    return ("pkill" in cmd or "kill " in cmd) and "wc agent" in cmd
+    return (PKILL_COMMAND in cmd or KILL_COMMAND_WITH_SPACE in cmd) and WC_AGENT_COMMAND in cmd
 
 
 def finalize_if_self_terminating(store, job, log_fn) -> bool:
@@ -277,7 +284,7 @@ def finalize_if_self_terminating(store, job, log_fn) -> bool:
     job.state = JobState.COMPLETED.value
     job.completed_at = datetime.now(timezone.utc).isoformat()
     job.instance_ref = None
-    store.move_job(job, "running", "completed")
+    store.move_job(job, RUNNING_PREFIX, COMPLETED_PREFIX)
     store.cleanup_status(job.job_id)
     log_fn(f"{job.job_id}: COMPLETED (self-terminating maintenance cmd; "
            f"agent kill is the success condition, not an orphan)")
@@ -290,7 +297,7 @@ def build_ref_to_jids(store) -> dict:
     heartbeat freshness check.
     """
     out: dict = {}
-    running = store.list_jobs("running")
+    running = store.list_jobs(RUNNING_PREFIX)
     for j in running:
         ref = getattr(j, "instance_ref", None)
         jid = getattr(j, "job_id", None)

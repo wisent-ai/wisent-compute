@@ -27,11 +27,18 @@ from typing import Callable
 
 
 MIN_FREE_DISK_GB = 15
+BYTES_PER_GIB = 1024 ** 3
+KIB_PER_GIB = 1024 ** 2
+TOP_CONSUMERS_LIMIT = 15
+HALF_VOLUME_FRACTION = 0.5
+WISENT_UNDERSCORE_GLOB = "wisent_*"
+WISENT_HYPHEN_GLOB = "wisent-*"
+BASH_BIN = "bash"
 
 
 def _free_gb(path: str) -> float:
     try:
-        return shutil.disk_usage(path).free / (1024 ** 3)
+        return shutil.disk_usage(path).free / BYTES_PER_GIB
     except OSError:
         return -1.0
 
@@ -70,7 +77,7 @@ def _evict_complete_hf_revisions(log_fn: Callable[[str], None]) -> float:
     strategy = info.delete_revisions(*hashes)
     strategy.execute()
     freed_bytes = getattr(strategy, "expected_freed_size", 0)
-    return freed_bytes / (1024 ** 3)
+    return freed_bytes / BYTES_PER_GIB
 
 
 STALE_TRAINING_MAX_AGE_S = 3600  # mtime older than 1h => safe to evict
@@ -103,8 +110,8 @@ def _stale_training_dirs() -> list[str]:
     import glob
     home = os.path.expanduser("~")
     now = __import__("time").time()
-    candidates = glob.glob(os.path.join(home, "wisent_*"))
-    candidates += glob.glob(os.path.join(home, "wisent-*"))
+    candidates = glob.glob(os.path.join(home, WISENT_UNDERSCORE_GLOB))
+    candidates += glob.glob(os.path.join(home, WISENT_HYPHEN_GLOB))
     stale: list[str] = []
     for path in candidates:
         if not os.path.isdir(path):
@@ -187,7 +194,7 @@ def _evict_secondary_caches(log_fn: Callable[[str], None]) -> float:
             log_fn(f"secondary-evict rmtree({tgt}) failed: {exc!r}")
             continue
         after = shutil.disk_usage(home).free
-        gained_gb = max(0.0, (after - before) / (1024 ** 3))
+        gained_gb = max(0.0, (after - before) / BYTES_PER_GIB)
         if gained_gb > 0:
             log_fn(f"secondary-evict rm {tgt}: +{gained_gb:.1f} GB free")
             freed += gained_gb
@@ -224,7 +231,7 @@ def _top_consumers() -> list[dict]:
                 continue
             rows.append((size_mb, parts[1]))
     rows.sort(reverse=True)
-    return [{"size_mb": s, "path": p} for s, p in rows[:15]]
+    return [{"size_mb": s, "path": p} for s, p in rows[:TOP_CONSUMERS_LIMIT]]
 
 
 def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
@@ -278,7 +285,7 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
         candidates_diag = []
         import glob as _glob
         home = os.path.expanduser("~")
-        for path in _glob.glob(os.path.join(home, "wisent_*")) + _glob.glob(os.path.join(home, "wisent-*")):
+        for path in _glob.glob(os.path.join(home, WISENT_UNDERSCORE_GLOB)) + _glob.glob(os.path.join(home, WISENT_HYPHEN_GLOB)):
             if not os.path.isdir(path):
                 continue
             newest = _newest_mtime_in_tree(path)
@@ -291,10 +298,10 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
         diag["training_dir_candidates"] = candidates_diag
     # staging-pressure backpressure: refuse extraction admissions when the TMPDIR pending pool leaves too little headroom for an in-flight extraction to finish writing (else it refills the volume -> ENOSPC). Headroom = 2x the largest pending dir, CAPPED at half the volume so a single huge dir (e.g. 169GB ruler) can't demand more free space than the volume can ever offer and freeze extraction forever.
     import subprocess as _sp
-    _td = os.environ.get("TMPDIR", "/tmp"); _us = shutil.disk_usage(_td); _sf = _us.free / (1024 ** 3)
-    _b = _sp.run(["bash", "-c", f"du -s {_td}/wisent_raw_pending/*/ 2>/dev/null | sort -rn | head -1 | cut -f1"], capture_output=True, text=True).stdout.strip()
-    _bg = (int(_b) / (1024 ** 2)) if _b.isdigit() else 0.0
-    _need = min(2 * _bg, 0.5 * _us.total / (1024 ** 3))
+    _td = os.environ.get("TMPDIR", "/tmp"); _us = shutil.disk_usage(_td); _sf = _us.free / BYTES_PER_GIB
+    _b = _sp.run([BASH_BIN, "-c", f"du -s {_td}/wisent_raw_pending/*/ 2>/dev/null | sort -rn | head -1 | cut -f1"], capture_output=True, text=True).stdout.strip()
+    _bg = (int(_b) / KIB_PER_GIB) if _b.isdigit() else 0.0
+    _need = min(2 * _bg, HALF_VOLUME_FRACTION * _us.total / BYTES_PER_GIB)
     if not refuse and 0 <= _sf < _need:
         log_fn(f"staging low (~{_sf:.0f}GB free < need {_need:.0f}GB; largest pending {_bg:.0f}GB); refusing slots"); refuse = True
     return refuse, diag

@@ -17,6 +17,12 @@ import uuid
 RUN_PREFIX = "runs"
 TERMINAL_PREFIXES = ("completed", "failed")
 ALL_PREFIXES = ("queue", "running", "completed", "failed")
+SUBMITTER_APP_KEY = "submitter_app"
+MAX_RUN_NAME_TASKS = 3
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
 
 
 def generate_run_id() -> str:
@@ -43,7 +49,7 @@ def derive_run_name(commands) -> str:
     if len(models) == 1:
         parts.append(next(iter(models)))
     uniq = list(dict.fromkeys(tasks))
-    if 1 <= len(uniq) <= 3:
+    if 1 <= len(uniq) <= MAX_RUN_NAME_TASKS:
         parts.append("+".join(uniq))
     elif uniq:
         parts.append(f"{len(uniq)}tasks")
@@ -103,7 +109,7 @@ def run_status(store, run_id) -> dict | None:
     in_flight = counts["queue"] + counts["running"]
     return {
         "run_id": run_id,
-        "submitter_app": manifest.get("submitter_app", ""),
+        "submitter_app": _dict_value(manifest, SUBMITTER_APP_KEY, ""),
         "n_jobs": manifest["n_jobs"],
         "counts": counts,
         "missing": missing,

@@ -19,14 +19,21 @@ from wisent_compute.queue.storage import JobStorage
 
 JOB_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 STATES = ("running", "queue", "completed", "failed")
+COMMAND_PREVIEW_CHARS = 42
+SUBMITTED_FROM_CHARS = 12
+SUBMITTED_BY_CHARS = 22
 
 
 def _print_job_row(job, state: str) -> None:
     cmd_one_line = " ".join(job.command.split())
-    cmd = cmd_one_line[:42] + "..." if len(cmd_one_line) > 42 else cmd_one_line
+    cmd = (
+        cmd_one_line[:COMMAND_PREVIEW_CHARS] + "..."
+        if len(cmd_one_line) > COMMAND_PREVIEW_CHARS
+        else cmd_one_line
+    )
     submitted_by = getattr(job, "submitted_by", "") or "?"
-    submitted_from = (getattr(job, "submitted_from", "") or "")[:12]
-    who = f"{submitted_by}@{submitted_from}"[:22]
+    submitted_from = (getattr(job, "submitted_from", "") or "")[:SUBMITTED_FROM_CHARS]
+    who = f"{submitted_by}@{submitted_from}"[:SUBMITTED_BY_CHARS]
     click.echo(
         f"{job.job_id:<12} {state:<10} {job.gpu_type or 'cpu':<18} {who:<22} {cmd}"
     )

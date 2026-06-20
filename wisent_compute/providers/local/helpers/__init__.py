@@ -21,6 +21,31 @@ from ....queue.storage import JobStorage
 
 
 VAST_API = "https://console.vast.ai/api/v0"
+PROVIDER_GCP = "gcp"
+PROVIDER_LOCAL = "local"
+GPU_TYPE_CPU = "cpu"
+VAST_INSTANCES_KEY = "instances"
+VAST_ACTUAL_STATUS_KEY = "actual_status"
+VAST_STATUS_RUNNING = "running"
+GEFORCE_PREFIX = "geforce-"
+NVIDIA_PREFIX = "nvidia-"
+EXCLUSIVE_ATTR = "exclusive"
+SLOT_JOB_KEY = "job"
+SLOT_PROC_KEY = "proc"
+MEM_AVAILABLE_LABEL = "MemAvailable:"
+MEM_TOTAL_LABEL = "MemTotal:"
+VM_RSS_LABEL = "VmRSS:"
+KIB_PER_GIB = 1024 ** 2
+BYTES_PER_GIB = 1024 ** 3
+
+
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
@@ -30,10 +55,14 @@ def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
     cost-cap rule. Local agents are typically free hardware, but any job
     with max_cost_per_hour_usd set still respects that cap.
     """
-    base = GPU_HOURLY_RATE_USD.get(accel_type, 0.0)
+    if accel_type not in GPU_HOURLY_RATE_USD:
+        raise KeyError(f"missing hourly GPU rate for {accel_type}")
+    base = GPU_HOURLY_RATE_USD[accel_type]
     if not preemptible:
         return base
-    return base * SPOT_DISCOUNT.get(accel_type, 0.5)
+    if accel_type not in SPOT_DISCOUNT:
+        raise KeyError(f"missing spot discount for {accel_type}")
+    return base * SPOT_DISCOUNT[accel_type]
 
 
 def _vast_has_renter() -> bool:
@@ -54,8 +83,8 @@ def _vast_has_renter() -> bool:
     resp = urllib.request.urlopen(req)
     instances = json.loads(resp.read())
     return any(
-        i.get("actual_status") == "running"
-        for i in instances.get("instances", [])
+        _dict_value(i, VAST_ACTUAL_STATUS_KEY, None) == VAST_STATUS_RUNNING
+        for i in _dict_value(instances, VAST_INSTANCES_KEY, [])
     )
 
 
@@ -68,7 +97,7 @@ def _detect_gpu_type() -> str:
         )
         if r.returncode == 0:
             name = r.stdout.strip().split("\n")[0]
-            return name.lower().replace(" ", "-").replace("geforce-", "nvidia-")
+            return name.lower().replace(" ", "-").replace(GEFORCE_PREFIX, NVIDIA_PREFIX)
     except FileNotFoundError:
         pass
     try:
@@ -119,13 +148,13 @@ def _compat_accel_types(local_vram_gb: int) -> list[str]:
     """Every GCP gpu_type whose required VRAM tier <= local VRAM."""
     from ....models import GPU_SIZING
     accels: list[str] = []
-    for tier, (_, accel) in sorted(GPU_SIZING.get("gcp", {}).items()):
+    for tier, (_, accel) in sorted(_dict_value(GPU_SIZING, PROVIDER_GCP, {}).items()):
         if local_vram_gb >= tier and accel and accel not in accels:
             accels.append(accel)
     return accels
 
 
-def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
+def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = PROVIDER_LOCAL,
                    consumer_id: str = "", active_slot_count: int = 0) -> bool:
     """Local-agent claim rules.
 
@@ -142,11 +171,11 @@ def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
     assigned = getattr(job, "assigned_to", "") or ""
     if assigned and consumer_id and assigned != consumer_id:
         return False
-    if bool(getattr(job, "exclusive", False)) and active_slot_count > 0:
+    if bool(getattr(job, EXCLUSIVE_ATTR, False)) and active_slot_count > 0:
         return False
     from ....config import is_local_only_model
     import re as _re
-    if kind != "local":
+    if kind != PROVIDER_LOCAL:
         m = _re.search(r"--model\s+(\S+)", getattr(job, "command", "") or "")
         if m and is_local_only_model(m.group(1).strip("'\"")):
             return False
@@ -155,7 +184,7 @@ def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
         return False
     job_accel = job.gpu_type or ""
     matches = (
-        job.provider == "local"
+        job.provider == PROVIDER_LOCAL
         or not job_accel
         or job_accel == gpu_type
         or (vram_gb > 0 and job_accel in _compat_accel_types(vram_gb))
@@ -175,26 +204,26 @@ def _build_capacity_dict(gpu_type: str, free_vram_gb: int,
     """Slot-shaped capacity broadcast for back-compat schedulers."""
     from ....models import GPU_SIZING
     out: dict[str, int] = {}
-    if not gpu_type or gpu_type == "cpu" or free_vram_gb <= 0:
+    if not gpu_type or gpu_type == GPU_TYPE_CPU or free_vram_gb <= 0:
         return out
-    for tier, (_, accel) in GPU_SIZING.get("gcp", {}).items():
+    for tier, (_, accel) in _dict_value(GPU_SIZING, PROVIDER_GCP, {}).items():
         if total_vram_gb >= tier and accel:
             n = max(0, free_vram_gb // max(1, tier))
             if n > 0:
-                out[accel] = max(out.get(accel, 0), n)
+                out[accel] = max(_dict_number(out, accel), n)
     if gpu_type not in out and free_vram_gb > 0:
         out[gpu_type] = 1
     return out
 
 
 def _slot_is_exclusive(slot: dict) -> bool:
-    job = slot.get("job")
+    job = _dict_value(slot, SLOT_JOB_KEY, None)
     # Per-job opt-in: Job.exclusive=True takes precedence over the
     # regex-on-command path. Used for workloads (e.g. Z-Image LoRA
     # training, SDXL full finetune) whose peak VRAM is hard to bound
     # from the command string alone, but which the submitter has
     # tagged exclusive at submit time.
-    if bool(getattr(job, "exclusive", False)):
+    if bool(getattr(job, EXCLUSIVE_ATTR, False)):
         return True
     from ....config import is_exclusive_model
     import re
@@ -204,7 +233,7 @@ def _slot_is_exclusive(slot: dict) -> bool:
 
 
 def _slot_vram(slot: dict) -> int:
-    job = slot.get("job")
+    job = _dict_value(slot, SLOT_JOB_KEY, None)
     return max(
         int(getattr(job, "gpu_mem_gb", 0) or 0),
         estimate_gpu_memory(getattr(job, "command", "") or ""),
@@ -217,8 +246,8 @@ def _free_ram_gb() -> float:
     try:
         with open("/proc/meminfo") as f:
             for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) / (1024 ** 2)
+                if line.startswith(MEM_AVAILABLE_LABEL):
+                    return int(line.split()[1]) / KIB_PER_GIB
     except Exception:
         pass
     return -1.0
@@ -233,8 +262,8 @@ def _total_ram_gb() -> float:
     try:
         with open("/proc/meminfo") as f:
             for line in f:
-                if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) / (1024 ** 2)
+                if line.startswith(MEM_TOTAL_LABEL):
+                    return int(line.split()[1]) / KIB_PER_GIB
     except Exception:
         pass
     return -1.0
@@ -245,7 +274,7 @@ def _slot_rss(slot: dict) -> float:
     (bash + python + upload workers), summed from /proc/<pid>/status VmRSS.
     This is the OBSERVED per-job footprint used to decide if another job fits
     — no hardcoded estimate."""
-    pid = getattr(slot.get("proc"), "pid", None)
+    pid = getattr(_dict_value(slot, SLOT_PROC_KEY, None), "pid", None)
     if not pid:
         return 0.0
     from .gpu_probe import _proc_tree_pids
@@ -254,17 +283,17 @@ def _slot_rss(slot: dict) -> float:
         try:
             with open(f"/proc/{p}/status") as f:
                 for line in f:
-                    if line.startswith("VmRSS:"):
+                    if line.startswith(VM_RSS_LABEL):
                         total_kb += int(line.split()[1])
                         break
         except Exception:
             continue
-    return total_kb / (1024 ** 2)
+    return total_kb / KIB_PER_GIB
 
 
 def _no_eligible_in_queue(store: JobStorage, gpu_type: str,
                            total_vram_gb: int, free_vram_gb: int,
-                           kind: str = "local",
+                           kind: str = PROVIDER_LOCAL,
                            consumer_id: str = "",
                            active_slot_count: int = 0) -> bool:
     """True when no queued job fits + is eligible for this consumer."""
@@ -295,4 +324,4 @@ def _staging_size_gb(d: str) -> float:
                 total += os.path.getsize(os.path.join(root, f))
             except OSError:
                 pass
-    return total / (1024 ** 3)
+    return total / BYTES_PER_GIB

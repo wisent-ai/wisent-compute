@@ -24,6 +24,25 @@ from ..models import (
 )
 from ..queue.storage import JobStorage
 
+UNKNOWN_MODEL = "(unknown)"
+FINISHED_JOB_STATES = ("completed", "failed")
+SECONDS_PER_HOUR = 3600.0
+STARTUP_SECONDS = 50.0
+STRATEGY_COUNT = 7.0
+BASE_SECONDS_PER_STRATEGY = 80.0
+SECONDS_PER_GB_PER_STRATEGY = 5.0
+TARGET_KIND_KEY = "target_kind"
+MODEL_KEY = "model"
+COST_ROW_FORMAT = "  {target:<10} jobs={jobs:<5} wall_h={wall_hours:>7.2f} cost=${cost_usd:.4f}"
+AZURE_MACHINE_TYPE_PREFIX = "Standard_"
+LOCAL_INSTANCE_REF_PREFIX = "local@"
+LOCAL_TARGET_KIND = "local"
+GCP_TARGET_KIND = "gcp"
+AZURE_TARGET_KIND = "azure"
+AWS_TARGET_KIND = "aws"
+CLOUD_TARGET_KINDS = (AZURE_TARGET_KIND, AWS_TARGET_KIND, GCP_TARGET_KIND)
+UNKNOWN_TARGET_KIND = "unknown"
+
 
 def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
@@ -51,14 +70,27 @@ def _hourly_rate_usd(gpu_type: str, preemptible: bool, machine_type: str = "") -
     Falls back to GPU_TYPE_TO_MACHINE_TYPE to look up the bundle when
     machine_type wasn't recorded on the Job.
     """
-    if machine_type and machine_type.startswith("Standard_"):
-        on_demand, spot = AZURE_VM_HOURLY_RATE_USD.get(machine_type, (0.0, 0.0))
+    if machine_type and machine_type.startswith(AZURE_MACHINE_TYPE_PREFIX):
+        if machine_type not in AZURE_VM_HOURLY_RATE_USD:
+            raise KeyError(f"Azure machine type has no configured rate: {machine_type}")
+        on_demand, spot = AZURE_VM_HOURLY_RATE_USD[machine_type]
         return spot if preemptible else on_demand
-    gpu = GPU_HOURLY_RATE_USD.get(gpu_type, 0.0)
+    if gpu_type not in GPU_HOURLY_RATE_USD:
+        raise KeyError(f"GPU type has no configured rate: {gpu_type}")
+    gpu = GPU_HOURLY_RATE_USD[gpu_type]
     if preemptible:
-        gpu *= SPOT_DISCOUNT.get(gpu_type, 0.5)
-    mt = machine_type or GPU_TYPE_TO_MACHINE_TYPE.get(gpu_type, "")
-    bundle_pair = VM_BUNDLE_HOURLY_RATE_USD.get(mt, (0.0, 0.0))
+        if gpu_type not in SPOT_DISCOUNT:
+            raise KeyError(f"GPU type has no configured spot discount: {gpu_type}")
+        gpu *= SPOT_DISCOUNT[gpu_type]
+    if machine_type:
+        mt = machine_type
+    else:
+        if gpu_type not in GPU_TYPE_TO_MACHINE_TYPE:
+            raise KeyError(f"GPU type has no configured machine type: {gpu_type}")
+        mt = GPU_TYPE_TO_MACHINE_TYPE[gpu_type]
+    if mt not in VM_BUNDLE_HOURLY_RATE_USD:
+        raise KeyError(f"Machine type has no configured bundle rate: {mt}")
+    bundle_pair = VM_BUNDLE_HOURLY_RATE_USD[mt]
     bundle = bundle_pair[1] if preemptible else bundle_pair[0]
     return gpu + bundle
 
@@ -72,14 +104,14 @@ def _target_kind(job: Job) -> str:
     multi-provider support.
     """
     ref = job.instance_ref or ""
-    if ref.startswith("local@"):
-        return "local"
+    if ref.startswith(LOCAL_INSTANCE_REF_PREFIX):
+        return LOCAL_TARGET_KIND
     provider = (getattr(job, "provider", "") or "").strip()
-    if provider in ("azure", "aws", "gcp"):
+    if provider in CLOUD_TARGET_KINDS:
         return provider
     if ref:
-        return "gcp"
-    return "unknown"
+        return GCP_TARGET_KIND
+    return UNKNOWN_TARGET_KIND
 
 
 def _model_from_command(cmd: str) -> str:
@@ -99,7 +131,7 @@ def wall_time_table(rows: list[dict]) -> dict[tuple[str, str], float]:
     """Median observed wall_time_seconds keyed by (model, gpu_type)."""
     buckets: dict[tuple[str, str], list[float]] = {}
     for r in rows:
-        key = (r["model"] or "(unknown)", r["gpu_type"])
+        key = (r["model"] or UNKNOWN_MODEL, r["gpu_type"])
         buckets.setdefault(key, []).append(float(r["wall_s"]))
     out: dict[tuple[str, str], float] = {}
     for key, walls in buckets.items():
@@ -114,16 +146,16 @@ def heuristic_wall_time_seconds(gpu_mem_gb: int) -> float:
     Derived from cdacc255 phase data: 50s startup + 7 strategies, each strategy
     spending ~80s on layer upload plus extract time scaling with model size.
     """
-    base = 50.0
-    per_strategy = 80.0 + max(0.0, gpu_mem_gb * 5.0)
-    return base + 7.0 * per_strategy
+    per_strategy = BASE_SECONDS_PER_STRATEGY + max(0.0, gpu_mem_gb * SECONDS_PER_GB_PER_STRATEGY)
+    return STARTUP_SECONDS + STRATEGY_COUNT * per_strategy
 
 
 def estimate_wall_time(job_command: str, gpu_type: str, gpu_mem_gb: int,
                        table: dict[tuple[str, str], float]) -> float:
     """Median observed wall-time for this (model, gpu_type) when available."""
-    model = _model_from_command(job_command) or "(unknown)"
-    val = table.get((model, gpu_type))
+    model = _model_from_command(job_command) or UNKNOWN_MODEL
+    key = (model, gpu_type)
+    val = table[key] if key in table else None
     if val and val > 0:
         return val
     return heuristic_wall_time_seconds(gpu_mem_gb)
@@ -132,7 +164,7 @@ def estimate_wall_time(job_command: str, gpu_type: str, gpu_mem_gb: int,
 def collect_completed(store: JobStorage) -> list[dict]:
     """One entry per finished job with wall-time + cost attribution."""
     rows: list[dict] = []
-    for state in ("completed", "failed"):
+    for state in FINISHED_JOB_STATES:
         for job in store.list_jobs(state):
             wall = _wall_seconds(job)
             if wall is None:
@@ -142,7 +174,7 @@ def collect_completed(store: JobStorage) -> list[dict]:
                 getattr(job, "preemptible", False),
                 getattr(job, "machine_type", "") or "",
             )
-            cost = (wall / 3600.0) * rate
+            cost = (wall / SECONDS_PER_HOUR) * rate
             rows.append({
                 "job_id": job.job_id,
                 "state": state,
@@ -166,7 +198,7 @@ def report(store: JobStorage | None = None) -> dict:
     total_cost = 0.0
     total_wall = 0.0
     for r in rows:
-        for table, key in ((by_target, r["target_kind"]), (by_model, r["model"] or "(unknown)")):
+        for table, key in ((by_target, r[TARGET_KIND_KEY]), (by_model, r[MODEL_KEY] or UNKNOWN_MODEL)):
             bucket = table.setdefault(key, {"jobs": 0, "wall_s": 0.0, "cost_usd": 0.0})
             bucket["jobs"] += 1
             bucket["wall_s"] += r["wall_s"]
@@ -206,11 +238,16 @@ def project_batch(batch_path: Path, store: JobStorage | None = None) -> dict:
 def format_report(rep: dict) -> Iterable[str]:
     yield f"jobs_with_walltime: {rep['total_jobs']}"
     yield f"total_cost_usd:     ${rep['total_cost_usd']:.4f}"
-    yield f"total_wall_hours:   {rep['total_wall_s']/3600:.2f}"
+    yield f"total_wall_hours:   {rep['total_wall_s']/SECONDS_PER_HOUR:.2f}"
     yield ""
     yield "by target_kind:"
     for k, v in sorted(rep["by_target"].items()):
-        yield f"  {k:<10} jobs={v['jobs']:<5} wall_h={v['wall_s']/3600:>7.2f} cost=${v['cost_usd']:.4f}"
+        yield COST_ROW_FORMAT.format(
+            target=k,
+            jobs=v["jobs"],
+            wall_hours=v["wall_s"] / SECONDS_PER_HOUR,
+            cost_usd=v["cost_usd"],
+        )
     yield ""
     yield "by model:"
     for k, v in sorted(rep["by_model"].items()):

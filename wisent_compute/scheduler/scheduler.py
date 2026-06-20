@@ -34,6 +34,12 @@ from .quota import get_available_slots
 # Each entry is the minimum minutes since last_dispatch_attempt before we retry.
 DISPATCH_BACKOFF_MINUTES = [0, 1, 5, 15, 30, 60, 120]
 MAX_DISPATCH_BACKOFF_MINUTES = 240
+SECONDS_PER_HOUR = 3600.0
+GPU_MEM_GB_KEY = "gpu_mem_gb"
+GPU_TYPE_KEY = "gpu_type"
+PRIORITY_KEY = "priority"
+MAX_DYNAMIC_PER_TICK_CAP = 25
+QUEUE_BLOB_PREFIX = "queue/"
 
 
 def _log(msg):
@@ -43,10 +49,23 @@ def _log(msg):
 
 def _accel_hourly_rate(accel_type: str, preemptible: bool) -> float:
     """Return $/hour for one accelerator of this type at given pricing model."""
-    base = GPU_HOURLY_RATE_USD.get(accel_type, 0.0)
+    if accel_type not in GPU_HOURLY_RATE_USD:
+        raise KeyError(f"missing hourly GPU rate for {accel_type}")
+    base = GPU_HOURLY_RATE_USD[accel_type]
     if not preemptible:
         return base
-    return base * SPOT_DISCOUNT.get(accel_type, 0.5)
+    if accel_type not in SPOT_DISCOUNT:
+        raise KeyError(f"missing spot discount for {accel_type}")
+    return base * SPOT_DISCOUNT[accel_type]
+
+
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 def _backoff_due(job: Job, now_utc: datetime) -> bool:
@@ -74,7 +93,7 @@ def _dynamic_per_tick_cap(queue_depth: int) -> int:
     base = MAX_SCHEDULE_PER_TICK
     if queue_depth <= base * 2:
         return base
-    return min(25, base + (queue_depth - base * 2) // 4 + 4)  # cap=25 fits 60s tick budget
+    return min(MAX_DYNAMIC_PER_TICK_CAP, base + (queue_depth - base * 2) // 4 + 4)  # cap fits 60s tick budget
 
 
 def schedule_queued_jobs(
@@ -113,12 +132,12 @@ def schedule_queued_jobs(
     in_quota = {a for a, v in available.items() if v > 0}
     cand: list[tuple[int, float, str]] = []  # (-priority, updated_ts, job_id)
     skipped_no_quota = 0
-    for info in store.list_blobs_with_meta("queue/"):
+    for info in store.list_blobs_with_meta(QUEUE_BLOB_PREFIX):
         if not info.name.endswith(".json"):
             continue
         meta = info.metadata or {}
-        gm = int(meta.get("gpu_mem_gb", 0) or 0)
-        explicit_accel = (meta.get("gpu_type") or "").strip()
+        gm = _dict_number(meta, GPU_MEM_GB_KEY)
+        explicit_accel = (_dict_value(meta, GPU_TYPE_KEY, "") or "").strip()
         # gm<=0 jobs are kept: dispatch_agent_vms re-sizes them via its own
         # observed/smallest_live_vram recovery. Only skip jobs with a concrete
         # size that maps to an accelerator with zero available quota.
@@ -126,7 +145,7 @@ def schedule_queued_jobs(
         if accel_for_filter and accel_for_filter not in in_quota:
             skipped_no_quota += 1
             continue
-        prio = int(meta.get("priority", 0) or 0)
+        prio = _dict_number(meta, PRIORITY_KEY)
         ts = info.updated.timestamp() if getattr(info, "updated", None) else 0.0
         cand.append((-prio, ts, info.name.split("/")[-1][:-5]))
     if skipped_no_quota:
@@ -199,7 +218,7 @@ def schedule_queued_jobs(
             if rate <= 0:
                 continue
             wall_s = estimate_wall_time(j.command, j.gpu_type or "", need, wt_table)
-            score = (wall_s / 3600.0) * rate / need  # $-saved per GB on this job
+            score = (wall_s / SECONDS_PER_HOUR) * rate / need  # $-saved per GB on this job
             scored.append((score, need, j))
         scored.sort(key=lambda t: -t[0])
         # Reserve the local agent's admission safety buffer (VRAM_SAFETY_BUFFER_GB
@@ -252,15 +271,15 @@ def schedule_queued_jobs(
             _log(f"{job.job_id}: failed (empty machine_type)")
             return "fail"
         accel = job.gpu_type or ""
-        if accel and available.get(accel, 0) <= 0:
+        if accel and _dict_number(available, accel) <= 0:
             return "skip"
-        if enforce_accel_share and accel and accel_dispatched.get(accel, 0) >= per_accel_share:
+        if enforce_accel_share and accel and _dict_number(accel_dispatched, accel) >= per_accel_share:
             return "skip"
         # Honour the cost-optimal pre-pass first.
         if not pinned and job.job_id in yield_targets:
             _log(f"Yielding {job.job_id} to {yield_targets[job.job_id]} (cost-optimal pack)")
             return "yield"
-        if not pinned and accel and local_free.get(accel, 0) > 0 and not local_vram_pool:
+        if not pinned and accel and _dict_number(local_free, accel) > 0 and not local_vram_pool:
             local_free[accel] -= 1
             _log(f"Yielding {job.job_id} to local agent ({accel}, slots remaining={local_free[accel]})")
             return "yield"
@@ -305,8 +324,8 @@ def schedule_queued_jobs(
         job.started_at = now_utc.isoformat()
         store.move_job(job, "queue", "running")
         if accel:
-            available[accel] = available.get(accel, 0) - 1
-            accel_dispatched[accel] = accel_dispatched.get(accel, 0) + 1
+            available[accel] = _dict_number(available, accel) - 1
+            accel_dispatched[accel] = _dict_number(accel_dispatched, accel) + 1
         scheduled += 1
         _log(f"Scheduled {job.job_id} on {ref} (preemptible={preemptible_for_call})")
         return "ok"

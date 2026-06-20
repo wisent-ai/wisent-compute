@@ -26,6 +26,27 @@ from ...queue.storage import JobStorage
 from .helpers.gpu_probe import smi_job_used_gb
 
 _HF_WRITE_TOK: dict = {}
+PEAK_VRAM_GB_KEY = "peak_vram_gb"
+LOCAL_KIND = "local"
+QUEUE_PREFIX = "queue"
+RUNNING_PREFIX = "running"
+DEFAULT_YIELD_GRACE_SECONDS = 120
+TAIL_LOG_MAX_BYTES = 4096
+LOG_TEXT_ENCODING = "utf-8"
+LOG_DECODE_ERRORS = "replace"
+VERIFY_FAILURE_EXIT_OFFSET = 1000
+VERIFY_EXCEPTION_EXIT_CODE = 1999
+VERIFY_ERROR_SNIPPET_CHARS = 500
+VERIFY_LOG_SNIPPET_CHARS = 120
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 def _hf_write_token(store) -> str:
@@ -197,7 +218,7 @@ def _install_apt_packages(job, kind: str, log_fn) -> bool:
     pkgs = list(getattr(job, "apt_packages", []) or [])
     if not pkgs:
         return True
-    if kind == "local":
+    if kind == LOCAL_KIND:
         log_fn(
             f"refuse {job.job_id}: apt_packages={pkgs} requested but agent "
             f"kind=local; install manually or submit to a cloud-kind agent"
@@ -245,7 +266,7 @@ def _mirror_to_output_uri(store: JobStorage, job, log_fn) -> None:
 
 
 def start_slot(store: JobStorage, job, hostname: str, log_fn,
-               kind: str = "local") -> dict | None:
+               kind: str = LOCAL_KIND) -> dict | None:
     """Spawn a subprocess for `job`, register it in 'running' state, return slot.
 
     Returns None when apt-install (job.apt_packages) refuses or fails —
@@ -259,7 +280,7 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     job.state = JobState.RUNNING.value
     job.started_at = datetime.now(timezone.utc).isoformat()
     job.instance_ref = f"local@{hostname}"
-    store.move_job(job, "queue", "running")
+    store.move_job(job, QUEUE_PREFIX, RUNNING_PREFIX)
     log_file = open(f"{work_dir}/output/command_output.log", "w")
     full_command = _repo_prelude(job) + _pre_command_prelude(job) + job.command
     # WISENT_FLEET_STAGING_DIR points at a persistent agent-owned staging
@@ -316,7 +337,7 @@ def request_yield(slot: dict, store: JobStorage, log_fn) -> bool:
     proc = slot["proc"]
     job = slot["job"]
     pgid = proc.pid
-    grace = int(getattr(job, "yield_grace_seconds", 120) or 120)
+    grace = int(getattr(job, "yield_grace_seconds", DEFAULT_YIELD_GRACE_SECONDS) or DEFAULT_YIELD_GRACE_SECONDS)
     hook = (getattr(job, "yield_command", "") or "").strip()
     work_dir = f"/tmp/wc-{job.job_id}"
     deadline = time.time() + grace
@@ -371,12 +392,12 @@ def request_yield(slot: dict, store: JobStorage, log_fn) -> bool:
         log_fn(f"yield: output upload {job.job_id} failed (non-fatal): {e}")
     # running -> queue (NOT a terminal state, so the tracking tombstone hook
     # is a no-op and the CF monitor leaves it alone once out of running/).
-    store.move_job(job, "running", "queue")
+    store.move_job(job, RUNNING_PREFIX, QUEUE_PREFIX)
     log_fn(f"yield: {job.job_id} requeued (yield_count={job.yield_count})")
     return True
 
 
-def _tail_log(path: str, max_bytes: int = 4096) -> str:
+def _tail_log(path: str, max_bytes: int = TAIL_LOG_MAX_BYTES) -> str:
     """Last max_bytes of the per-job log; '' if missing."""
     if not Path(path).exists():
         return ""
@@ -385,7 +406,7 @@ def _tail_log(path: str, max_bytes: int = 4096) -> str:
         size = f.tell()
         f.seek(max(0, size - max_bytes))
         data = f.read()
-    return data.decode("utf-8", errors="replace").strip()
+    return data.decode(LOG_TEXT_ENCODING, errors=LOG_DECODE_ERRORS).strip()
 
 
 def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bool:
@@ -415,11 +436,14 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
                     cwd=f"/tmp/wc-{job.job_id}", capture_output=True, text=True,
                 )
                 if vres.returncode != 0:
-                    ret = 1000 + vres.returncode
-                    verify_err = (vres.stderr or vres.stdout or "")[:500]
-                    log_fn(f"verify_command failed for {job.job_id}: rc={vres.returncode} err={verify_err[:120]}")
+                    ret = VERIFY_FAILURE_EXIT_OFFSET + vres.returncode
+                    verify_err = (vres.stderr or vres.stdout or "")[:VERIFY_ERROR_SNIPPET_CHARS]
+                    log_fn(
+                        f"verify_command failed for {job.job_id}: "
+                        f"rc={vres.returncode} err={verify_err[:VERIFY_LOG_SNIPPET_CHARS]}"
+                    )
             except Exception as e:
-                ret = 1999
+                ret = VERIFY_EXCEPTION_EXIT_CODE
                 verify_err = f"verify_command raised: {e}"
                 log_fn(f"verify_command exception for {job.job_id}: {e}")
         # Close the log file BEFORE uploading. Earlier this was deferred
@@ -449,7 +473,7 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # raises on real SDK errors; a missing output_dir is a normal
         # happy-path case (job wrote nothing).
         job.peak_vram_gb = max(int(getattr(job, "peak_vram_gb", 0) or 0),
-                               int(slot.get("peak_vram_gb", 0) or 0))
+                               _dict_number(slot, PEAK_VRAM_GB_KEY))
         # Stamp the per-GPU-probe marker: this agent is 0.4.241+,
         # so smi_job_used_gb measured the MAX single-GPU footprint
         # (grouped by gpu_uuid), not a cross-GPU sum. observed_vram_gb
@@ -461,7 +485,7 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
             if escalate_on_oom(store, job, job.error or ""):
                 log_fn(f"Job {job.job_id} OOM-escalated to gpu_mem_gb={job.gpu_mem_gb}; requeued")
                 return False
-        store.move_job(job, "running", state.value)
+        store.move_job(job, RUNNING_PREFIX, state.value)
         if Path(output_dir).exists():
             _upload_output(store, job.job_id, output_dir)
         # Mirror to job.output_uri if set. Runs for both COMPLETED and
@@ -474,7 +498,7 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         return False
     now = time.time()
     _used = smi_job_used_gb(proc.pid)
-    if _used > slot.get("peak_vram_gb", 0):
+    if _used > _dict_number(slot, PEAK_VRAM_GB_KEY):
         slot["peak_vram_gb"] = _used
     if not slot["paused"] and now - slot["last_hb"] > HEARTBEAT_INTERVAL:
         _write_heartbeat(store, job.job_id)

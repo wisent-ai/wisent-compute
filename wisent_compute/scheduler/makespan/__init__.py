@@ -24,6 +24,31 @@ from ._history import _extract_model_task, _history
 HEARTBEAT_TTL_S = 180
 
 _INSTANCE_HOST_RE = re.compile(r"^[^@]+@(.+)$")
+CAPACITY_BLOB_PREFIX = "capacity/"
+RUNNING_BLOB_PREFIX = "running/"
+QUEUE_PREFIX = "queue"
+HIGH_PRIORITY_UNKNOWN_RUNTIME_HOURS = 6
+SECONDS_PER_HOUR = 3600.0
+HIGH_PRIORITY_UNKNOWN_RUNTIME_SECONDS = HIGH_PRIORITY_UNKNOWN_RUNTIME_HOURS * SECONDS_PER_HOUR
+ASSIGNMENT_WRITE_WORKERS = 16
+CONSUMER_ID_KEY = "consumer_id"
+KIND_KEY = "kind"
+COMMAND_KEY = "command"
+RUNTIME_SECONDS_ESTIMATE_KEY = "runtime_seconds_estimate"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
+
+
+def _dict_text(data: dict, key: str, default: str = "") -> str:
+    value = _dict_value(data, key, default)
+    return str(value if value is not None else default)
 
 
 def _estimate_runtime(job, history: dict[tuple[str, str], float]) -> float | None:
@@ -50,13 +75,13 @@ def _live_agents(store: JobStorage, now: dt.datetime) -> dict[str, dict]:
     if bucket is None:
         return {}
     agents: dict[str, dict] = {}
-    for blob in bucket.list_blobs(prefix="capacity/"):
+    for blob in bucket.list_blobs(prefix=CAPACITY_BLOB_PREFIX):
         try:  # capacity blobs can vanish between list and download
             text = blob.download_as_text()
         except NotFound:
             continue
         doc = json.loads(text)
-        cid = doc.get("consumer_id") or ""
+        cid = _dict_text(doc, CONSUMER_ID_KEY)
         pub = doc.get("published_at") or ""
         age = (now - dt.datetime.fromisoformat(pub.replace("Z", "+00:00"))).total_seconds()
         if age > HEARTBEAT_TTL_S:
@@ -68,8 +93,11 @@ def _live_agents(store: JobStorage, now: dt.datetime) -> dict[str, dict]:
         # 2026-05-17). Skip an agent with no free VRAM AND no free slots.
         if int(doc.get("free_vram_gb") or 0) <= 0 and not (doc.get("free_slots") or {}):
             continue
+        kind = _dict_text(doc, KIND_KEY)
+        if not kind:
+            kind = cid.split("-", 1)[0]
         agents[cid] = {
-            "kind": doc.get("kind") or cid.split("-", 1)[0],
+            "kind": kind,
             "free_slots": dict(doc.get("free_slots") or {}),
             "total_vram_gb": int(doc.get("total_vram_gb") or 0),
             "active_slots": [],
@@ -95,7 +123,7 @@ def _seed_running_jobs(store: JobStorage, agents: dict[str, dict],
         if len(parts) == 2:
             host_to_cid[parts[1]] = cid
     from google.api_core.exceptions import NotFound as _NotFound2
-    for blob in bucket.list_blobs(prefix="running/"):
+    for blob in bucket.list_blobs(prefix=RUNNING_BLOB_PREFIX):
         try:  # running blob can be moved to completed/failed mid-tick
             text = blob.download_as_text()
         except _NotFound2:
@@ -126,8 +154,8 @@ def _seed_running_jobs(store: JobStorage, agents: dict[str, dict],
         )).total_seconds()
 
         class _Shim:
-            command = doc.get("command", "")
-            runtime_seconds_estimate = doc.get("runtime_seconds_estimate", 0)
+            command = _dict_text(doc, COMMAND_KEY)
+            runtime_seconds_estimate = _dict_number(doc, RUNTIME_SECONDS_ESTIMATE_KEY)
         est = _estimate_runtime(_Shim(), history)
         if est is None:
             # Admin/maintenance commands have no parseable (model, task); the
@@ -210,7 +238,7 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
     schedulable: list[tuple[int, float, object]] = []
     skip_by_key: dict[tuple[str, str], int] = {}
     to_write: list[object] = []
-    for j in store.list_jobs("queue"):
+    for j in store.list_jobs(QUEUE_PREFIX):
         rt = _estimate_runtime(j, history)
         if rt is None:
             mt = _extract_model_task(getattr(j, "command", "") or "")
@@ -238,7 +266,7 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
             # 30min+, zero dispatch, 2026-05-15). Conservative long
             # runtime so it still enters schedulable and the priority
             # sort below places it first.
-            rt = 6 * 3600.0
+            rt = HIGH_PRIORITY_UNKNOWN_RUNTIME_SECONDS
         schedulable.append((-int(getattr(j, "priority", 0) or 0), -rt, j))
     schedulable.sort(key=lambda t: (t[0], t[1]))
     unassigned = 0
@@ -263,15 +291,15 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
         # OOM-escalation may have just rewritten. Re-read each blob now
         # and touch only assigned_to so the live gpu_mem_gb is preserved.
         def _apply_assignment(j):
-            fresh = store.read_job("queue", j.job_id)
+            fresh = store.read_job(QUEUE_PREFIX, j.job_id)
             if fresh is None:
                 return  # claimed/moved since tick start — nothing to do
             want = getattr(j, "assigned_to", "") or ""
             if (getattr(fresh, "assigned_to", "") or "") == want:
                 return
             fresh.assigned_to = want
-            store.write_job("queue", fresh)
-        with ThreadPoolExecutor(max_workers=16) as ex:
+            store.write_job(QUEUE_PREFIX, fresh)
+        with ThreadPoolExecutor(max_workers=ASSIGNMENT_WRITE_WORKERS) as ex:
             list(ex.map(_apply_assignment, to_write))
     skipped = sum(skip_by_key.values())
     if skipped:

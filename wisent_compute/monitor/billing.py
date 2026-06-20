@@ -40,6 +40,21 @@ _BLOB = "billing_health/credits.json"
 # shape so an env override can never inject SQL.
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _ARM = "https://management.azure.com"
+BILLING_ACCOUNT_KEY = "billing_account"
+BILLING_PROFILE_KEY = "billing_profile"
+SUBSCRIPTION_ID_KEY = "subscription_id"
+PROPERTIES_KEY = "properties"
+UTF8_ENCODING = "utf-8"
+DECODE_ERRORS_REPLACE = "replace"
+CONFIG_ERROR_STATUS = "config_error"
+AUTH_ERROR_STATUS = "auth_error"
+ARM_ERROR_STATUS = "arm_error"
+OK_STATUS = "ok"
+ARM_ERROR_BODY_BYTES = 400
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
 
 
 def _log(msg: str) -> None:
@@ -53,7 +68,7 @@ def _gcp_section() -> dict:
     error so one broken source never suppresses the other."""
     if not _IDENT_RE.match(BILLING_DATASET) or not _IDENT_RE.match(BILLING_TABLE):
         return {
-            "status": "config_error",
+            "status": CONFIG_ERROR_STATUS,
             "detail": f"invalid dataset/table identifier "
             f"{BILLING_DATASET!r}/{BILLING_TABLE!r}",
         }
@@ -125,7 +140,7 @@ def _fetch_azure_sp(secret_name: str) -> dict | None:
         r = client.access_secret_version(request={"name": name})
     except (NotFound, PermissionDenied):
         return None
-    return json.loads(r.payload.data.decode("utf-8"))
+    return json.loads(r.payload.data.decode(UTF8_ENCODING))
 
 
 def _arm_get(url: str, token: str) -> dict:
@@ -152,7 +167,7 @@ def _azure_section() -> dict:
     missing = [k for k in ("tenant_id", "client_id", "client_secret")
                if not sp.get(k)]
     if missing:
-        return {"status": "config_error",
+        return {"status": CONFIG_ERROR_STATUS,
                 "detail": f"Azure SP secret missing keys: {missing}"}
 
     try:
@@ -165,11 +180,12 @@ def _azure_section() -> dict:
         )
         token = cred.get_token(f"{_ARM}/.default").token
     except Exception as e:  # exact auth failure surfaced, not masked
-        return {"status": "auth_error",
+        return {"status": AUTH_ERROR_STATUS,
                 "detail": f"{type(e).__name__}: {e}"}
 
-    ba, bp = sp.get("billing_account"), sp.get("billing_profile")
-    sub = sp.get("subscription_id")
+    ba = _dict_value(sp, BILLING_ACCOUNT_KEY, None)
+    bp = _dict_value(sp, BILLING_PROFILE_KEY, None)
+    sub = _dict_value(sp, SUBSCRIPTION_ID_KEY, None)
     if ba and bp:
         url = (f"{_ARM}/providers/Microsoft.Billing/billingAccounts/{ba}"
                f"/billingProfiles/{bp}/availableBalance"
@@ -178,22 +194,22 @@ def _azure_section() -> dict:
         url = (f"{_ARM}/subscriptions/{sub}/providers/"
                f"Microsoft.Consumption/balances?api-version=2019-10-01")
     else:
-        return {"status": "config_error",
+        return {"status": CONFIG_ERROR_STATUS,
                 "detail": "Azure SP secret needs billing_account+"
                 "billing_profile or subscription_id"}
 
     try:
         body = _arm_get(url, token)
     except urllib.error.HTTPError as e:
-        return {"status": "arm_error",
+        return {"status": ARM_ERROR_STATUS,
                 "detail": f"HTTP {e.code}: "
-                f"{e.read()[:400].decode('utf-8', 'replace')}",
+                f"{e.read()[:ARM_ERROR_BODY_BYTES].decode(UTF8_ENCODING, DECODE_ERRORS_REPLACE)}",
                 "endpoint": url}
     except urllib.error.URLError as e:
-        return {"status": "arm_error", "detail": f"{e.reason}",
+        return {"status": ARM_ERROR_STATUS, "detail": f"{e.reason}",
                 "endpoint": url}
 
-    props = body.get("properties", body)
+    props = _dict_value(body, PROPERTIES_KEY, body)
     amount = None
     if isinstance(props, dict):
         amt = props.get("amount") or props.get("availableBalance")
@@ -201,7 +217,7 @@ def _azure_section() -> dict:
             amount = amt.get("value")
         elif amt is not None:
             amount = amt
-    return {"status": "ok", "available_balance": amount, "raw": props}
+    return {"status": OK_STATUS, "available_balance": amount, "raw": props}
 
 
 def collect_billing(store) -> None:
@@ -236,7 +252,7 @@ def collect_billing(store) -> None:
             f"exhausted or rate-capped"
         )
     bal = azure.get("available_balance")
-    if azure.get("status") == "ok" and isinstance(bal, (int, float)) \
+    if azure.get("status") == OK_STATUS and isinstance(bal, (int, float)) \
             and bal < BILLING_NET_ALERT_USD:
         _log(
             f"BILLING ALERT: Azure available credit balance {bal} "

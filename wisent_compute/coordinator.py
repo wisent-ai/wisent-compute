@@ -26,6 +26,10 @@ from .queue.storage import JobStorage
 from .scheduler import schedule_queued_jobs
 from .targets import Coordinator, load_coordinators, lookup_coordinator
 
+GCS_URI_PREFIX = "gs://"
+GCP_CLOUD_FUNCTION_RUNTIME = "gcp_cloud_function"
+MIN_TICK_INTERVAL_SECONDS = 15
+
 
 def _log(msg: str) -> None:
     sys.stderr.write(f"[tick] {msg}\n")
@@ -53,8 +57,8 @@ def _resolve_coordinator(target: Optional[str]) -> Coordinator:
 
 def _bucket_from_state_uri(state_uri: str) -> str:
     """Strip 'gs://' prefix to get the bucket name JobStorage expects."""
-    if state_uri.startswith("gs://"):
-        return state_uri[len("gs://"):].split("/", 1)[0]
+    if state_uri.startswith(GCS_URI_PREFIX):
+        return state_uri[len(GCS_URI_PREFIX):].split("/", 1)[0]
     return state_uri
 
 
@@ -131,7 +135,7 @@ def _run_tick(store: JobStorage, secrets: dict) -> int:
 def run(target: Optional[str] = None, once: bool = False) -> int:
     """Coordinator daemon entry point. Used by `wc coordinator`."""
     coord = _resolve_coordinator(target)
-    if coord.runtime == "gcp_cloud_function":
+    if coord.runtime == GCP_CLOUD_FUNCTION_RUNTIME:
         _log(
             f"coordinator '{coord.name}' runtime=gcp_cloud_function: tick is "
             f"driven by Cloud Scheduler, this daemon is a no-op. Use --target "
@@ -141,7 +145,7 @@ def run(target: Optional[str] = None, once: bool = False) -> int:
 
     bucket = _bucket_from_state_uri(coord.state_uri) or BUCKET
     store = JobStorage(bucket)
-    interval = max(15, int(coord.interval_seconds))
+    interval = max(MIN_TICK_INTERVAL_SECONDS, int(coord.interval_seconds))
     _log(f"coordinator '{coord.name}' runtime={coord.runtime} interval={interval}s state={coord.state_uri}")
 
     # Populate the secrets dict that dispatch_agent_vms uses to fill

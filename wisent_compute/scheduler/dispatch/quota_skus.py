@@ -29,6 +29,17 @@ import json
 import re
 import subprocess
 
+from .quota_request import _gcp_request_for_family
+
+PROVIDER_GCP = "gcp"
+PROVIDER_AZURE = "azure"
+GPU_FAMILY_KEY = "gpu_family"
+REGION_KEY = "region"
+AVAILABLE_KEY = "available"
+REASON_KEY = "reason"
+NOT_AVAILABLE_REASON = "not available"
+GCP_GPU_FAMILY_QUOTA_ID = "GPUS-PER-GPU-FAMILY-per-project-region"
+
 
 # Note: no hardcoded family list. The bulk-submit path discovers the
 # real set of gpu_family values from the live cloudquotas API via
@@ -37,6 +48,15 @@ import subprocess
 # `gpu_family` dimension that is the ground truth for what families
 # Google currently models in this project. Anything else would
 # reintroduce the "hardcoded list drifts from reality" problem.
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_text(data: dict, key: str, default: str = "") -> str:
+    value = _dict_value(data, key, default)
+    return str(value if value is not None else default)
 
 
 def _gcp_catalog() -> list[dict]:
@@ -71,10 +91,10 @@ def _gcp_catalog() -> list[dict]:
             dims = dict(di.dimensions or {})
             for loc in locs or ["global"]:
                 out.append({
-                    "provider": "gcp",
+                    "provider": PROVIDER_GCP,
                     "quota_id": qid,
                     "metric": info.metric_display_name or info.metric,
-                    "gpu_family": dims.get("gpu_family", ""),
+                    "gpu_family": _dict_text(dims, GPU_FAMILY_KEY),
                     "region": loc,
                     "limit": int(value) if value is not None else None,
                 })
@@ -96,7 +116,7 @@ def _azure_catalog() -> list[dict]:
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         return [{
-            "provider": "azure", "ok": False,
+            "provider": PROVIDER_AZURE, "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
         }]
     skus = json.loads(r.stdout) if r.stdout.strip() else []
@@ -111,7 +131,7 @@ def _azure_catalog() -> list[dict]:
         # many SKUs per family, so we dedupe at print/aggregate time.
         for loc in locs:
             out.append({
-                "provider": "azure",
+                "provider": PROVIDER_AZURE,
                 "family": fam,
                 "sku": name,
                 "location": loc,
@@ -141,8 +161,8 @@ def gcp_request_status() -> list[dict]:
         dims = dict(pref.dimensions or {})
         out.append({
             "name": pref.name, "quota_id": pref.quota_id,
-            "gpu_family": dims.get("gpu_family", ""),
-            "region": dims.get("region", ""),
+            "gpu_family": _dict_text(dims, GPU_FAMILY_KEY),
+            "region": _dict_text(dims, REGION_KEY),
             "preferred_value": qc.preferred_value if qc else 0,
             "granted_value": qc.granted_value if qc and qc.granted_value else None,
             "state": state, "state_detail": qc.state_detail if qc else "",
@@ -160,9 +180,9 @@ def provider_catalog(provider: str) -> list[dict]:
     A failure to fetch surfaces as a single row with `ok=False` plus
     an `error` field so the caller can print it without dying.
     """
-    if provider == "gcp":
+    if provider == PROVIDER_GCP:
         return _gcp_catalog()
-    if provider == "azure":
+    if provider == PROVIDER_AZURE:
         return _azure_catalog()
     return [{"provider": provider, "ok": False,
              "error": "no catalog impl for this provider"}]
@@ -189,7 +209,6 @@ def gcp_request_all_families(
     drops or adds tomorrow is picked up on the next call without a
     package release.
     """
-    from .quota_request import _gcp_request_for_family
     import os as _os
     project = _os.environ.get("GCP_PROJECT", "wisent-480400")
     # Discover (a) the set of gpu_family values Google models for
@@ -204,7 +223,7 @@ def gcp_request_all_families(
     families: set[str] = set()
     all_regions: set[str] = set()
     for row in _gcp_catalog():
-        if row.get("quota_id") != "GPUS-PER-GPU-FAMILY-per-project-region":
+        if row.get("quota_id") != GCP_GPU_FAMILY_QUOTA_ID:
             continue
         fam = row.get("gpu_family") or ""
         region = row.get("region") or ""
@@ -275,15 +294,15 @@ def azure_request_all_families(
                 r = _azure_request_increase(
                     AZURE_SUBSCRIPTION_ID, loc, fam, new_limit,
                 )
-                if not r.get("available", True):
+                if not _dict_value(r, AVAILABLE_KEY, True):
                     out.append({
-                        "provider": "azure", "location": loc,
+                        "provider": PROVIDER_AZURE, "location": loc,
                         "family": fam, "ok": False,
-                        "error": r.get("reason", "not available"),
+                        "error": _dict_text(r, REASON_KEY, NOT_AVAILABLE_REASON),
                     })
                 else:
                     out.append({
-                        "provider": "azure", "location": loc,
+                        "provider": PROVIDER_AZURE, "location": loc,
                         "family": fam, "ok": True, **r,
                     })
             except Exception as exc:

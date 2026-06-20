@@ -43,6 +43,18 @@ DISPATCH_FAILED = "dispatch_failed"
 DRY_RUN = "dry_run"
 ALREADY_DISPATCHED = "already_dispatched"
 CLAUDE_NOT_FOUND = "claude_cli_not_found"
+ATTEMPTS_KEY = "attempts"
+FAILED_PREFIX = "failed/"
+CLAUDE_BIN = "claude"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 @dataclass
@@ -88,7 +100,7 @@ def scan_new_failures(
     operator target the workload they actually want fixed (e.g.
     'raw.extract_and_upload', 'extract_and_upload', 'lm_eval')
     instead of every historical failure."""
-    for info in store.list_blobs_with_meta("failed/"):
+    for info in store.list_blobs_with_meta(FAILED_PREFIX):
         if not info.name.endswith(".json"):
             continue
         rec = _parse_failed_blob(store, info.name)
@@ -142,7 +154,7 @@ def format_fix_prompt(rec: FailureRecord, max_error_chars: int = FAILURE_FIX_PRO
 
 def _claude_bin() -> str | None:
     """Locate the local `claude` CLI binary. Returns None if not on PATH."""
-    return shutil.which("claude")
+    return shutil.which(CLAUDE_BIN)
 
 
 def dispatch_fix(rec: FailureRecord, *, store: JobStorage | None = None, execute: bool = False) -> dict:
@@ -151,7 +163,7 @@ def dispatch_fix(rec: FailureRecord, *, store: JobStorage | None = None, execute
     dispatch payload without exec'ing."""
     store = store or JobStorage(BUCKET)
     state = state_load(store, rec.job_id)
-    attempts = state.get("attempts", 0)
+    attempts = _dict_number(state, ATTEMPTS_KEY)
     if attempts >= FAILURE_FIXER_ATTEMPT_CAP:
         return {"job_id": rec.job_id, "status": EXHAUSTED, "attempts": attempts}
     prompt = format_fix_prompt(rec)
@@ -216,7 +228,7 @@ def scan_and_dispatch(
     ):
         if skip_dispatched:
             prior = state_load(store, rec.job_id)
-            if prior.get("attempts", 0) > 0:
+            if _dict_number(prior, ATTEMPTS_KEY) > 0:
                 out.append({"job_id": rec.job_id, "status": ALREADY_DISPATCHED,
                             "attempts": prior["attempts"]})
                 continue

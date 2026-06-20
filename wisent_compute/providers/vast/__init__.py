@@ -28,6 +28,29 @@ import urllib.request
 
 _VAST_BASE = "https://console.vast.ai/api/v0"
 _AUTO_LIST_THREAD_RUNNING = False  # set True when auto_list_loop starts
+ID_KEY = "id"
+DEFAULT_PRICE_GPU = 0.50
+DEFAULT_PRICE_DISK = 0.05
+DEFAULT_PRICE_INET_UP = 0.01
+DEFAULT_PRICE_INET_DOWN = 0.01
+PRICE_NORMALIZATION_TOLERANCE = 0.01
+MACHINE_NOT_FOUND_ERROR = "not found in /machines/?owner=me response"
+QUEUE_PREFIX = "queue/"
+RUNNING_PREFIX = "running/"
+DEFAULT_COMPUTE_BUCKET = "wisent-compute"
+DEFAULT_IDLE_WINDOW_SECONDS = 300
+DEFAULT_POLL_INTERVAL_SECONDS = 10
+DEFAULT_LISTING_DURATION_SECONDS = 15768000
+RENTAL_BUSY_FREE_VRAM_GB = 10
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key: str, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 class VastConfigError(RuntimeError):
@@ -104,10 +127,10 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
 
 def list_machine(
     *,
-    price_gpu: float = 0.50,
-    price_disk: float = 0.05,
-    price_inetu: float = 0.01,
-    price_inetd: float = 0.01,
+    price_gpu: float = DEFAULT_PRICE_GPU,
+    price_disk: float = DEFAULT_PRICE_DISK,
+    price_inetu: float = DEFAULT_PRICE_INET_UP,
+    price_inetd: float = DEFAULT_PRICE_INET_DOWN,
     price_min_bid: float | None = None,
     min_chunk: int = 1,
     duration: int | None = None,
@@ -146,9 +169,9 @@ def machine_status() -> dict:
     resp = _request("GET", "/machines/?owner=me", None)
     machines = resp.get("machines") or resp.get("results") or []
     for m in machines:
-        if int(m.get("id", -1)) == mid:
+        if _dict_number(m, ID_KEY, -1) == mid:
             return m
-    return {"id": mid, "error": "not found in /machines/?owner=me response"}
+    return {"id": mid, "error": MACHINE_NOT_FOUND_ERROR}
 
 
 def _is_wisent_compute_busy(bucket: str, hostname: str) -> dict:
@@ -159,9 +182,9 @@ def _is_wisent_compute_busy(bucket: str, hostname: str) -> dict:
     from google.api_core.exceptions import NotFound
     client = storage.Client()
     b = client.bucket(bucket)
-    queued = sum(1 for _ in b.list_blobs(prefix="queue/", max_results=2))
+    queued = sum(1 for _ in b.list_blobs(prefix=QUEUE_PREFIX, max_results=2))
     running_here = 0
-    for blob in b.list_blobs(prefix="running/"):
+    for blob in b.list_blobs(prefix=RUNNING_PREFIX):
         try:
             doc = json.loads(blob.download_as_text())
             if hostname and hostname in (doc.get("instance_ref") or ""):
@@ -182,12 +205,12 @@ def _is_wisent_compute_busy(bucket: str, hostname: str) -> dict:
 
 def auto_list_loop(
     *,
-    bucket: str = "wisent-compute",
+    bucket: str = DEFAULT_COMPUTE_BUCKET,
     hostname: str | None = None,
-    idle_window_s: int = 300,
-    poll_interval_s: int = 10,
-    price_gpu: float = 0.50,
-    duration_s: int | None = 15768000,
+    idle_window_s: int = DEFAULT_IDLE_WINDOW_SECONDS,
+    poll_interval_s: int = DEFAULT_POLL_INTERVAL_SECONDS,
+    price_gpu: float = DEFAULT_PRICE_GPU,
+    duration_s: int | None = DEFAULT_LISTING_DURATION_SECONDS,
     dry_run: bool = False,
     log_fn=None,
 ) -> None:
@@ -221,7 +244,7 @@ def auto_list_loop(
         if isinstance(cur_price, (int, float)) and cur_price > 0:
             listed = True
             log_fn(f"startup: listed at ${cur_price}/h on machine_id={ms.get('id')}")
-            if abs(cur_price - price_gpu) > 0.01 and not dry_run:
+            if abs(cur_price - price_gpu) > PRICE_NORMALIZATION_TOLERANCE and not dry_run:
                 try:
                     unlist_machine()
                     list_machine(price_gpu=price_gpu, duration=duration_s)
@@ -285,7 +308,7 @@ def auto_list_loop(
             if (not listed
                     and st["queued"] > 0
                     and isinstance(free_v, (int, float))
-                    and free_v < 10):
+                    and free_v < RENTAL_BUSY_FREE_VRAM_GB):
                 log_fn(
                     f"waiting for Vast rental to finish "
                     f"(queued={st['queued']}, free_vram_gb={free_v}); "

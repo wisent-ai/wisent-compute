@@ -21,6 +21,54 @@ from .config import (
 from .queue.submit import submit_job, COMPUTE_API
 from .queue.storage import JobStorage
 
+DISPLAY_EMPTY = ""
+DISPLAY_UNKNOWN = "?"
+DISPLAY_DASH = "-"
+DISPLAY_TRUE = "Y"
+DISPLAY_FALSE = "N"
+DISPLAY_FALSE_LOWER = "n"
+TARGET_KIND_LOCAL = "local"
+PROVIDER_GCP = "gcp"
+PROVIDER_AZURE = "azure"
+ACTION_ESCALATED = "escalated"
+ACTION_ERROR = "error"
+ACTION_DRY_RUN = "dry_run"
+SCHEDULE_STATE_ENABLED = "enabled"
+SCHEDULE_STATE_DISABLED = "DISABLED"
+ID_KEY = "id"
+STATUS_KEY = "status"
+DOCKER_IMAGE_KEY = "docker_image"
+TOTAL_COST_CENTS_KEY = "total_cost_cents"
+OK_KEY = "ok"
+NAME_KEY = "name"
+ERROR_KEY = "error"
+ACTION_KEY = "action"
+WOULD_KEY = "would"
+REGION_KEY = "region"
+LOCATION_KEY = "location"
+PROVIDER_KEY = "provider"
+QUOTA_ID_KEY = "quota_id"
+GPU_FAMILY_KEY = "gpu_family"
+FAMILY_KEY = "family"
+STATE_KEY = "state"
+PREFERRED_VALUE_KEY = "preferred_value"
+GRANTED_VALUE_KEY = "granted_value"
+AWAITING_CUSTOMER_KEY = "awaiting_customer"
+LAST_SENT_KEY = "last_sent"
+LAST_BODY_SNIPPET_KEY = "last_body_snippet"
+STATUS_API_ID_CHARS = 36
+STATUS_API_IMAGE_CHARS = 28
+JOB_COMMAND_PREVIEW_CHARS = 42
+SCHEDULE_CREATE_COMMAND_PREVIEW_CHARS = 80
+SCHEDULE_COMMAND_PREVIEW_CHARS = 34
+CENTS_PER_DOLLAR = 100
+DEFAULT_COLUMN_SEPARATOR_WIDTH = 80
+ESCALATION_TABLE_WIDTH = 92
+QUOTA_REQUEST_TABLE_WIDTH = 100
+STATUS_TABLE_WIDTH = 95
+GCS_STATUS_TABLE_WIDTH = 110
+SCHEDULE_LIST_TABLE_WIDTH = 120
+
 
 def _api_key():
     return os.environ.get("COMPUTE_API_KEY", "").strip()
@@ -33,6 +81,32 @@ def _api_get(path):
     )
     resp = urllib.request.urlopen(req)
     return json.loads(resp.read())
+
+
+def _row_value(row: dict, key: str, placeholder=DISPLAY_EMPTY):
+    return row[key] if key in row else placeholder
+
+
+def _row_text(row: dict, key: str, placeholder=DISPLAY_UNKNOWN) -> str:
+    value = _row_value(row, key, placeholder)
+    return str(value if value not in (None, DISPLAY_EMPTY) else placeholder)
+
+
+def _row_number(row: dict, key: str, placeholder=0):
+    value = _row_value(row, key, placeholder)
+    return value if value is not None else placeholder
+
+
+def _row_truthy(row: dict, key: str) -> bool:
+    return bool(row[key]) if key in row else False
+
+
+def _first_row_text(row: dict, keys: tuple[str, ...], placeholder=DISPLAY_UNKNOWN) -> str:
+    for key in keys:
+        value = _row_value(row, key, DISPLAY_EMPTY)
+        if value not in (None, DISPLAY_EMPTY):
+            return str(value)
+    return placeholder
 
 
 @click.group()
@@ -210,12 +284,12 @@ def status(filter_id):
 def _status_api(filter_id):
     instances = _api_get("/api/v1/instances")
     click.echo(f"{'ID':<38} {'STATUS':<12} {'IMAGE':<30} {'COST'}")
-    click.echo("-" * 95)
+    click.echo("-" * STATUS_TABLE_WIDTH)
     for inst in instances:
-        iid = inst.get("id", "")[:36]
-        st = inst.get("status", "")
-        img = inst.get("docker_image", "")[:28]
-        cost = inst.get("total_cost_cents", 0) / 100
+        iid = _row_text(inst, ID_KEY, DISPLAY_EMPTY)[:STATUS_API_ID_CHARS]
+        st = _row_text(inst, STATUS_KEY, DISPLAY_EMPTY)
+        img = _row_text(inst, DOCKER_IMAGE_KEY, DISPLAY_EMPTY)[:STATUS_API_IMAGE_CHARS]
+        cost = _row_number(inst, TOTAL_COST_CENTS_KEY, 0) / CENTS_PER_DOLLAR
         if filter_id and filter_id not in iid:
             continue
         click.echo(f"{iid:<38} {st:<12} {img:<30} ${cost:.2f}")
@@ -228,7 +302,11 @@ _STATES = ("running", "queue", "completed", "uploaded", "failed")
 
 def _print_job_row(job, state):
     cmd_one_line = " ".join(job.command.split())
-    cmd = cmd_one_line[:42] + "..." if len(cmd_one_line) > 42 else cmd_one_line
+    cmd = (
+        cmd_one_line[:JOB_COMMAND_PREVIEW_CHARS] + "..."
+        if len(cmd_one_line) > JOB_COMMAND_PREVIEW_CHARS
+        else cmd_one_line
+    )
     who = (f"{getattr(job, 'submitted_by', '') or '?'}@{(getattr(job, 'submitted_from', '') or '')[:12]}")[:22]
     click.echo(f"{job.job_id:<12} {state:<10} {job.gpu_type or 'cpu':<18} {who:<22} {cmd}")
 
@@ -236,7 +314,7 @@ def _print_job_row(job, state):
 def _status_gcs(filter_id):
     store = JobStorage(BUCKET)
     click.echo(f"{'JOB ID':<12} {'STATE':<10} {'GPU':<18} {'SUBMITTED_BY':<22} {'COMMAND'}")
-    click.echo("-" * 110)
+    click.echo("-" * GCS_STATUS_TABLE_WIDTH)
 
     # Fast path: filter looks like a job_id — 4 parallel direct reads, no listing.
     if filter_id and _JOB_ID_RE.match(filter_id):
@@ -351,7 +429,7 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
         t = lookup(target)
         if not t:
             raise click.ClickException(f"target '{target}' not found in registry")
-        if t.kind != "local":
+        if t.kind != TARGET_KIND_LOCAL:
             raise click.ClickException(f"target '{target}' kind={t.kind}, expected local")
         gpu_type = gpu_type or (t.gpu_type or "")
         _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
@@ -371,7 +449,7 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
     except Exception:
         env_has_api_key = bool(_os.environ.get("VAST_API_KEY", "").strip())
     effective_vast = vast_auto_list or explicit_on or (
-        kind == "local" and env_has_api_key and not explicit_off
+        kind == TARGET_KIND_LOCAL and env_has_api_key and not explicit_off
     )
     if effective_vast:
         # Spawn the Vast.ai auto-listing daemon as a background thread so
@@ -533,10 +611,10 @@ def quota_request(accel, new_limit, regions, providers_arg, justification,
     click.echo(f"{'PROVIDER':<8} {'REGION/LOC':<18} {'OK':<3} {'DETAIL'}")
     click.echo("-" * 80)
     for r in results:
-        rkey = r.get("region") or r.get("location") or "-"
-        ok = "Y" if r.get("ok") else "N"
-        detail = r.get("name") if r.get("ok") else r.get("error", "?")
-        click.echo(f"{r.get('provider', '?'):<8} {rkey:<18} {ok:<3} {detail}")
+        rkey = _first_row_text(r, (REGION_KEY, LOCATION_KEY), DISPLAY_DASH)
+        ok = DISPLAY_TRUE if _row_truthy(r, OK_KEY) else DISPLAY_FALSE
+        detail = _row_text(r, NAME_KEY) if _row_truthy(r, OK_KEY) else _row_text(r, ERROR_KEY)
+        click.echo(f"{_row_text(r, PROVIDER_KEY):<8} {rkey:<18} {ok:<3} {detail}")
     ok_count = sum(1 for r in results if r.get("ok"))
     click.echo(f"\n{ok_count}/{len(results)} succeeded")
 
@@ -654,11 +732,11 @@ def quota_azure_escalate(dry_run, contact_email):
     # the standard reply path is what azure-replies handles, so this
     # CLI surfaces only the billing-decline → escalation rows.
     def _is_escalation_row(r):
-        if r.get("action") == "escalated":
+        if _row_value(r, ACTION_KEY) == ACTION_ESCALATED:
             return True
-        if r.get("action") == "error":
+        if _row_value(r, ACTION_KEY) == ACTION_ERROR:
             return True
-        if r.get("action") == "dry_run" and r.get("would") == "escalated":
+        if _row_value(r, ACTION_KEY) == ACTION_DRY_RUN and _row_value(r, WOULD_KEY) == ACTION_ESCALATED:
             return True
         return False
     relevant = [r for r in results if _is_escalation_row(r)]
@@ -666,16 +744,16 @@ def quota_azure_escalate(dry_run, contact_email):
         click.echo("(no billing-decline tickets to escalate)")
         return
     click.echo(f"{'TICKET':<46} {'REGION':<22} {'OK':<3} {'ACTION'}")
-    click.echo("-" * 92)
+    click.echo("-" * ESCALATION_TABLE_WIDTH)
     for r in relevant:
-        action = r.get("action", "?")
-        if action == "dry_run":
+        action = _row_text(r, ACTION_KEY)
+        if action == ACTION_DRY_RUN:
             action = f"dry_run → would escalate"
-        detail = ' — ' + r.get('error', '') if r.get('error') else ''
+        detail = ' — ' + _row_text(r, ERROR_KEY, DISPLAY_EMPTY) if _row_truthy(r, ERROR_KEY) else ''
         click.echo(
-            f"{r.get('name', '?')[:44]:<46} "
-            f"{r.get('region', '-')[:20]:<22} "
-            f"{'Y' if r.get('ok') else 'N':<3} "
+            f"{_row_text(r, NAME_KEY)[:44]:<46} "
+            f"{_row_text(r, REGION_KEY, DISPLAY_DASH)[:20]:<22} "
+            f"{DISPLAY_TRUE if _row_truthy(r, OK_KEY) else DISPLAY_FALSE:<3} "
             f"{action}{detail}"
         )
     ok_count = sum(1 for r in relevant if r.get("ok"))
@@ -711,24 +789,30 @@ def quota_catalog(providers_arg, as_json):
         if any(r.get("ok") is False for r in rows):
             for r in rows:
                 if r.get("ok") is False:
-                    click.echo(f"  ERROR: {r.get('error', '?')}")
+                    click.echo(f"  ERROR: {_row_text(r, ERROR_KEY)}")
             continue
-        if provider == "gcp":
+        if provider == PROVIDER_GCP:
             click.echo(f"  {'QUOTA_ID':<52} {'FAMILY':<20} {'REGION':<16} {'LIMIT':>6}")
-            for r in sorted(rows, key=lambda x: (x.get("quota_id", ""), x.get("region", ""))):
+            for r in sorted(
+                rows,
+                key=lambda x: (
+                    _row_text(x, QUOTA_ID_KEY, DISPLAY_EMPTY),
+                    _row_text(x, REGION_KEY, DISPLAY_EMPTY),
+                ),
+            ):
                 lim = r.get("limit")
-                lim_str = str(lim) if lim is not None else "-"
+                lim_str = str(lim) if lim is not None else DISPLAY_DASH
                 click.echo(
-                    f"  {(r.get('quota_id', '?') or '?')[:50]:<52} "
-                    f"{(r.get('gpu_family') or '-')[:18]:<20} "
-                    f"{(r.get('region') or '-')[:14]:<16} "
+                    f"  {_row_text(r, QUOTA_ID_KEY)[:50]:<52} "
+                    f"{_row_text(r, GPU_FAMILY_KEY, DISPLAY_DASH)[:18]:<20} "
+                    f"{_row_text(r, REGION_KEY, DISPLAY_DASH)[:14]:<16} "
                     f"{lim_str:>6}"
                 )
-        elif provider == "azure":
+        elif provider == PROVIDER_AZURE:
             seen_fam = {}
             for r in rows:
-                fam = r.get("family", "")
-                loc = r.get("location", "")
+                fam = _row_text(r, FAMILY_KEY, DISPLAY_EMPTY)
+                loc = _row_text(r, LOCATION_KEY, DISPLAY_EMPTY)
                 seen_fam.setdefault(fam, set()).add(loc)
             click.echo(f"  {'FAMILY':<36} {'LOCATIONS'}")
             for fam in sorted(seen_fam):
@@ -775,14 +859,14 @@ def quota_request_all(new_limit, providers_arg, regions_arg, justification,
     explicit_regions = [r.strip() for r in regions_arg.split(",") if r.strip()]
     if not contact_email:
         contact_email = _os.environ.get("WC_QUOTA_CONTACT_EMAIL", "").strip()
-    if not contact_email and "gcp" in providers:
+    if not contact_email and PROVIDER_GCP in providers:
         raise click.ClickException(
             "--email is required for GCP (or set WC_QUOTA_CONTACT_EMAIL); "
             "the Cloud Quotas API mandates a contact email on every preference."
         )
     results: list[dict] = []
     for p in providers:
-        if p == "gcp":
+        if p == PROVIDER_GCP:
             # Default = no region filter = every applicable_region the
             # catalog reports per family. The bulk submitter intersects
             # against this only if explicit_regions is non-empty. Don't
@@ -792,7 +876,7 @@ def quota_request_all(new_limit, providers_arg, regions_arg, justification,
                 new_limit=new_limit, regions=explicit_regions,
                 contact_email=contact_email, justification=justification,
             ))
-        elif p == "azure":
+        elif p == PROVIDER_AZURE:
             results.extend(azure_request_all_families(
                 new_limit=new_limit, locations=explicit_regions,
             ))
@@ -803,14 +887,14 @@ def quota_request_all(new_limit, providers_arg, regions_arg, justification,
         click.echo(json.dumps(results, indent=2, sort_keys=True))
         return
     click.echo(f"{'PROVIDER':<8} {'REGION/LOC':<18} {'FAMILY':<22} {'OK':<3} {'DETAIL'}")
-    click.echo("-" * 100)
+    click.echo("-" * QUOTA_REQUEST_TABLE_WIDTH)
     for r in results:
-        rkey = r.get("region") or r.get("location") or "-"
-        fam = r.get("gpu_family") or r.get("family") or "-"
-        ok = "Y" if r.get("ok") else "N"
-        detail = r.get("name") if r.get("ok") else r.get("error", "?")
+        rkey = _first_row_text(r, (REGION_KEY, LOCATION_KEY), DISPLAY_DASH)
+        fam = _first_row_text(r, (GPU_FAMILY_KEY, FAMILY_KEY), DISPLAY_DASH)
+        ok = DISPLAY_TRUE if _row_truthy(r, OK_KEY) else DISPLAY_FALSE
+        detail = _row_text(r, NAME_KEY) if _row_truthy(r, OK_KEY) else _row_text(r, ERROR_KEY)
         click.echo(
-            f"{r.get('provider', '?'):<8} {rkey[:16]:<18} {fam[:20]:<22} "
+            f"{_row_text(r, PROVIDER_KEY):<8} {rkey[:16]:<18} {fam[:20]:<22} "
             f"{ok:<3} {str(detail)[:60]}"
         )
     ok_count = sum(1 for r in results if r.get("ok"))
@@ -841,18 +925,18 @@ def quota_requests(providers_arg, state_filter, awaiting_customer, as_json):
     providers = [p.strip() for p in providers_arg.split(",") if p.strip()] \
         or WC_PROVIDERS
     payload: dict = {}
-    if "gcp" in providers:
+    if PROVIDER_GCP in providers:
         from .scheduler.dispatch.quota_skus import gcp_request_status
         rows = gcp_request_status()
         if state_filter:
-            rows = [r for r in rows if r.get("state") == state_filter]
-        payload["gcp"] = rows
-    if "azure" in providers:
+            rows = [r for r in rows if _row_value(r, STATE_KEY) == state_filter]
+        payload[PROVIDER_GCP] = rows
+    if PROVIDER_AZURE in providers:
         from .scheduler.dispatch.quota_replies import list_open_azure_tickets
         rows = list_open_azure_tickets()
         if awaiting_customer:
-            rows = [r for r in rows if r.get("awaiting_customer")]
-        payload["azure"] = rows
+            rows = [r for r in rows if _row_truthy(r, AWAITING_CUSTOMER_KEY)]
+        payload[PROVIDER_AZURE] = rows
     if as_json:
         click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return
@@ -861,33 +945,42 @@ def quota_requests(providers_arg, state_filter, awaiting_customer, as_json):
         if not rows:
             click.echo("  (empty)")
             continue
-        if provider == "gcp":
+        if provider == PROVIDER_GCP:
             buckets: dict[str, int] = {}
             for r in rows:
-                buckets[r.get("state", "?")] = buckets.get(r.get("state", "?"), 0) + 1
+                state = _row_text(r, STATE_KEY)
+                buckets[state] = _row_number(buckets, state, 0) + 1
             click.echo("  by state: " + ", ".join(
                 f"{s}={n}" for s, n in sorted(buckets.items())
             ))
             click.echo(f"  {'STATE':<20} {'FAMILY':<20} {'REGION':<16} {'PREF':>5} {'GRANTED':>8}")
-            for r in sorted(rows, key=lambda x: (x.get("state", ""), x.get("gpu_family", ""), x.get("region", ""))):
+            for r in sorted(
+                rows,
+                key=lambda x: (
+                    _row_text(x, STATE_KEY, DISPLAY_EMPTY),
+                    _row_text(x, GPU_FAMILY_KEY, DISPLAY_EMPTY),
+                    _row_text(x, REGION_KEY, DISPLAY_EMPTY),
+                ),
+            ):
+                granted = _row_value(r, GRANTED_VALUE_KEY, None)
                 click.echo(
-                    f"  {(r.get('state') or '?')[:18]:<20} "
-                    f"{(r.get('gpu_family') or '-')[:18]:<20} "
-                    f"{(r.get('region') or '-')[:14]:<16} "
-                    f"{(r.get('preferred_value') or 0):>5} "
-                    f"{(str(r.get('granted_value')) if r.get('granted_value') is not None else '-'):>8}"
+                    f"  {_row_text(r, STATE_KEY)[:18]:<20} "
+                    f"{_row_text(r, GPU_FAMILY_KEY, DISPLAY_DASH)[:18]:<20} "
+                    f"{_row_text(r, REGION_KEY, DISPLAY_DASH)[:14]:<16} "
+                    f"{_row_number(r, PREFERRED_VALUE_KEY, 0):>5} "
+                    f"{(str(granted) if granted is not None else DISPLAY_DASH):>8}"
                 )
-        elif provider == "azure":
-            ms_n = sum(1 for r in rows if r.get("awaiting_customer"))
+        elif provider == PROVIDER_AZURE:
+            ms_n = sum(1 for r in rows if _row_truthy(r, AWAITING_CUSTOMER_KEY))
             click.echo(f"  awaiting customer: {ms_n}    awaiting Microsoft: {len(rows) - ms_n}")
             click.echo(f"  {'REGION':<22} {'AWAIT_CUST':<11} {'LAST_SENT':<22} {'LAST_BODY_SNIPPET'}")
-            for r in sorted(rows, key=lambda x: (not x.get("awaiting_customer"), x.get("region", ""))):
-                ac = "Y" if r.get("awaiting_customer") else "N"
+            for r in sorted(rows, key=lambda x: (not _row_truthy(x, AWAITING_CUSTOMER_KEY), _row_text(x, REGION_KEY, DISPLAY_EMPTY))):
+                ac = DISPLAY_TRUE if _row_truthy(r, AWAITING_CUSTOMER_KEY) else DISPLAY_FALSE
                 click.echo(
-                    f"  {(r.get('region') or '?')[:20]:<22} "
+                    f"  {_row_text(r, REGION_KEY)[:20]:<22} "
                     f"{ac:<11} "
-                    f"{(r.get('last_sent') or '-')[:20]:<22} "
-                    f"{(r.get('last_body_snippet') or '')[:60]}"
+                    f"{_row_text(r, LAST_SENT_KEY, DISPLAY_DASH)[:20]:<22} "
+                    f"{_row_text(r, LAST_BODY_SNIPPET_KEY, DISPLAY_EMPTY)[:60]}"
                 )
 
 @main.command()
@@ -992,11 +1085,11 @@ def schedule_create(command, cron_expr, tz, provider, pin_provider, spot,
     )
     from .schedules.store import write_schedule
     write_schedule(JobStorage(BUCKET), sched)
-    state = "enabled" if sched.enabled else "DISABLED"
+    state = SCHEDULE_STATE_ENABLED if sched.enabled else SCHEDULE_STATE_DISABLED
     click.echo(f"created schedule {sid} ({state})")
     click.echo(f"  cron:     {cron_expr}  ({tz})")
     click.echo(f"  next run: {next_due.isoformat()}")
-    click.echo(f"  command:  {command[:80]}")
+    click.echo(f"  command:  {command[:SCHEDULE_CREATE_COMMAND_PREVIEW_CHARS]}")
 
 
 @schedule.command("list")
@@ -1008,11 +1101,15 @@ def schedule_list():
         click.echo("(no schedules)")
         return
     click.echo(f"{'ID':<14} {'EN':<3} {'CRON':<16} {'TZ':<14} {'NEXT RUN (UTC)':<28} {'FIRED':>5} {'COMMAND'}")
-    click.echo("-" * 120)
+    click.echo("-" * SCHEDULE_LIST_TABLE_WIDTH)
     for s in scheds:
-        en = "Y" if s.enabled else "n"
+        en = DISPLAY_TRUE if s.enabled else DISPLAY_FALSE_LOWER
         cmd = " ".join(s.command.split())
-        cmd = cmd[:34] + "…" if len(cmd) > 34 else cmd
+        cmd = (
+            cmd[:SCHEDULE_COMMAND_PREVIEW_CHARS] + "…"
+            if len(cmd) > SCHEDULE_COMMAND_PREVIEW_CHARS
+            else cmd
+        )
         click.echo(f"{s.schedule_id:<14} {en:<3} {s.cron:<16} {s.tz[:12]:<14} "
                    f"{(s.next_due_at or '-')[:26]:<28} {s.fire_count:>5} {cmd}")
     click.echo(f"\n{len(scheds)} schedule(s)")

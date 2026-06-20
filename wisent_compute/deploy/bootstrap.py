@@ -53,6 +53,19 @@ User={user}
 WantedBy=multi-user.target
 """
 
+WC_BIN_SUFFIX = "/wc"
+DEFAULT_REMOTE_WC_BIN = "$HOME/.local/bin/wc"
+WATCHDOG_BIN_NAME = "wc-watchdog"
+FAILURE_FIXER_TARGET = "failure-fixer"
+WATCHDOG_TARGET = "watchdog"
+LOCAL_KIND = "local"
+AGENT_KIND = "agent"
+COORDINATOR_KIND = "coordinator"
+DAEMON_RUNTIME = "daemon"
+CRON_RUNTIME = "cron"
+LOCAL_SERVICE_RUNTIMES = (DAEMON_RUNTIME, CRON_RUNTIME)
+GCP_CLOUD_FUNCTION_RUNTIME = "gcp_cloud_function"
+
 REMOTE_INSTALL_SCRIPT = """set -euo pipefail
 python3 -m pip install --upgrade --user wisent-compute >/tmp/wc_install.log 2>&1
 WC_BIN="$(python3 -c 'import shutil,sys; sys.stdout.write(shutil.which(\"wc\") or \"\")')"
@@ -93,8 +106,8 @@ def _write_unit(ssh_target: str, unit_name: str, unit_text: str) -> None:
 
 
 def _sibling_bin(wc_bin: str, name: str) -> str:
-    if wc_bin.endswith("/wc"):
-        return wc_bin[:-2] + name
+    if wc_bin.endswith(WC_BIN_SUFFIX):
+        return f"{wc_bin.removesuffix(WC_BIN_SUFFIX)}/{name}"
     return name
 
 
@@ -106,10 +119,10 @@ def _provision(target, dry_run: bool, echo: Callable[[str], None]) -> None:
     user = ssh_target.split("@", 1)[0] if "@" in ssh_target else "root"
 
     if dry_run:
-        wc_bin = "$HOME/.local/bin/wc"
+        wc_bin = DEFAULT_REMOTE_WC_BIN
     else:
         echo(f"[install] {target.name}: pip install --upgrade wisent-compute on {ssh_target}")
-        wc_bin = _resolve_remote_wc(ssh_target) or "$HOME/.local/bin/wc"
+        wc_bin = _resolve_remote_wc(ssh_target) or DEFAULT_REMOTE_WC_BIN
 
     unit_text = UNIT_TEMPLATE.format(
         name=target.name,
@@ -119,7 +132,7 @@ def _provision(target, dry_run: bool, echo: Callable[[str], None]) -> None:
     )
     watchdog_text = WATCHDOG_UNIT_TEMPLATE.format(
         name=target.name,
-        watchdog_bin=_sibling_bin(wc_bin, "wc-watchdog"),
+        watchdog_bin=_sibling_bin(wc_bin, WATCHDOG_BIN_NAME),
         user=user,
     )
 
@@ -165,25 +178,25 @@ def run_bootstrap(target, dry_run: bool, local_install: bool,
         # local install path but with kind=failure-fixer so the
         # ExecArgs come from the bash-loop branch in
         # local_install._exec_args_for.
-        if target == "failure-fixer":
+        if target == FAILURE_FIXER_TARGET:
             from types import SimpleNamespace
-            install_local(SimpleNamespace(name="failure-fixer"),
-                          "failure-fixer", dry_run, echo)
+            install_local(SimpleNamespace(name=FAILURE_FIXER_TARGET),
+                          FAILURE_FIXER_TARGET, dry_run, echo)
             return
-        if target == "watchdog":
+        if target == WATCHDOG_TARGET:
             from types import SimpleNamespace
-            install_local(SimpleNamespace(name="watchdog"),
-                          "watchdog", dry_run, echo)
+            install_local(SimpleNamespace(name=WATCHDOG_TARGET),
+                          WATCHDOG_TARGET, dry_run, echo)
             return
         t = lookup(target)
-        if t and t.kind == "local":
-            install_local(t, "agent", dry_run, echo)
+        if t and t.kind == LOCAL_KIND:
+            install_local(t, AGENT_KIND, dry_run, echo)
             return
         c = lookup_coordinator(target)
-        if c and c.runtime in ("daemon", "cron"):
-            install_local(c, "coordinator", dry_run, echo)
+        if c and c.runtime in LOCAL_SERVICE_RUNTIMES:
+            install_local(c, COORDINATOR_KIND, dry_run, echo)
             return
-        if c and c.runtime == "gcp_cloud_function":
+        if c and c.runtime == GCP_CLOUD_FUNCTION_RUNTIME:
             raise RuntimeError(
                 f"coordinator '{target}' runtime=gcp_cloud_function: deployed via CI, "
                 "not provisionable as a local service."
@@ -194,5 +207,5 @@ def run_bootstrap(target, dry_run: bool, local_install: bool,
     if targets is not None and targets[0] is None:
         raise RuntimeError(f"target '{target}' not found in registry")
     if targets is None:
-        targets = [t for t in load_targets() if t.kind == "local"]
+        targets = [t for t in load_targets() if t.kind == LOCAL_KIND]
     run(targets, dry_run=dry_run, echo=echo)

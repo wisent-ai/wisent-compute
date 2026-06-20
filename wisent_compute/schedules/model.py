@@ -15,6 +15,10 @@ import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
+DEFAULT_PROVIDER = "gcp"
+DEFAULT_REPO_EXTRAS = "train"
+SKIP_POLICY = "skip"
+
 
 def generate_schedule_id() -> str:
     """8-hex id, namespaced so a schedule id is never confused with a
@@ -61,7 +65,7 @@ class Schedule:
     enabled: bool = True
     tz: str = "UTC"
     # ---- frozen submit kwargs (mirror submit_job's GCS-path params) ----
-    provider: str = "gcp"
+    provider: str = DEFAULT_PROVIDER
     gpu_type: str = ""
     vram_gb: int = 0
     machine_type: str = ""
@@ -71,7 +75,7 @@ class Schedule:
     pin_to_provider: bool = False
     repo: str = ""
     repo_workdir: str = ""
-    repo_extras: str = "train"
+    repo_extras: str = DEFAULT_REPO_EXTRAS
     pre_command: str = ""
     apt_packages: list = field(default_factory=list)
     output_uri: str = ""
@@ -87,11 +91,11 @@ class Schedule:
     fire_count: int = 0
     # skip: do not fire while last_job_id is still in queue/ or running/.
     # allow: fire regardless of prior instance.
-    overlap_policy: str = "skip"
+    overlap_policy: str = SKIP_POLICY
     # skip: a coordinator-downtime gap collapses to a single fire and
     #   next_due_at jumps to the next future occurrence.
     # each: not yet honored beyond skip — reserved (documented in fire.py).
-    catchup_policy: str = "skip"
+    catchup_policy: str = SKIP_POLICY
 
     def __post_init__(self):
         if not self.created_at:
@@ -125,9 +129,9 @@ class Schedule:
         return json.dumps(self.to_dict(), indent=2)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Schedule":
+    def from_dict(cls, d: dict) -> Schedule:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     @classmethod
-    def from_json(cls, s: str) -> "Schedule":
+    def from_json(cls, s: str) -> Schedule:
         return cls.from_dict(json.loads(s))

@@ -36,6 +36,15 @@ _COMMIT_MAX = 128
 _COMMIT_REFILL_PER_SECOND = 128.0 / 3600.0  # 128 commits/hour
 _POLL_BACKOFF_BASE = 0.5
 _POLL_BACKOFF_MAX = 30.0
+MAX_BACKOFF_EXPONENT = 5
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
+DEFAULT_COMMIT_TIMEOUT_SECONDS = 3600.0
+REFILLED_AT_KEY = "refilled_at"
+TOKENS_KEY = "tokens"
+
+
+def _dict_value(data: dict, key: str, default):
+    return data[key] if key in data else default
 
 
 def _get_bucket():
@@ -66,8 +75,8 @@ def _read_state(bucket, obj: str, max_tokens: int):
 
 def _refill(state: dict, max_tokens: int, refill_per_sec: float) -> dict:
     now = _now()
-    elapsed = max(0.0, now - float(state.get("refilled_at", now)))
-    tokens = min(max_tokens, float(state.get("tokens", 0)) + elapsed * refill_per_sec)
+    elapsed = max(0.0, now - float(_dict_value(state, REFILLED_AT_KEY, now)))
+    tokens = min(max_tokens, float(_dict_value(state, TOKENS_KEY, 0)) + elapsed * refill_per_sec)
     return {"tokens": tokens, "refilled_at": now}
 
 
@@ -98,18 +107,18 @@ def _acquire(obj: str, max_tokens: int, refill_per_sec: float,
             wait += random.uniform(0, _POLL_BACKOFF_BASE)
         except Exception:
             attempt += 1
-            wait = min(_POLL_BACKOFF_MAX, _POLL_BACKOFF_BASE * (2 ** min(attempt, 5)))
+            wait = min(_POLL_BACKOFF_MAX, _POLL_BACKOFF_BASE * (2 ** min(attempt, MAX_BACKOFF_EXPONENT)))
             wait += random.uniform(0, _POLL_BACKOFF_BASE)
         if deadline is not None and _now() >= deadline:
             return
         time.sleep(wait)
 
 
-def wait_for_hf_token(n: int = 1, timeout: Optional[float] = 600.0) -> None:
+def wait_for_hf_token(n: int = 1, timeout: Optional[float] = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> None:
     """Block until n request-tokens are free (HF 1000 requests / 5 min)."""
     _acquire(_RATE_OBJECT, _MAX_TOKENS, _REFILL_PER_SECOND, n, timeout)
 
 
-def wait_for_hf_commit_token(n: int = 1, timeout: Optional[float] = 3600.0) -> None:
+def wait_for_hf_commit_token(n: int = 1, timeout: Optional[float] = DEFAULT_COMMIT_TIMEOUT_SECONDS) -> None:
     """Block until n commit-tokens are free (HF 128 commits / hour / repo)."""
     _acquire(_COMMIT_OBJECT, _COMMIT_MAX, _COMMIT_REFILL_PER_SECOND, n, timeout)
