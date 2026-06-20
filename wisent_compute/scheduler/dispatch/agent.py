@@ -34,13 +34,27 @@ _TEMPLATES_BY_PROVIDER = {
     "gcp": "startup_gpu_agent.sh",
     "azure": "startup_gpu_agent_azure.sh",
 }
+DEFAULT_TEMPLATE_NAME = "startup_gpu_agent.sh"
 
 
 def _accel_hourly_rate(accel: str, preemptible: bool) -> float:
-    base = GPU_HOURLY_RATE_USD.get(accel, 0.0)
+    if accel not in GPU_HOURLY_RATE_USD:
+        raise KeyError(f"missing hourly GPU rate for {accel}")
+    base = GPU_HOURLY_RATE_USD[accel]
     if not preemptible:
         return base
-    return base * SPOT_DISCOUNT.get(accel, 0.5)
+    if accel not in SPOT_DISCOUNT:
+        raise KeyError(f"missing spot discount for {accel}")
+    return base * SPOT_DISCOUNT[accel]
+
+
+def _dict_value(data: dict, key, default):
+    return data[key] if key in data else default
+
+
+def _dict_number(data: dict, key, default=0) -> int:
+    value = _dict_value(data, key, default)
+    return int(value if value is not None else default)
 
 
 def dispatch_agent_vms(
@@ -65,7 +79,11 @@ def dispatch_agent_vms(
     `accel_dispatched` in-place so the caller's per-tick budgets stay
     consistent with cloud reality.
     """
-    template_name = _TEMPLATES_BY_PROVIDER.get(provider_name, "startup_gpu_agent.sh")
+    template_name = (
+        _TEMPLATES_BY_PROVIDER[provider_name]
+        if provider_name in _TEMPLATES_BY_PROVIDER
+        else DEFAULT_TEMPLATE_NAME
+    )
     template = (_TEMPLATES_DIR / template_name).read_text()
 
     # Bucket key is (accel, mt). Default: derive from current GPU_SIZING
@@ -143,11 +161,11 @@ def dispatch_agent_vms(
         if (time.time() - _start) > _DISPATCH_BUDGET_S:
             log_fn(f"dispatch budget exhausted after {scheduled} scheduled; deferring remaining buckets to next tick")
             break
-        quota_left = available.get(accel, 0)
+        quota_left = _dict_number(available, accel)
         if quota_left <= 0:
             log_fn(f"Skip bucket accel={accel} machine={mt}: 0 quota slots")
             continue
-        share_left = per_accel_share - accel_dispatched.get(accel, 0)
+        share_left = per_accel_share - _dict_number(accel_dispatched, accel)
         if share_left <= 0:
             continue
         n_to_dispatch = min(len(jobs), quota_left, share_left,
@@ -194,14 +212,14 @@ def dispatch_agent_vms(
                 from ...models import GPU_SIZING
                 from ...config import lookup_instance_type
                 pmem = int(getattr(biggest, "gpu_mem_gb", 0) or 0)
-                sizing = GPU_SIZING.get(provider_name, {})
+                sizing = _dict_value(GPU_SIZING, provider_name, {})
                 larger_tiers = sorted([m for m in sizing.keys() if m > pmem])
                 escalated = False
                 for next_mem in larger_tiers:
                     next_mt, next_accel = sizing[next_mem]
                     if next_accel == accel and next_mt == mt:
                         continue
-                    if available.get(next_accel, 0) <= 0:
+                    if _dict_number(available, next_accel) <= 0:
                         continue
                     log_fn(
                         f"escalating {accel}/{mt} -> {next_accel}/{next_mt} "
@@ -223,8 +241,8 @@ def dispatch_agent_vms(
                         break
                 if not escalated:
                     continue
-            available[accel] = available.get(accel, 0) - 1
-            accel_dispatched[accel] = accel_dispatched.get(accel, 0) + 1
+            available[accel] = _dict_number(available, accel) - 1
+            accel_dispatched[accel] = _dict_number(accel_dispatched, accel) + 1
             scheduled += 1
             created += 1
             log_fn(
