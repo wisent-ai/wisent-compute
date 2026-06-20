@@ -29,6 +29,8 @@ import json
 import re
 import subprocess
 
+from .quota_request import _gcp_request_for_family
+
 PROVIDER_GCP = "gcp"
 PROVIDER_AZURE = "azure"
 GPU_FAMILY_KEY = "gpu_family"
@@ -36,6 +38,7 @@ REGION_KEY = "region"
 AVAILABLE_KEY = "available"
 REASON_KEY = "reason"
 NOT_AVAILABLE_REASON = "not available"
+GCP_GPU_FAMILY_QUOTA_ID = "GPUS-PER-GPU-FAMILY-per-project-region"
 
 
 # Note: no hardcoded family list. The bulk-submit path discovers the
@@ -206,7 +209,6 @@ def gcp_request_all_families(
     drops or adds tomorrow is picked up on the next call without a
     package release.
     """
-    from .quota_request import _gcp_request_for_family
     import os as _os
     project = _os.environ.get("GCP_PROJECT", "wisent-480400")
     # Discover (a) the set of gpu_family values Google models for
@@ -221,7 +223,7 @@ def gcp_request_all_families(
     families: set[str] = set()
     all_regions: set[str] = set()
     for row in _gcp_catalog():
-        if row.get("quota_id") != "GPUS-PER-GPU-FAMILY-per-project-region":
+        if row.get("quota_id") != GCP_GPU_FAMILY_QUOTA_ID:
             continue
         fam = row.get("gpu_family") or ""
         region = row.get("region") or ""

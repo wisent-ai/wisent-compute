@@ -15,6 +15,7 @@ import os
 
 
 _SECRET_NAME = "vast-api-key"
+SECRET_TEXT_ENCODING = "utf-8"
 
 
 def resolve_vast_api_key() -> str:
@@ -30,7 +31,7 @@ def resolve_vast_api_key() -> str:
         resp = cli.access_secret_version(request={
             "name": f"projects/{proj}/secrets/{_SECRET_NAME}/versions/latest"
         })
-        return (resp.payload.data.decode("utf-8") or "").strip()
+        return (resp.payload.data.decode(SECRET_TEXT_ENCODING) or "").strip()
     except Exception:
         return ""
 

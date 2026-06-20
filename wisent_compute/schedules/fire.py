@@ -19,6 +19,10 @@ from datetime import datetime, timezone
 from .model import Schedule, compute_next_due
 from . import store as sched_store
 
+QUEUE_PREFIX = "queue"
+RUNNING_PREFIX = "running"
+SKIP_POLICY = "skip"
+
 
 def _prev_instance_live(store, sched: Schedule) -> bool:
     """True iff this schedule's most recent fire is still queued/running.
@@ -27,9 +31,9 @@ def _prev_instance_live(store, sched: Schedule) -> bool:
     if not jid:
         return False
     try:
-        if store.read_job("queue", jid) is not None:
+        if store.read_job(QUEUE_PREFIX, jid) is not None:
             return True
-        if store.read_job("running", jid) is not None:
+        if store.read_job(RUNNING_PREFIX, jid) is not None:
             return True
     except Exception:
         # A read error is not proof the prior instance is gone; be
@@ -62,7 +66,7 @@ def fire_due_schedules(store, log_fn=None, now: datetime | None = None) -> int:
 
         next_due = compute_next_due(sched.cron, now, sched.tz).isoformat()
 
-        if sched.overlap_policy == "skip" and _prev_instance_live(store, sched):
+        if sched.overlap_policy == SKIP_POLICY and _prev_instance_live(store, sched):
             # Don't fire on top of a still-running prior instance — but DO
             # advance next_due_at so we re-evaluate cleanly next tick instead
             # of re-firing the same overdue slot every tick.

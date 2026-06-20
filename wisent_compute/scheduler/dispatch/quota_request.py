@@ -44,6 +44,14 @@ _GCP_ACCEL_TO_GPU_FAMILY = {
 AVAILABLE_KEY = "available"
 REASON_KEY = "reason"
 NOT_AVAILABLE_REASON = "not available"
+GCP_PROVIDER = "gcp"
+AZURE_PROVIDER = "azure"
+GCP_QUOTA_SERVICE = "compute.googleapis.com"
+GCP_GPU_FAMILY_QUOTA_ID = "GPUS-PER-GPU-FAMILY-per-project-region"
+GCP_ALREADY_EXISTS_TEXT = "already exists"
+AZURE_QUOTA_NOT_INSTALLED_REASON = "azure-mgmt-quota not installed"
+AZURE_SUBSCRIPTION_UNSET_REASON = "AZURE_SUBSCRIPTION_ID unset"
+NO_QUOTA_IMPL_ERROR = "no quota-increase impl for this provider"
 
 
 def _dict_value(data: dict, key: str, default):
@@ -75,8 +83,8 @@ def _gcp_request_for_family(
 
     client = cloudquotas_v1.CloudQuotasClient()
     qp = cloudquotas_v1.QuotaPreference(
-        service="compute.googleapis.com",
-        quota_id="GPUS-PER-GPU-FAMILY-per-project-region",
+        service=GCP_QUOTA_SERVICE,
+        quota_id=GCP_GPU_FAMILY_QUOTA_ID,
         quota_config=cloudquotas_v1.QuotaConfig(preferred_value=new_limit),
         dimensions={"region": region, "gpu_family": gpu_family},
         justification=justification,
@@ -95,7 +103,7 @@ def _gcp_request_for_family(
         return {"name": resp.name, "created": True}
     except Exception as exc:
         msg = str(exc)
-        if "ALREADY_EXISTS" not in msg and "already exists" not in msg.lower():
+        if "ALREADY_EXISTS" not in msg and GCP_ALREADY_EXISTS_TEXT not in msg.lower():
             raise
         qp.name = f"{parent}/quotaPreferences/{pref_id}"
         resp = client.update_quota_preference(quota_preference=qp)
@@ -148,9 +156,9 @@ def _azure_request_increase(
         from azure.identity import DefaultAzureCredential
         from azure.mgmt.quota import AzureQuotaExtensionAPI
     except ImportError:
-        return {"available": False, "reason": "azure-mgmt-quota not installed"}
+        return {"available": False, "reason": AZURE_QUOTA_NOT_INSTALLED_REASON}
     if not subscription:
-        return {"available": False, "reason": "AZURE_SUBSCRIPTION_ID unset"}
+        return {"available": False, "reason": AZURE_SUBSCRIPTION_UNSET_REASON}
     client = AzureQuotaExtensionAPI(DefaultAzureCredential(), subscription)
     scope = (
         f"subscriptions/{subscription}/providers/Microsoft.Compute"
@@ -192,11 +200,11 @@ def _gcp_fanout(
                 justification, contact_email,
             )
             out.append({
-                "provider": "gcp", "region": region, "ok": True, **r,
+                "provider": GCP_PROVIDER, "region": region, "ok": True, **r,
             })
         except Exception as exc:
             out.append({
-                "provider": "gcp", "region": region, "ok": False,
+                "provider": GCP_PROVIDER, "region": region, "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
             })
     return out
@@ -214,7 +222,7 @@ def _azure_fanout(
     ]
     if not families:
         return [{
-            "provider": "azure", "ok": False,
+            "provider": AZURE_PROVIDER, "ok": False,
             "error": f"no Azure compute family matches accel '{accel}'",
         }]
     targets = regions or AZURE_LOCATIONS
@@ -227,18 +235,18 @@ def _azure_fanout(
                 )
                 if not _dict_value(r, AVAILABLE_KEY, True):
                     out.append({
-                        "provider": "azure", "location": loc,
+                        "provider": AZURE_PROVIDER, "location": loc,
                         "family": fam, "ok": False,
                         "error": _dict_text(r, REASON_KEY, NOT_AVAILABLE_REASON),
                     })
                 else:
                     out.append({
-                        "provider": "azure", "location": loc,
+                        "provider": AZURE_PROVIDER, "location": loc,
                         "family": fam, "ok": True, **r,
                     })
             except Exception as exc:
                 out.append({
-                    "provider": "azure", "location": loc, "family": fam,
+                    "provider": AZURE_PROVIDER, "location": loc, "family": fam,
                     "ok": False,
                     "error": f"{type(exc).__name__}: {exc}",
                 })
@@ -265,15 +273,15 @@ def request_quota_increases(
     """
     out: list[dict] = []
     for p in providers:
-        if p == "gcp":
+        if p == GCP_PROVIDER:
             out.extend(_gcp_fanout(
                 accel, new_limit, regions, justification, contact_email,
             ))
-        elif p == "azure":
+        elif p == AZURE_PROVIDER:
             out.extend(_azure_fanout(accel, new_limit, regions))
         else:
             out.append({
                 "provider": p, "ok": False,
-                "error": "no quota-increase impl for this provider",
+                "error": NO_QUOTA_IMPL_ERROR,
             })
     return out

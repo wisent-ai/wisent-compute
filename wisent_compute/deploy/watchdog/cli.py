@@ -13,13 +13,21 @@ from pathlib import Path
 DEFAULT_BUCKET = "wisent-compute"
 DEFAULT_INTERVAL_S = 60
 OUT_PREFIX = "box_diagnostics"
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 12
+DEFAULT_OUTPUT_TAIL_CHARS = 12000
+MIN_LOOP_INTERVAL_SECONDS = 10
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _run(name: str, cmd: list[str], timeout_s: int = 12, tail: int = 12000) -> dict:
+def _run(
+    name: str,
+    cmd: list[str],
+    timeout_s: int = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    tail: int = DEFAULT_OUTPUT_TAIL_CHARS,
+) -> dict:
     started = time.time()
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
@@ -133,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         return once(args.bucket)
     while True:
         once(args.bucket)
-        time.sleep(max(10, args.interval_s))
+        time.sleep(max(MIN_LOOP_INTERVAL_SECONDS, args.interval_s))
 
 
 if __name__ == "__main__":

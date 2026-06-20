@@ -24,6 +24,16 @@ _TASK_RE = re.compile(r"--task\s+(\S+)")
 PUBLISHED_AT_KEY = "published_at"
 COMPLETED_AT_KEY = "completed_at"
 QUEUE_KEY = "queue"
+RUNNING_KEY = "running"
+COMPLETED_KEY = "completed"
+FAILED_KEY = "failed"
+JOB_STATE_KEYS = (QUEUE_KEY, RUNNING_KEY, COMPLETED_KEY, FAILED_KEY)
+UNKNOWN_LABEL = "(unknown)"
+CAPACITY_PREFIX = "capacity/"
+RECENT_COMPLETED_SCAN_LIMIT = 200
+RECENT_FAILED_LIMIT = 30
+SUMMARY_RECENT_LIMIT = 30
+ERROR_SNIPPET_CHARS = 240
 
 
 def _dict_value(data: dict, key: str, default):
@@ -57,12 +67,12 @@ def _wall_seconds(job) -> float | None:
 
 def _model_of(cmd: str) -> str:
     m = _MODEL_RE.search(cmd or "")
-    return m.group(1) if m else "(unknown)"
+    return m.group(1) if m else UNKNOWN_LABEL
 
 
 def _task_of(cmd: str) -> str:
     m = _TASK_RE.search(cmd or "")
-    return m.group(1) if m else "(unknown)"
+    return m.group(1) if m else UNKNOWN_LABEL
 
 
 def _read_capacity_blobs(store: JobStorage) -> list[dict]:
@@ -70,7 +80,7 @@ def _read_capacity_blobs(store: JobStorage) -> list[dict]:
     if store._sdk_bucket is None:
         return []
     blobs: list[dict] = []
-    for blob in store._sdk_bucket.list_blobs(prefix="capacity/"):
+    for blob in store._sdk_bucket.list_blobs(prefix=CAPACITY_PREFIX):
         if not blob.name.endswith(".json"):
             continue
         data = json.loads(blob.download_as_text())
@@ -88,7 +98,7 @@ def _fast_counts(store: JobStorage) -> dict[str, int]:
     return SOMETHING while the full per-job summary is still building.
     """
     out: dict[str, int] = {}
-    for prefix in ("queue", "running", "completed", "failed"):
+    for prefix in JOB_STATE_KEYS:
         paths = store._list_paths(f"{prefix}/")
         out[prefix] = sum(1 for p in paths if p.endswith(".json"))
     return out
@@ -106,14 +116,14 @@ def _summarize(store: JobStorage) -> dict[str, Any]:
         for job in jobs:
             model = _model_of(job.command or "")
             row = by_model_state.setdefault(model,
-                {"queue": 0, "running": 0, "completed": 0, "failed": 0})
+                {state_key: 0 for state_key in JOB_STATE_KEYS})
             if state in row:
                 row[state] += 1
-            if state == "completed":
+            if state == COMPLETED_KEY:
                 w = _wall_seconds(job)
                 if w is not None:
                     completed_walls.append(w)
-                if len(completed_recent) < 200:
+                if len(completed_recent) < RECENT_COMPLETED_SCAN_LIMIT:
                     completed_recent.append({
                         "job_id": job.job_id,
                         "model": model,
@@ -121,12 +131,12 @@ def _summarize(store: JobStorage) -> dict[str, Any]:
                         "wall_seconds": w,
                         "completed_at": getattr(job, "completed_at", None),
                     })
-            elif state == "failed" and len(recent_failed) < 30:
+            elif state == FAILED_KEY and len(recent_failed) < RECENT_FAILED_LIMIT:
                 recent_failed.append({
                     "job_id": job.job_id,
                     "model": model,
                     "task": _task_of(job.command or ""),
-                    "error": (getattr(job, "error", None) or "")[:240],
+                    "error": (getattr(job, "error", None) or "")[:ERROR_SNIPPET_CHARS],
                 })
 
     completed_recent.sort(
@@ -175,8 +185,8 @@ def _summarize(store: JobStorage) -> dict[str, Any]:
         "by_model_state": by_model_state,
         "live_agents": live_agents,
         "stale_agents": stale_agents,
-        "recent_failed": recent_failed[:30],
-        "completed_recent": completed_recent[:30],
+        "recent_failed": recent_failed[:SUMMARY_RECENT_LIMIT],
+        "completed_recent": completed_recent[:SUMMARY_RECENT_LIMIT],
         "throughput": {
             "avg_wall_seconds_per_completed_job": avg_wall,
             "samples": len(completed_walls),

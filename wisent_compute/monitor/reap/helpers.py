@@ -16,6 +16,14 @@ from datetime import datetime, timezone
 from ...models import Job, JobState
 from ...queue.storage import JobStorage
 
+GCP_PROVIDER_KIND = "gcp"
+RUNNING_PREFIX = "running"
+QUEUE_PREFIX = "queue"
+COMPLETED_PREFIX = "completed"
+FAILED_PREFIX = "failed"
+JOB_HEARTBEAT_FRESH_SECONDS = 1800
+CHECKPOINT_FRESH_SECONDS = 5400
+
 
 def _dict_value(data: dict, key, default):
     return data[key] if key in data else default
@@ -76,7 +84,7 @@ def _requeue(store: JobStorage, job: Job, reason: str):
         job.state = JobState.FAILED.value
         job.failed_at = datetime.now(timezone.utc).isoformat()
         job.error = f"Exceeded {job.max_restarts} restarts ({reason})"
-        store.move_job(job, "running", "failed")
+        store.move_job(job, RUNNING_PREFIX, FAILED_PREFIX)
         _log(f"{job.job_id}: FAILED (restart cap, {reason})")
         return
 
@@ -84,7 +92,7 @@ def _requeue(store: JobStorage, job: Job, reason: str):
     job.instance_ref = None
     job.started_at = None
     job.last_restart = datetime.now(timezone.utc).isoformat()
-    store.move_job(job, "running", "queue")
+    store.move_job(job, RUNNING_PREFIX, QUEUE_PREFIX)
     store.cleanup_status(job.job_id)
     _log(f"{job.job_id}: requeued ({reason}, restart {job.restarts})")
 
@@ -94,7 +102,7 @@ _completion_refs_cache: set = set()
 _completion_refs_built_at: float = 0.0
 
 
-def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set:
+def _instance_refs_with_completions(store: JobStorage, kind: str = GCP_PROVIDER_KIND) -> set:
     """Return set of instance_ref strings appearing in completed/.
 
     Iterating list_jobs("completed") downloads every completed blob (13,500+
@@ -108,7 +116,7 @@ def _instance_refs_with_completions(store: JobStorage, kind: str = "gcp") -> set
     if (_time.time() - _completion_refs_built_at) < _COMPLETION_REFS_TTL_S and _completion_refs_cache:
         return _completion_refs_cache
     refs = set()
-    for j in store.list_jobs("completed"):
+    for j in store.list_jobs(COMPLETED_PREFIX):
         r = getattr(j, "instance_ref", None)
         if r:
             refs.add(r)
@@ -146,9 +154,9 @@ def safety_is_real_race(store: JobStorage, jids, hb_threshold: float) -> bool:
         any_job_checkpoint_fresh_jids,
     )
     if (any_job_heartbeat_fresh(store, jids, hb_threshold)
-            or any_job_checkpoint_fresh_jids(store, jids, 5400)):
+            or any_job_checkpoint_fresh_jids(store, jids, CHECKPOINT_FRESH_SECONDS)):
         return True
-    running = {j.job_id: j for j in store.list_jobs("running")}
+    running = {j.job_id: j for j in store.list_jobs(RUNNING_PREFIX)}
     now = datetime.now(timezone.utc)
     for jid in jids:
         j = running.get(jid)
@@ -156,7 +164,7 @@ def safety_is_real_race(store: JobStorage, jids, hb_threshold: float) -> bool:
         if not sa:
             continue
         try:
-            if (now - datetime.fromisoformat(sa)).total_seconds() < 1800:
+            if (now - datetime.fromisoformat(sa)).total_seconds() < JOB_HEARTBEAT_FRESH_SECONDS:
                 return True  # just dispatched, no heartbeat yet (real race)
         except (ValueError, TypeError):
             continue
@@ -166,7 +174,7 @@ def safety_is_real_race(store: JobStorage, jids, hb_threshold: float) -> bool:
 def _requeue_jids_after_reap(store: JobStorage, jids, reason: str):
     if not jids:
         return
-    running = {j.job_id: j for j in store.list_jobs("running")}
+    running = {j.job_id: j for j in store.list_jobs(RUNNING_PREFIX)}
     for jid in jids:
         job = running.get(jid)
         if job is None:
@@ -186,7 +194,7 @@ def _requeue_preempted(store: JobStorage, job: Job, reason: str):
     job.instance_ref = None
     job.started_at = None
     job.last_restart = datetime.now(timezone.utc).isoformat()
-    store.move_job(job, "running", "queue")
+    store.move_job(job, RUNNING_PREFIX, QUEUE_PREFIX)
     store.cleanup_status(job.job_id)
     _log(f"{job.job_id}: requeued ({reason}, preempts={job.preempt_count})")
 
@@ -213,9 +221,9 @@ def requeue_dead_local_host_orphan(store: JobStorage, job, job_id, log_fn):
         any_job_checkpoint_fresh,
         finalize_if_self_terminating,
     )
-    if any_job_heartbeat_fresh(store, [job_id], 1800):
+    if any_job_heartbeat_fresh(store, [job_id], JOB_HEARTBEAT_FRESH_SECONDS):
         return
-    if any_job_checkpoint_fresh(store, job, 5400):
+    if any_job_checkpoint_fresh(store, job, CHECKPOINT_FRESH_SECONDS):
         return
     if finalize_if_self_terminating(store, job, log_fn):
         return

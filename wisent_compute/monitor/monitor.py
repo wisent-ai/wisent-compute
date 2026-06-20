@@ -30,6 +30,20 @@ from .reap.helpers import (
 
 JOB_HEARTBEAT_FRESH_SECONDS = 1800
 CHECKPOINT_FRESH_SECONDS = 5400
+RUNNING_PREFIX = "running"
+COMPLETED_PREFIX = "completed"
+FAILED_PREFIX = "failed"
+LOCAL_INSTANCE_REF_PREFIX = "local@"
+LOCAL_PROVIDER_KIND = "local"
+GCP_PROVIDER_KIND = "gcp"
+AZURE_PROVIDER_KIND = "azure"
+AWS_PROVIDER_KIND = "aws"
+CLOUD_AGENT_PROVIDER_KINDS = (
+    LOCAL_PROVIDER_KIND,
+    GCP_PROVIDER_KIND,
+    AZURE_PROVIDER_KIND,
+    AWS_PROVIDER_KIND,
+)
 
 
 def _log(msg):
@@ -50,7 +64,7 @@ def _ref_job_ids(ref_to_jids: dict, *refs) -> list:
 
 def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
     """Check all running jobs. Handle completion, failure, preemption, stale."""
-    running = store.list_jobs("running")
+    running = store.list_jobs(RUNNING_PREFIX)
     _log(f"Checking {len(running)} running jobs")
 
     _live_consumers_cache: dict | None = None
@@ -68,7 +82,7 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
             job.state = JobState.COMPLETED.value
             job.completed_at = datetime.now(timezone.utc).isoformat()
             provider.delete_instance(ref)
-            store.move_job(job, "running", "completed")
+            store.move_job(job, RUNNING_PREFIX, COMPLETED_PREFIX)
             store.cleanup_status(job_id)
             _log(f"{job_id}: COMPLETED")
 
@@ -76,7 +90,7 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
             job.state = JobState.FAILED.value
             job.failed_at = datetime.now(timezone.utc).isoformat()
             provider.delete_instance(ref)
-            store.move_job(job, "running", "failed")
+            store.move_job(job, RUNNING_PREFIX, FAILED_PREFIX)
             store.cleanup_status(job_id)
             send_alert(publisher, ALERTS_TOPIC, f"Job {job_id} FAILED: {job.command[:100]}")
             _log(f"{job_id}: FAILED")
@@ -94,27 +108,31 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
             _sa = getattr(job, "started_at", None)
             if _sa:
                 try:
-                    if (datetime.now(timezone.utc) - datetime.fromisoformat(_sa)).total_seconds() < 1800:
+                    if (
+                        datetime.now(timezone.utc) - datetime.fromisoformat(_sa)
+                    ).total_seconds() < JOB_HEARTBEAT_FRESH_SECONDS:
                         continue
                 except (ValueError, TypeError):
                     pass
-            if (ref or "").startswith("local@"):
-                hostname = ref[len("local@"):]
+            if (ref or "").startswith(LOCAL_INSTANCE_REF_PREFIX):
+                hostname = ref[len(LOCAL_INSTANCE_REF_PREFIX):]
                 if _live_consumers_cache is None:
                     from ..queue.capacity import read_consumer_capacity
                     _live_consumers_cache = read_consumer_capacity(store)
-                agent_live = any(f"{p}-{hostname}" in _live_consumers_cache
-                                 for p in ("local", "gcp", "azure", "aws"))
+                agent_live = any(
+                    f"{p}-{hostname}" in _live_consumers_cache
+                    for p in CLOUD_AGENT_PROVIDER_KINDS
+                )
                 if agent_live:
                     # Agent up != this old job progresses (restarts
                     # orphan it). Heartbeat is proof; self-terminating
                     # cmds (pkill wc agent) -> kill IS success.
                     from . import heartbeat_guard as _hg
-                    if _hg.any_job_heartbeat_fresh(store, [job_id], 1800):
+                    if _hg.any_job_heartbeat_fresh(store, [job_id], JOB_HEARTBEAT_FRESH_SECONDS):
                         continue
                     if _hg.finalize_if_self_terminating(store, job, _log):
                         continue
-                    if not _hg.any_job_checkpoint_fresh(store, job, 5400):
+                    if not _hg.any_job_checkpoint_fresh(store, job, CHECKPOINT_FRESH_SECONDS):
                         safe_delete_vm_by_hostname(provider, hostname, _running_vm_names_cache or {}, _log)
                         _requeue(store, job, "local agent live but job heartbeat stale (orphan)")
                     continue
@@ -127,7 +145,7 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                         }
                     if hostname not in _running_vm_names_cache:
                         from . import heartbeat_guard as _hg_vm
-                        if _hg_vm.any_job_heartbeat_fresh(store, [job_id], 1800):
+                        if _hg_vm.any_job_heartbeat_fresh(store, [job_id], JOB_HEARTBEAT_FRESH_SECONDS):
                             continue  # fresh job heartbeat = VM+agent+training alive; aggregated_list missed a transient non-RUNNING (STAGING/REPAIRING/live-migration) snapshot
                         safe_delete_vm_by_hostname(provider, hostname, _running_vm_names_cache, _log)
                         if getattr(job, "preemptible", False):
@@ -148,7 +166,7 @@ def check_running_jobs(store: JobStorage, provider: Provider, publisher=None):
                 provider.delete_instance(ref)
 
 
-def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -> int:
+def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = GCP_PROVIDER_KIND) -> int:
     """Delete RUNNING VMs whose `wc agent` has stopped doing useful work.
 
     The agent's main loop publishes a freshness-stamped JSON to
@@ -207,7 +225,7 @@ def reap_dead_agents(store: JobStorage, provider: Provider, kind: str = "gcp") -
     # storm.
     active_refs: set = set()
     if needs_completions_scan:
-        for j in store.list_jobs("running"):
+        for j in store.list_jobs(RUNNING_PREFIX):
             r = getattr(j, "instance_ref", None)
             if r:
                 active_refs.add(r)

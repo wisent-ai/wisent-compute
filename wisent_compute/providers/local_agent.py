@@ -35,6 +35,18 @@ from .local.disk.staging import setup_agent_staging
 
 POLL_INTERVAL = 10
 HEARTBEAT_INTERVAL = 300
+BASH_BIN = "bash"
+PROC_CMDLINE_SCAN_COMMAND = "cat /proc/[0-9]*/cmdline 2>/dev/null"
+QUEUE_PREFIX = "queue"
+LOCAL_KIND = "local"
+YIELD_SCAN_CAP = 200
+DEFAULT_MAX_YIELDS_BEFORE_PROTECTED = 5
+DEFAULT_HARD_SLOT_CAP = 1
+FLEET_FLUSH_INTERVAL = 180  # ~20 commits/hour/agent << 200/hour HF cap
+FLEET_STAGING_FLUSH_GB = 5
+ADMISSION_RETRY_SLEEP_SECONDS = 10
+MIN_FREE_RAM_FRACTION = 0.30
+CLAIM_SCAN_CAP = 2000
 # Time to sleep after a successful claim so nvidia-smi can reflect the
 # freshly-spawned subprocess's CUDA allocation before the next iteration
 # decides whether to claim again. Empirically a torch model load starts
@@ -73,7 +85,7 @@ def _reap_dead_pid_workdirs() -> int:
     there filled a 3.6T disk once). Skips the wisent_raw_pending pool."""
     reaped = 0
     import subprocess as _sp
-    _cmd = _sp.run(["bash", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null"],
+    _cmd = _sp.run([BASH_BIN, "-c", PROC_CMDLINE_SCAN_COMMAND],
                    capture_output=True, text=True).stdout
     for base in {"/tmp", os.environ.get("TMPDIR", "/tmp")}:
         for d in glob.glob(f"{base}/wisent_act_*") + glob.glob(f"{base}/wisent_raw_*"):
@@ -124,7 +136,7 @@ def _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
     from .local.slots import request_yield
     # Highest-priority queued job that needs MORE than current free VRAM but
     # could fit on the full GPU, and is eligible for THIS agent.
-    candidates = store.list_jobs_fitting("queue", max_gpu_mem_gb=total_vram_gb, cap=200)
+    candidates = store.list_jobs_fitting(QUEUE_PREFIX, max_gpu_mem_gb=total_vram_gb, cap=YIELD_SCAN_CAP)
     candidates.sort(key=lambda j: (-int(getattr(j, "priority", 0) or 0), j.created_at))
     target = None
     for j in candidates:
@@ -149,7 +161,10 @@ def _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
             continue
         if int(getattr(j, "priority", 0) or 0) >= target_prio:
             continue
-        if int(getattr(j, "yield_count", 0) or 0) >= int(getattr(j, "max_yields_before_protected", 5) or 5):
+        if int(getattr(j, "yield_count", 0) or 0) >= int(
+            getattr(j, "max_yields_before_protected", DEFAULT_MAX_YIELDS_BEFORE_PROTECTED)
+            or DEFAULT_MAX_YIELDS_BEFORE_PROTECTED
+        ):
             continue
         if now_mono - _dict_value(s, STARTED_MONO_KEY, now_mono) < MIN_RUNTIME_BEFORE_YIELD_S:
             continue
@@ -181,7 +196,7 @@ def _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
     return n
 
 
-def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "local"):
+def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = LOCAL_KIND):
     """Main agent loop. Polls queue, runs jobs when Vast.ai is idle.
 
     idle_shutdown=True: exit cleanly (and self-delete the GCE VM if running
@@ -199,7 +214,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     if not gpu_type: gpu_type = _detect_gpu_type()
     total_vram_gb = max(1, _detect_local_vram_gb())
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
-    if kind == "local" and hard_slot_cap <= 0: hard_slot_cap = 1
+    if kind == LOCAL_KIND and hard_slot_cap <= 0:
+        hard_slot_cap = DEFAULT_HARD_SLOT_CAP
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
     setup_agent_staging(_log)
 
@@ -218,7 +234,6 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     agent_diag: dict = {}
     fleet_staging = os.environ.get("WISENT_FLEET_STAGING_DIR", "/tmp/wisent_fleet_staging")
     last_fleet_flush = time.time()
-    FLEET_FLUSH_INTERVAL = 180  # ~20 commits/hour/agent << 200/hour HF cap
 
     _last_cap = None
     while True:
@@ -242,7 +257,10 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 )
             except Exception:
                 pass
-        if time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL or _staging_size_gb(fleet_staging) > 5:
+        if (
+            time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL
+            or _staging_size_gb(fleet_staging) > FLEET_STAGING_FLUSH_GB
+        ):
             from wisent.core.reading.modules.utilities.data.sources.hf.hf_writers import flush_staging_dir
             if os.path.isdir(fleet_staging) and any(os.scandir(fleet_staging)):
                 flush_staging_dir(fleet_staging)
@@ -251,7 +269,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 _log("flushed fleet staging dir to HF (1 commit)")
             last_fleet_flush = time.time()
         t = lookup_self(hostname, source="auto")
-        if t and t.kind == "local":
+        if t and t.kind == LOCAL_KIND:
             registry_env = t.env_overrides or {}
             env_delta = {
                 k: str(v) for k, v in registry_env.items()
@@ -303,7 +321,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         if _refuse_disk:
             publish_capacity(store, consumer_id, kind, {},
                              free_vram_gb=0, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
-            time.sleep(10)
+            time.sleep(ADMISSION_RETRY_SLEEP_SECONDS)
             continue
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
         publish_capacity(store, consumer_id, kind, free_slots,
@@ -319,20 +337,21 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             continue  # re-loop: recompute free VRAM, then claim the freed room
 
         if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
-            time.sleep(10)
+            time.sleep(ADMISSION_RETRY_SLEEP_SECONDS)
             continue
         # RAM gate: refuse new slots when system free RAM (MemAvailable, which
         # captures the forked-worker procs + page-cache the per-slot RSS sum
         # missed) drops below a MemTotal reserve. Prevents the ~100G OOM.
         _fr = _free_ram_gb()
-        if 0 <= _fr < _total_ram_gb() * 0.30:
-            time.sleep(10); continue
+        if 0 <= _fr < _total_ram_gb() * MIN_FREE_RAM_FRACTION:
+            time.sleep(ADMISSION_RETRY_SLEEP_SECONDS)
+            continue
 
         # Centralized assignment writes job.assigned_to on the queue blob;
         # _job_eligible(consumer_id=...) below filters to ONLY the jobs this
         # agent owns. The coordinator's makespan matcher already made the
         # choice; this loop executes it.
-        queued = store.list_jobs_fitting("queue", max_gpu_mem_gb=free_vram_gb, cap=2000)
+        queued = store.list_jobs_fitting(QUEUE_PREFIX, max_gpu_mem_gb=free_vram_gb, cap=CLAIM_SCAN_CAP)
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
         started = 0
         diag_vram_rejected = 0

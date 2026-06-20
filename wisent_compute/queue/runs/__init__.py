@@ -18,6 +18,7 @@ RUN_PREFIX = "runs"
 TERMINAL_PREFIXES = ("completed", "failed")
 ALL_PREFIXES = ("queue", "running", "completed", "failed")
 SUBMITTER_APP_KEY = "submitter_app"
+MAX_RUN_NAME_TASKS = 3
 
 
 def _dict_value(data: dict, key: str, default):
@@ -48,7 +49,7 @@ def derive_run_name(commands) -> str:
     if len(models) == 1:
         parts.append(next(iter(models)))
     uniq = list(dict.fromkeys(tasks))
-    if 1 <= len(uniq) <= 3:
+    if 1 <= len(uniq) <= MAX_RUN_NAME_TASKS:
         parts.append("+".join(uniq))
     elif uniq:
         parts.append(f"{len(uniq)}tasks")

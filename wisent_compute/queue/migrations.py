@@ -26,6 +26,7 @@ _SENTINEL_PATH = "queue_priority/.migration.json"
 BACKFILL_BATCH = 500
 _DOWNLOAD_WORKERS = 10
 CURSOR_KEY = "cursor"
+QUEUE_PRIORITY_PREFIX = "queue_priority/"
 
 
 def _dict_value(data: dict, key: str, default):
@@ -48,7 +49,7 @@ def _existing_marker_job_ids(store) -> set[str]:
     """All job_ids that already have a priority marker. Each marker name
     ends in '-{job_id}.json'."""
     out: set[str] = set()
-    for path in store._list_paths("queue_priority/"):
+    for path in store._list_paths(QUEUE_PRIORITY_PREFIX):
         if not path.endswith(".json"):
             continue
         # path layout: queue_priority/{inv}-{ts}-{job_id}.json (skip sentinel)

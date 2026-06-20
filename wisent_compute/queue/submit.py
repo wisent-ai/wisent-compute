@@ -16,10 +16,21 @@ TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 COMPUTE_API = os.environ.get("COMPUTE_API_URL", "https://compute.wisent.com")
 BUCKET_KWARG_KEY = "bucket"
 ID_KEY = "id"
+JOB_ID_BYTES = 4
+BATCH_INLINE_LIMIT = 4
+BATCH_PARALLEL_WORKERS = 64
+DEFAULT_PROVIDER = "gcp"
+DEFAULT_REPO_EXTRAS = "train"
+DEFAULT_YIELD_GRACE_SECONDS = 120
+API_RUNNING_STATE = "running"
+CPU_MACHINE_TYPE = "e2-standard-8"
+STARTUP_GPU_TEMPLATE = "startup_gpu.sh"
+STARTUP_CPU_TEMPLATE = "startup_cpu.sh"
+SUBMITTED_VIA_CLI = "cli"
 
 
 def _generate_job_id() -> str:
-    return os.urandom(4).hex()
+    return os.urandom(JOB_ID_BYTES).hex()
 
 
 def _render_template(template_name: str, variables: dict) -> str:
@@ -67,7 +78,7 @@ def submit_batch(commands: list[str], **kwargs) -> int:
 
     run_id = kwargs.pop("run_id", "") or generate_run_id()
     kwargs["run_id"] = run_id
-    workers = 1 if len(commands) <= 4 else 64
+    workers = 1 if len(commands) <= BATCH_INLINE_LIMIT else BATCH_PARALLEL_WORKERS
     if workers == 1:
         jobs = [submit_job(cmd, **kwargs) for cmd in commands]
     else:
@@ -93,7 +104,7 @@ def submit_batch(commands: list[str], **kwargs) -> int:
 
 def submit_job(
     command: str,
-    provider: str = "gcp",
+    provider: str = DEFAULT_PROVIDER,
     batch_id: str = "",
     bucket: str = "",
     *,
@@ -103,7 +114,7 @@ def submit_job(
     priority: int = 0,
     repo: str = "",
     repo_workdir: str = "",
-    repo_extras: str = "train",
+    repo_extras: str = DEFAULT_REPO_EXTRAS,
     gpu_type: str = "",
     vram_gb: int = 0,
     machine_type: str = "",
@@ -117,7 +128,7 @@ def submit_job(
     re_submission_of: str = "",
     yieldable: bool = False,
     yield_command: str = "",
-    yield_grace_seconds: int = 120,
+    yield_grace_seconds: int = DEFAULT_YIELD_GRACE_SECONDS,
 ) -> Job:
     """Submit a job. Uses compute.wisent.com API if available, GCS otherwise."""
     # Cooperative-yield contract: a yieldable job MUST declare how to save
@@ -184,7 +195,7 @@ def _submit_via_api(command: str, api_key: str, provider: str) -> Job:
             command=command,
             gpu_mem_gb=gpu_mem,
             provider=provider,
-            state="running",
+            state=API_RUNNING_STATE,
             instance_ref=_dict_value(data, ID_KEY, ""),
         )
     except urllib.error.HTTPError as e:
@@ -201,7 +212,7 @@ def _submit_via_gcs(
     priority: int = 0,
     repo: str = "",
     repo_workdir: str = "",
-    repo_extras: str = "train",
+    repo_extras: str = DEFAULT_REPO_EXTRAS,
     gpu_type: str = "",
     vram_gb: int = 0,
     machine_type: str = "",
@@ -215,7 +226,7 @@ def _submit_via_gcs(
     re_submission_of: str = "",
     yieldable: bool = False,
     yield_command: str = "",
-    yield_grace_seconds: int = 120,
+    yield_grace_seconds: int = DEFAULT_YIELD_GRACE_SECONDS,
 ) -> Job:
     """Submit directly to GCS queue (no API server needed).
 
@@ -244,7 +255,7 @@ def _submit_via_gcs(
 
     if not caller_asked_for_gpu and gpu_mem == 0:
         # CPU path — no GPU requirements, no regex hit. Same as pre-0.4.122.
-        machine_type = "e2-standard-8"
+        machine_type = CPU_MACHINE_TYPE
         accel_type = ""
     else:
         inferred_machine, inferred_accel = lookup_instance_type(provider, gpu_mem)
@@ -273,7 +284,7 @@ def _submit_via_gcs(
     hf_token = os.environ.get("HF_TOKEN", "")
     gh_token = os.environ.get("GH_TOKEN", "")
 
-    template = "startup_gpu.sh" if gpu_mem > 0 else "startup_cpu.sh"
+    template = STARTUP_GPU_TEMPLATE if gpu_mem > 0 else STARTUP_CPU_TEMPLATE
     script = _render_template(template, {
         "JOB_ID": job_id,
         "COMMAND": command,
@@ -310,7 +321,7 @@ def _submit_via_gcs(
         priority=priority,
         submitted_by=submitter,
         submitted_from=host,
-        submitted_via="cli",
+        submitted_via=SUBMITTED_VIA_CLI,
         run_id=run_id,
         submitter_app=os.environ.get("WC_SUBMITTER_APP", ""),
         repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,

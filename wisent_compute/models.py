@@ -36,6 +36,16 @@ from ._catalog.gpu_sku import (  # noqa: E402
     VM_BUNDLE_HOURLY_RATE_USD,
 )
 
+DEFAULT_PROVIDER = "gcp"
+DEFAULT_MAX_RESTARTS = 20
+DEFAULT_IMAGE = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
+DEFAULT_IMAGE_PROJECT = "deeplearning-platform-release"
+DEFAULT_BOOT_DISK_GB = 500
+DEFAULT_MAX_PREEMPTS_BEFORE_ONDEMAND = 3
+DEFAULT_REPO_EXTRAS = "train"
+DEFAULT_YIELD_GRACE_SECONDS = 120
+DEFAULT_MAX_YIELDS_BEFORE_PROTECTED = 5
+
 
 @dataclass
 class Job:
@@ -44,7 +54,7 @@ class Job:
     gpu_mem_gb: int = 0
     gpu_type: str = ""
     machine_type: str = ""
-    provider: str = "gcp"
+    provider: str = DEFAULT_PROVIDER
     batch_id: str = ""
     state: str = JobState.QUEUED.value
     created_at: str = ""
@@ -53,11 +63,11 @@ class Job:
     failed_at: str | None = None
     instance_ref: str | None = None
     restarts: int = 0
-    max_restarts: int = 20
+    max_restarts: int = DEFAULT_MAX_RESTARTS
     last_restart: str | None = None
-    image: str = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
-    image_project: str = "deeplearning-platform-release"
-    boot_disk_gb: int = 500
+    image: str = DEFAULT_IMAGE
+    image_project: str = DEFAULT_IMAGE_PROJECT
+    boot_disk_gb: int = DEFAULT_BOOT_DISK_GB
     startup_script_uri: str = ""
     error: str | None = None
     # New routing/cost fields. Default values keep all existing jobs behaving
@@ -66,7 +76,7 @@ class Job:
     pin_to_provider: bool = False          # if true, only the named provider claims
     max_cost_per_hour_usd: float = 0.0     # 0 = no cap
     preempt_count: int = 0                 # # times this job was preempted on Spot
-    max_preempts_before_ondemand: int = 3  # after N preempts, fall back to on-demand
+    max_preempts_before_ondemand: int = DEFAULT_MAX_PREEMPTS_BEFORE_ONDEMAND  # after N preempts, fall back to on-demand
     priority: int = 0                      # higher = scheduled first within FIFO bucket
     # Tracks failed create_instance calls so a job that can't currently be
     # dispatched (zone exhausted, quota error, etc.) backs off instead of
@@ -93,7 +103,7 @@ class Job:
     # caller having to glue clone+install onto every command. Empty = skip.
     repo: str = ""                # https git URL (or git@host:owner/repo.git)
     repo_workdir: str = ""        # subdir name; defaults to repo basename
-    repo_extras: str = "train"    # pip-install extras name; "" to skip install
+    repo_extras: str = DEFAULT_REPO_EXTRAS    # pip-install extras name; "" to skip install
     # Verification hook. If set, runs as a shell command AFTER the subprocess
     # exits 0; non-zero exit reverses the COMPLETED → FAILED. Catches the
     # class of bug where the subprocess swallows errors and exits 0 despite
@@ -182,9 +192,9 @@ class Job:
     # so a stream of high-priority work can't starve it forever.
     yieldable: bool = False
     yield_command: str = ""
-    yield_grace_seconds: int = 120
+    yield_grace_seconds: int = DEFAULT_YIELD_GRACE_SECONDS
     yield_count: int = 0
-    max_yields_before_protected: int = 5
+    max_yields_before_protected: int = DEFAULT_MAX_YIELDS_BEFORE_PROTECTED
 
     def __post_init__(self):
         if not self.created_at:

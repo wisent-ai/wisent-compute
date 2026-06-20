@@ -28,6 +28,9 @@ _CACHE: dict[str, tuple[float, str]] = {}
 # iteration over ~50s loop time = 0.06 RPS per agent, 3 agents in
 # the fleet = 0.18 RPS — well under any rate limit.
 _CACHE_TTL_SECONDS = 30
+NO_OUTPUT_TEXT = "(no output)"
+IMPORT_ERROR_SNIPPET_CHARS = 400
+LOCAL_KIND = "local"
 
 
 def _version_tuple(v: str) -> tuple:
@@ -88,10 +91,10 @@ def wisent_import_ok() -> tuple[bool, str]:
     )
     if res.returncode == 0:
         return True, ""
-    return False, (res.stderr or res.stdout or "(no output)").strip()[:400]
+    return False, (res.stderr or res.stdout or NO_OUTPUT_TEXT).strip()[:IMPORT_ERROR_SNIPPET_CHARS]
 
 
-def maybe_drain_or_upgrade(slots: list, log_fn, kind: str = "local") -> bool:
+def maybe_drain_or_upgrade(slots: list, log_fn, kind: str = LOCAL_KIND) -> bool:
     """Combined drift + venv-integrity handling for the agent main loop.
     Returns True if the caller should `continue` (skip claim path); False
     if no remediation needed.
@@ -127,7 +130,7 @@ def maybe_drain_or_upgrade(slots: list, log_fn, kind: str = "local") -> bool:
     if not drift and ok:
         return False
     if not slots:
-        if kind != "local":
+        if kind != LOCAL_KIND:
             log_fn(f"cloud agent {kind} drift={drift} ok={ok}; self-terminate "
                    f"so dispatcher creates a fresh VM with new version baked in")
             from .gcp_self import self_terminate

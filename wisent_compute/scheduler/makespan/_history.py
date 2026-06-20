@@ -18,6 +18,8 @@ from ...queue.storage import JobStorage
 
 HISTORY_TTL_S = 600
 COMPLETED_SAMPLE_CAP = 4000  # don't scan every completed/ blob each refresh
+COMPLETED_BLOB_PREFIX = "completed/"
+HISTORY_FETCH_WORKERS = 32
 
 _MODEL_RE = re.compile(r"--model\s+(\S+)")
 _TASK_RE = re.compile(r"--task\s+(\S+)")
@@ -47,7 +49,7 @@ def _build_history(store: JobStorage, log_fn: Callable[[str], None]) -> dict[tup
     if bucket is None:
         return {}
     blobs = []
-    for blob in bucket.list_blobs(prefix="completed/"):
+    for blob in bucket.list_blobs(prefix=COMPLETED_BLOB_PREFIX):
         blobs.append(blob)
         if len(blobs) >= COMPLETED_SAMPLE_CAP:
             break
@@ -67,7 +69,7 @@ def _build_history(store: JobStorage, log_fn: Callable[[str], None]) -> dict[tup
         except NotFound:
             return None
 
-    with ThreadPoolExecutor(max_workers=32) as ex:
+    with ThreadPoolExecutor(max_workers=HISTORY_FETCH_WORKERS) as ex:
         texts = list(ex.map(_fetch, blobs))
 
     by_key: dict[tuple[str, str], list[float]] = {}

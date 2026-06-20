@@ -19,6 +19,10 @@ DEFAULT_STRATEGIES = (
 DEFAULT_COMPONENT = "residual_stream"
 HF_REPO_ID = "wisent-ai/activations"
 HF_REPO_TYPE = "dataset"
+ACTIVATIONS_PREFIX = "activations"
+HF_DONE_PREFIX_PARTS = 4
+QUEUE_PREFIX = "queue"
+COMPLETED_PREFIX = "completed"
 
 
 def _model_to_safe_name(model: str) -> str:
@@ -53,8 +57,8 @@ def fetch_hf_done_prefixes() -> set[str]:
     prefixes: set[str] = set()
     for f in files:
         parts = f.split("/")
-        if len(parts) >= 4 and parts[0] == "activations":
-            prefixes.add("/".join(parts[:4]) + "/")
+        if len(parts) >= HF_DONE_PREFIX_PARTS and parts[0] == ACTIVATIONS_PREFIX:
+            prefixes.add("/".join(parts[:HF_DONE_PREFIX_PARTS]) + "/")
     return prefixes
 
 
@@ -65,7 +69,7 @@ def is_job_already_done(command: str, prefixes: set[str]) -> bool:
         return False
     safe = _model_to_safe_name(model)
     for strategy in DEFAULT_STRATEGIES:
-        prefix = f"activations/{safe}/{task}/{strategy}/"
+        prefix = f"{ACTIVATIONS_PREFIX}/{safe}/{task}/{strategy}/"
         if prefix not in prefixes:
             return False
     return True
@@ -86,7 +90,7 @@ def filter_already_done(queued, store, now_utc, log_fn):
             j.state = JobState.COMPLETED.value
             j.completed_at = now_utc.isoformat()
             j.error = "skipped: all strategies present on wisent-ai/activations"
-            store.move_job(j, "queue", "completed")
+            store.move_job(j, QUEUE_PREFIX, COMPLETED_PREFIX)
             skipped += 1
         else:
             survivors.append(j)

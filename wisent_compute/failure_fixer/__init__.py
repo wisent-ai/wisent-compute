@@ -44,6 +44,8 @@ DRY_RUN = "dry_run"
 ALREADY_DISPATCHED = "already_dispatched"
 CLAUDE_NOT_FOUND = "claude_cli_not_found"
 ATTEMPTS_KEY = "attempts"
+FAILED_PREFIX = "failed/"
+CLAUDE_BIN = "claude"
 
 
 def _dict_value(data: dict, key: str, default):
@@ -98,7 +100,7 @@ def scan_new_failures(
     operator target the workload they actually want fixed (e.g.
     'raw.extract_and_upload', 'extract_and_upload', 'lm_eval')
     instead of every historical failure."""
-    for info in store.list_blobs_with_meta("failed/"):
+    for info in store.list_blobs_with_meta(FAILED_PREFIX):
         if not info.name.endswith(".json"):
             continue
         rec = _parse_failed_blob(store, info.name)
@@ -152,7 +154,7 @@ def format_fix_prompt(rec: FailureRecord, max_error_chars: int = FAILURE_FIX_PRO
 
 def _claude_bin() -> str | None:
     """Locate the local `claude` CLI binary. Returns None if not on PATH."""
-    return shutil.which("claude")
+    return shutil.which(CLAUDE_BIN)
 
 
 def dispatch_fix(rec: FailureRecord, *, store: JobStorage | None = None, execute: bool = False) -> dict:

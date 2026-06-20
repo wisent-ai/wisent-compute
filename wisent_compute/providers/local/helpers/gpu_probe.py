@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import subprocess
 
+NVIDIA_SMI_APP_FIELD_COUNT = 3
+MIB_PER_GIB = 1024
+
 
 def _dict_value(data: dict, key, default):
     return data[key] if key in data else default
@@ -93,7 +96,7 @@ def smi_job_used_gb(root_pid: int) -> int:
     per_gpu_mib: dict[str, int] = {}
     for line in r.stdout.splitlines():
         parts = [x.strip() for x in line.split(",")]
-        if len(parts) != 3:
+        if len(parts) != NVIDIA_SMI_APP_FIELD_COUNT:
             continue
         gpu_uuid = parts[0]
         try:
@@ -105,4 +108,4 @@ def smi_job_used_gb(root_pid: int) -> int:
     if not per_gpu_mib:
         return 0
     peak_mib = max(per_gpu_mib.values())
-    return -(-peak_mib // 1024)  # ceil to GiB
+    return -(-peak_mib // MIB_PER_GIB)  # ceil to GiB

@@ -18,6 +18,8 @@ from wisent_compute.sizing import normalize_queue_sizing
 
 _publisher = None
 _secrets = None
+SECRET_NAMES = ("wisent-hf-token", "wisent-gh-token")
+SECRET_TEXT_ENCODING = "utf-8"
 
 
 def _log(msg):
@@ -31,12 +33,12 @@ def _load_secrets():
         return _secrets
     client = secretmanager_v1.SecretManagerServiceClient()
     _secrets = {}
-    for name in ("wisent-hf-token", "wisent-gh-token"):
+    for name in SECRET_NAMES:
         r = client.access_secret_version(request={
             "name": f"projects/{PROJECT}/secrets/{name}/versions/latest"
         })
         key = name.replace("wisent-", "").replace("-", "_").upper()
-        _secrets[key] = r.payload.data.decode("utf-8")
+        _secrets[key] = r.payload.data.decode(SECRET_TEXT_ENCODING)
     return _secrets
 
 

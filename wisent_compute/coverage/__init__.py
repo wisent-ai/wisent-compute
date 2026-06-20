@@ -94,6 +94,9 @@ class Verifier(ABC):
 class URIExistsVerifier(Verifier):
     """HEAD against an http(s) URI; optional bearer token for HF/private."""
 
+    HTTP_NOT_FOUND = 404
+    HTTP_RATE_LIMITED = 429
+
     def __init__(self, bearer_token: str = ""):
         self._token = bearer_token
 
@@ -103,11 +106,11 @@ class URIExistsVerifier(Verifier):
         for attempt in range(COVERAGE_HTTP_RETRY_CAP):
             try:
                 with urllib.request.urlopen(req) as r:
-                    return PRESENT if r.status < 400 else MISSING
+                    return PRESENT if r.status < self.HTTP_NOT_FOUND else MISSING
             except urllib.error.HTTPError as e:
-                if e.code == 404:
+                if e.code == self.HTTP_NOT_FOUND:
                     return MISSING
-                if e.code == 429:
+                if e.code == self.HTTP_RATE_LIMITED:
                     time.sleep(COVERAGE_VERIFY_BACKOFF_BASE ** attempt)
                     continue
                 raise
@@ -117,13 +120,15 @@ class URIExistsVerifier(Verifier):
 class GCSBlobExistsVerifier(Verifier):
     """Existence check for gs://<bucket>/<path> via JobStorage."""
 
+    GCS_URI_PREFIX = "gs://"
+
     def __init__(self, store: JobStorage | None = None):
         self._store = store or JobStorage(BUCKET)
 
     def check(self, expected_uri: str) -> str:
-        if not expected_uri.startswith("gs://"):
+        if not expected_uri.startswith(self.GCS_URI_PREFIX):
             raise ValueError(f"GCSBlobExistsVerifier expects gs:// URI, got {expected_uri}")
-        rest = expected_uri[len("gs://"):]
+        rest = expected_uri[len(self.GCS_URI_PREFIX):]
         bucket, _, path = rest.partition("/")
         if bucket != self._store.bucket_name:
             raise ValueError(

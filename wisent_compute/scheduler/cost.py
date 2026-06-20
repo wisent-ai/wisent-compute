@@ -34,6 +34,14 @@ SECONDS_PER_GB_PER_STRATEGY = 5.0
 TARGET_KIND_KEY = "target_kind"
 MODEL_KEY = "model"
 COST_ROW_FORMAT = "  {target:<10} jobs={jobs:<5} wall_h={wall_hours:>7.2f} cost=${cost_usd:.4f}"
+AZURE_MACHINE_TYPE_PREFIX = "Standard_"
+LOCAL_INSTANCE_REF_PREFIX = "local@"
+LOCAL_TARGET_KIND = "local"
+GCP_TARGET_KIND = "gcp"
+AZURE_TARGET_KIND = "azure"
+AWS_TARGET_KIND = "aws"
+CLOUD_TARGET_KINDS = (AZURE_TARGET_KIND, AWS_TARGET_KIND, GCP_TARGET_KIND)
+UNKNOWN_TARGET_KIND = "unknown"
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -62,7 +70,7 @@ def _hourly_rate_usd(gpu_type: str, preemptible: bool, machine_type: str = "") -
     Falls back to GPU_TYPE_TO_MACHINE_TYPE to look up the bundle when
     machine_type wasn't recorded on the Job.
     """
-    if machine_type and machine_type.startswith("Standard_"):
+    if machine_type and machine_type.startswith(AZURE_MACHINE_TYPE_PREFIX):
         if machine_type not in AZURE_VM_HOURLY_RATE_USD:
             raise KeyError(f"Azure machine type has no configured rate: {machine_type}")
         on_demand, spot = AZURE_VM_HOURLY_RATE_USD[machine_type]
@@ -96,14 +104,14 @@ def _target_kind(job: Job) -> str:
     multi-provider support.
     """
     ref = job.instance_ref or ""
-    if ref.startswith("local@"):
-        return "local"
+    if ref.startswith(LOCAL_INSTANCE_REF_PREFIX):
+        return LOCAL_TARGET_KIND
     provider = (getattr(job, "provider", "") or "").strip()
-    if provider in ("azure", "aws", "gcp"):
+    if provider in CLOUD_TARGET_KINDS:
         return provider
     if ref:
-        return "gcp"
-    return "unknown"
+        return GCP_TARGET_KIND
+    return UNKNOWN_TARGET_KIND
 
 
 def _model_from_command(cmd: str) -> str:

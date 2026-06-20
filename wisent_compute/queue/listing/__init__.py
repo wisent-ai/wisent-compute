@@ -17,6 +17,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ...models import Job
 
+MAX_PRIORITY_SORT_KEY = 99999999
+QUEUE_PREFIX = "queue"
+QUEUE_PRIORITY_PREFIX = "queue_priority/"
+MARKER_SCAN_MIN_CHUNK = 50
+MARKER_SCAN_MULTIPLIER = 20
+MARKER_DOWNLOAD_WORKERS = 10
+DEFAULT_FITTING_CAP = 4000
+FITTING_DOWNLOAD_WORKERS = 32
+LIST_DOWNLOAD_WORKERS = 10
+
 
 def _download_or_none(store, path: str) -> str | None:
     try:
@@ -27,8 +37,8 @@ def _download_or_none(store, path: str) -> str | None:
 
 def priority_key(job: Job) -> str:
     """Sortable name component: lower = higher real priority + older."""
-    prio = max(0, min(99999999, int(getattr(job, "priority", 0) or 0)))
-    inv = 99999999 - prio
+    prio = max(0, min(MAX_PRIORITY_SORT_KEY, int(getattr(job, "priority", 0) or 0)))
+    inv = MAX_PRIORITY_SORT_KEY - prio
     ts = ""
     ca = getattr(job, "created_at", None)
     if ca is not None:
@@ -38,7 +48,7 @@ def priority_key(job: Job) -> str:
 
 def write_marker(store, job: Job) -> None:
     """Index entry for priority>0 jobs."""
-    name = f"queue_priority/{priority_key(job)}-{job.job_id}.json"
+    name = f"{QUEUE_PRIORITY_PREFIX}{priority_key(job)}-{job.job_id}.json"
     body = json.dumps({"job_id": job.job_id, "priority": int(job.priority)})
     store._upload_text(name, body)
 
@@ -46,7 +56,7 @@ def write_marker(store, job: Job) -> None:
 def delete_marker(store, job_id: str) -> None:
     """Remove any priority marker(s) for this job_id."""
     suffix = f"-{job_id}.json"
-    for path in store._list_paths("queue_priority/"):
+    for path in store._list_paths(QUEUE_PRIORITY_PREFIX):
         if path.endswith(suffix):
             store._delete_blob(path)
 
@@ -58,7 +68,7 @@ def list_top_n(store, prefix: str, *, top_n: int) -> list[Job]:
     if top_n <= 0:
         return []
     marker_paths = sorted(
-        p for p in store._list_paths("queue_priority/") if p.endswith(".json")
+        p for p in store._list_paths(QUEUE_PRIORITY_PREFIX) if p.endswith(".json")
     )
     if not marker_paths:
         return []
@@ -69,11 +79,11 @@ def list_top_n(store, prefix: str, *, top_n: int) -> list[Job]:
     # top_n budget, or high-priority fresh jobs disappear behind dead markers.
     # Keep the scan bounded because agents call this in their polling loop.
     out: list[Job] = []
-    chunk = max(50, top_n)
-    max_scan = min(len(marker_paths), max(top_n * 20, top_n))
+    chunk = max(MARKER_SCAN_MIN_CHUNK, top_n)
+    max_scan = min(len(marker_paths), max(top_n * MARKER_SCAN_MULTIPLIER, top_n))
     for i in range(0, max_scan, chunk):
         paths = marker_paths[i:min(i + chunk, max_scan)]
-        with ThreadPoolExecutor(max_workers=min(10, len(paths))) as pool:
+        with ThreadPoolExecutor(max_workers=min(MARKER_DOWNLOAD_WORKERS, len(paths))) as pool:
             bodies = list(pool.map(lambda p: _download_or_none(store, p), paths))
         job_ids: list[tuple[str, str]] = []
         for path, body in zip(paths, bodies):
@@ -86,7 +96,7 @@ def list_top_n(store, prefix: str, *, top_n: int) -> list[Job]:
             continue
 
         job_paths = [f"{prefix}/{jid}.json" for _, jid in job_ids]
-        with ThreadPoolExecutor(max_workers=min(10, len(job_paths))) as pool:
+        with ThreadPoolExecutor(max_workers=min(MARKER_DOWNLOAD_WORKERS, len(job_paths))) as pool:
             blobs = list(pool.map(lambda p: _download_or_none(store, p), job_paths))
         for (marker_path, _jid), data in zip(job_ids, blobs):
             if data:
@@ -114,7 +124,7 @@ def list_priority_first(store, prefix: str, *, cap: int) -> list[Job]:
     return out
 
 
-def list_fitting(store, prefix: str, *, max_gpu_mem_gb: int, cap: int = 4000) -> list[Job]:
+def list_fitting(store, prefix: str, *, max_gpu_mem_gb: int, cap: int = DEFAULT_FITTING_CAP) -> list[Job]:
     """Priority-aware fitting jobs: queue_priority/ markers first, then FIFO
     from queue/. Metadata stamping filters non-fitting blobs before download."""
     if store._azure_backend is None and store._sdk_bucket is None:
@@ -123,7 +133,7 @@ def list_fitting(store, prefix: str, *, max_gpu_mem_gb: int, cap: int = 4000) ->
         return [j for j in jobs if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb]
     out: list[Job] = []
     seen: set[str] = set()
-    if prefix == "queue":
+    if prefix == QUEUE_PREFIX:
         for j in list_top_n(store, prefix, top_n=cap):
             if int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb and j.job_id not in seen:
                 out.append(j)
@@ -147,7 +157,7 @@ def list_fitting(store, prefix: str, *, max_gpu_mem_gb: int, cap: int = 4000) ->
         txt = store._download_text(path)
         return Job.from_json(txt) if txt else None
 
-    with ThreadPoolExecutor(max_workers=32) as ex:
+    with ThreadPoolExecutor(max_workers=FITTING_DOWNLOAD_WORKERS) as ex:
         for j in ex.map(_read, eligible_paths):
             if j is not None and int(getattr(j, "gpu_mem_gb", 0) or 0) <= max_gpu_mem_gb:
                 out.append(j)
@@ -168,7 +178,7 @@ def list_jobs(store, prefix: str, *, oldest_first: int = 0) -> list[Job]:
     ]
     if not paths:
         return []
-    workers = min(10, max(1, len(paths)))
+    workers = min(LIST_DOWNLOAD_WORKERS, max(1, len(paths)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         blobs = list(pool.map(store._download_text, paths))
     jobs: list[Job] = []

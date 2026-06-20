@@ -20,6 +20,16 @@ from pathlib import Path
 from typing import Callable
 
 LABEL_PREFIX = "com.wisent.compute"
+AGENT_KIND = "agent"
+COORDINATOR_KIND = "coordinator"
+FAILURE_FIXER_KIND = "failure-fixer"
+WATCHDOG_KIND = "watchdog"
+ENV_FORWARD_KINDS = (FAILURE_FIXER_KIND, WATCHDOG_KIND)
+DARWIN_SYSTEM = "Darwin"
+LINUX_SYSTEM = "Linux"
+SHELL_BIN = "/bin/bash"
+DEFAULT_SERVICE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+DEFAULT_WC_BUCKET = "wisent-compute"
 
 
 def _wc_bin() -> str:
@@ -139,11 +149,11 @@ def _wc_watchdog_bin() -> str:
 
 def _exec_args_for(entry, kind: str) -> list[str]:
     bin_path = _wc_bin()
-    if kind == "agent":
-        return [bin_path, "agent", "--auto"]
-    if kind == "coordinator":
-        return [bin_path, "coordinator", "--target", entry.name]
-    if kind == "failure-fixer":
+    if kind == AGENT_KIND:
+        return [bin_path, AGENT_KIND, "--auto"]
+    if kind == COORDINATOR_KIND:
+        return [bin_path, COORDINATOR_KIND, "--target", entry.name]
+    if kind == FAILURE_FIXER_KIND:
         # Run scan_and_dispatch every iteration. Loop in shell so a
         # single failure of scan_and_dispatch (transient GCS hiccup,
         # model-router 5xx) does not require launchd to restart the
@@ -159,10 +169,10 @@ def _exec_args_for(entry, kind: str) -> list[str]:
         # workload (handled by the bootstrap dispatcher).
         pat_arg = f"--command-pattern '{_pattern}'" if _pattern else ""
         return [
-            "/bin/bash", "-c",
+            SHELL_BIN, "-c",
             f"while true; do {wc_fix} scan-dispatch --execute {pat_arg}; sleep {_tick}; done",
         ]
-    if kind == "watchdog":
+    if kind == WATCHDOG_KIND:
         return [_wc_watchdog_bin()]
     raise ValueError(f"unknown install kind: {kind}")
 
@@ -226,15 +236,15 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
     # returns 0 failed/ blobs every tick (confirmed 2026-05-22, 273
     # quota-burn ticks all emitted {"results": [], "count": 0}). HF
     # token is forwarded so the verify_command's curl HEAD works.
-    if kind in ("failure-fixer", "watchdog"):
+    if kind in ENV_FORWARD_KINDS:
         env["PATH"] = os.environ.get(
-            "PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+            "PATH", DEFAULT_SERVICE_PATH
         )
         for k in ("GOOGLE_CLOUD_PROJECT", "GCP_PROJECT"):
             v = os.environ.get(k, "")
             if v:
                 env[k] = v
-        env["WC_BUCKET"] = os.environ.get("WC_BUCKET", "wisent-compute")
+        env["WC_BUCKET"] = os.environ.get("WC_BUCKET", DEFAULT_WC_BUCKET)
 
     if dry_run:
         echo(f"[dry-run] {kind}={entry.name} on {platform.system()}")
@@ -242,9 +252,9 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
         echo(f"  env:  {env}")
         return
 
-    if platform.system() == "Darwin":
+    if platform.system() == DARWIN_SYSTEM:
         _install_darwin(label, exec_args, env, echo)
-    elif platform.system() == "Linux":
+    elif platform.system() == LINUX_SYSTEM:
         _install_linux(label, exec_args, env, f"Wisent Compute {kind} ({entry.name})", echo)
     else:
         raise RuntimeError(f"unsupported OS for local install: {platform.system()}")

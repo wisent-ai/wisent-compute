@@ -14,6 +14,10 @@ AZ_ORDER = [f"{REGION}a", f"{REGION}c", f"{REGION}d", f"{REGION}b"]
 ERROR_KEY = "Error"
 CODE_KEY = "Code"
 INVALID_INSTANCE_ID_NOT_FOUND = "InvalidInstanceID.NotFound"
+INSUFFICIENT_INSTANCE_CAPACITY_CODE = "InsufficientInstanceCapacity"
+RUNNING_STATE = "running"
+PENDING_STATE = "pending"
+LIVE_INSTANCE_STATES = (RUNNING_STATE, PENDING_STATE)
 
 
 def _dict_value(data: dict, key: str, default):
@@ -72,7 +76,7 @@ class AWSProvider(Provider):
                 _log(f"Created {iid} in {az}")
                 return iid
             except Exception as e:
-                if "InsufficientInstanceCapacity" in str(e):
+                if INSUFFICIENT_INSTANCE_CAPACITY_CODE in str(e):
                     continue
                 _log(f"Failed in {az}: {e}")
                 continue
@@ -97,14 +101,14 @@ class AWSProvider(Provider):
                 return False
             raise
         state = r["Reservations"][0]["Instances"][0]["State"]["Name"]
-        return state in ("running", "pending")
+        return state in LIVE_INSTANCE_STATES
 
     def list_running_instances(self) -> dict[str, int]:
         counts = {}
         paginator = self.ec2.get_paginator("describe_instances")
         for page in paginator.paginate(Filters=[
             {"Name": "tag:Name", "Values": ["wisent-*"]},
-            {"Name": "instance-state-name", "Values": ["running"]},
+            {"Name": "instance-state-name", "Values": [RUNNING_STATE]},
         ]):
             for res in page["Reservations"]:
                 for inst in res["Instances"]:

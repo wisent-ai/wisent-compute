@@ -25,6 +25,7 @@ from .storage import JobStorage
 
 CAPACITY_PREFIX = "capacity/"
 CAPACITY_STALE_SECONDS = 180
+STALE_CAPACITY_DELETE_BATCH = 200
 
 
 def publish_capacity(
@@ -155,7 +156,7 @@ def read_consumer_capacity(store: JobStorage) -> dict[str, dict]:
         if cid:
             out[cid] = payload
 
-    for blob in stale_blobs[:200]:
+    for blob in stale_blobs[:STALE_CAPACITY_DELETE_BATCH]:
         blob.delete()
     return out
 

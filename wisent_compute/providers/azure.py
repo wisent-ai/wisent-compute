@@ -21,6 +21,12 @@ from .azure_helpers import network as _net
 from .base import Provider
 
 WISENT_CREATED_TAG = "wisent_created"
+EXPECTED_IMAGE_URN_PARTS = 4
+AZURE_ALREADY_EXISTS_ERROR = "already exists"
+AZURE_POWER_STATE_PREFIX = "PowerState/"
+AZURE_PROVISIONING_LIVE_STATES = ("creating", "updating", "succeeded")
+AZURE_PROVISIONING_PENDING_STATES = ("creating", "updating")
+AZURE_POWER_LIVE_STATES = ("running", "starting")
 
 
 def _dict_value(data: dict, key: str, default):
@@ -34,7 +40,7 @@ def _log(msg):
 
 def _parse_image_urn(urn: str) -> dict:
     parts = urn.split(":")
-    if len(parts) != 4:
+    if len(parts) != EXPECTED_IMAGE_URN_PARTS:
         raise ValueError(f"AZURE_IMAGE_URN must be 'publisher:offer:sku:version', got {urn!r}")
     publisher, offer, sku, version = parts
     return {"publisher": publisher, "offer": offer, "sku": sku, "version": version}
@@ -139,7 +145,7 @@ class AzureProvider(Provider):
                 return f"{name}@{location}"
             except Exception as e:
                 msg = str(e)
-                if "already exists" in msg.lower():
+                if AZURE_ALREADY_EXISTS_ERROR in msg.lower():
                     return f"{name}@{location}"
                 _log(f"VM create failed in {location}: {e}")
                 # Roll back the NIC we just created so we don't leak it.
@@ -175,17 +181,17 @@ class AzureProvider(Provider):
         # also has "Updating", which we treat as alive — a VM mid-update is
         # still consuming GPU quota and shouldn't be requeued.
         prov = (vm.provisioning_state or "").lower()
-        if prov in ("creating", "updating", "succeeded"):
+        if prov in AZURE_PROVISIONING_LIVE_STATES:
             statuses = []
             iv = getattr(vm, "instance_view", None)
             if iv is not None:
                 statuses = [s.code for s in (iv.statuses or [])]
             for code in statuses:
-                if code.startswith("PowerState/"):
+                if code.startswith(AZURE_POWER_STATE_PREFIX):
                     state = code.split("/", 1)[1]
-                    return state in ("running", "starting")
+                    return state in AZURE_POWER_LIVE_STATES
             # Mid-create: no PowerState yet — treat as alive.
-            return prov in ("creating", "updating")
+            return prov in AZURE_PROVISIONING_PENDING_STATES
         return False
 
     def instance_lifecycle_state(self, instance_ref: str) -> str | None:
@@ -207,7 +213,7 @@ class AzureProvider(Provider):
         if iv is None:
             return None
         for s in iv.statuses or []:
-            if (s.code or "").startswith("PowerState/"):
+            if (s.code or "").startswith(AZURE_POWER_STATE_PREFIX):
                 return s.code.split("/", 1)[1]  # running/deallocated/stopped/...
         return None
 

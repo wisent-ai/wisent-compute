@@ -16,6 +16,24 @@ from pathlib import Path
 from ..models import Job
 
 _USE_SDK = None
+AZURE_BACKEND_NAME = "azure"
+GCS_BACKEND_NAME = "gcs"
+QUEUE_PREFIX = "queue"
+RUNNING_PREFIX = "running"
+COMPLETED_PREFIX = "completed"
+UPLOADED_PREFIX = "uploaded"
+FAILED_PREFIX = "failed"
+ALL_JOB_PREFIXES = (
+    QUEUE_PREFIX,
+    RUNNING_PREFIX,
+    COMPLETED_PREFIX,
+    UPLOADED_PREFIX,
+    FAILED_PREFIX,
+)
+DEFAULT_FITTING_CAP = 4000
+STATUS_DIR = "status"
+STATUS_FILE_NAME = "status"
+HEARTBEAT_FILE_NAME = "heartbeat"
 
 
 def _has_adc() -> bool:
@@ -92,7 +110,7 @@ class JobStorage:
             WC_AZURE_STORAGE_ACCOUNT,
             WC_STORAGE_BACKEND,
         )
-        if WC_STORAGE_BACKEND == "azure":
+        if WC_STORAGE_BACKEND == AZURE_BACKEND_NAME:
             from .azure_blob import AzureBlobBackend
             self._azure_backend = AzureBlobBackend(
                 WC_AZURE_STORAGE_ACCOUNT, WC_AZURE_CONTAINER,
@@ -122,7 +140,7 @@ class JobStorage:
     @property
     def backend_name(self) -> str:
         """'azure' or 'gcs' — useful for log lines and conditional branches."""
-        return "azure" if self._azure_backend is not None else "gcs"
+        return AZURE_BACKEND_NAME if self._azure_backend is not None else GCS_BACKEND_NAME
 
     # Internal helpers — three execution paths:
     #   1. Azure backend (WC_STORAGE_BACKEND=azure): all I/O via Azure SDK.
@@ -213,7 +231,7 @@ class JobStorage:
             blob = self._sdk_bucket.blob(blob_path); blob.reload()
             blob.metadata = {**(blob.metadata or {}), **meta}
             blob.patch()
-        if prefix == "queue" and int(getattr(job, "priority", 0) or 0) > 0:
+        if prefix == QUEUE_PREFIX and int(getattr(job, "priority", 0) or 0) > 0:
             self.write_priority_marker(job)
 
     def read_job(self, prefix: str, job_id: str) -> Job | None:
@@ -231,13 +249,13 @@ class JobStorage:
 
     def delete_job(self, prefix: str, job_id: str):
         self._delete_blob(f"{prefix}/{job_id}.json")
-        if prefix == "queue":
+        if prefix == QUEUE_PREFIX:
             self.delete_priority_marker(job_id)
 
     def move_job(self, job: Job, from_prefix: str, to_prefix: str):
         self.write_job(to_prefix, job)
         self._delete_blob(f"{from_prefix}/{job.job_id}.json")
-        if from_prefix == "queue":
+        if from_prefix == QUEUE_PREFIX:
             self.delete_priority_marker(job.job_id)
         # Live re-submission tracking: write a fixed/ or failed_again/
         # tombstone when this move terminates a re-submitted job. Never
@@ -263,7 +281,7 @@ class JobStorage:
         from .listing import list_priority_first
         return list_priority_first(self, prefix, cap=cap)
 
-    def list_jobs_fitting(self, prefix: str, *, max_gpu_mem_gb: int, cap: int = 4000) -> list[Job]:
+    def list_jobs_fitting(self, prefix: str, *, max_gpu_mem_gb: int, cap: int = DEFAULT_FITTING_CAP) -> list[Job]:
         from .listing import list_fitting
         return list_fitting(self, prefix, max_gpu_mem_gb=max_gpu_mem_gb, cap=cap)
 
@@ -280,11 +298,11 @@ class JobStorage:
         return self._download_text(f"scripts/{job_id}.sh") or ""
 
     def read_status(self, job_id: str) -> str | None:
-        data = self._download_text(f"status/{job_id}/status")
+        data = self._download_text(f"{STATUS_DIR}/{job_id}/{STATUS_FILE_NAME}")
         return data.strip().split()[0] if data else None
 
     def heartbeat_stale(self, job_id: str, threshold_minutes: int) -> bool:
-        path = f"status/{job_id}/heartbeat"
+        path = f"{STATUS_DIR}/{job_id}/{HEARTBEAT_FILE_NAME}"
         if self._azure_backend is not None:
             updated = self._azure_backend.updated_at(path)
             if updated is None:
@@ -303,11 +321,11 @@ class JobStorage:
         return False
 
     def cleanup_status(self, job_id: str):
-        for suffix in ("status", "heartbeat"):
-            self._delete_blob(f"status/{job_id}/{suffix}")
+        for suffix in (STATUS_FILE_NAME, HEARTBEAT_FILE_NAME):
+            self._delete_blob(f"{STATUS_DIR}/{job_id}/{suffix}")
 
     def list_all_jobs(self) -> dict[str, list[Job]]:
         result = {}
-        for prefix in ("queue", "running", "completed", "uploaded", "failed"):
+        for prefix in ALL_JOB_PREFIXES:
             result[prefix] = self.list_jobs(prefix)
         return result

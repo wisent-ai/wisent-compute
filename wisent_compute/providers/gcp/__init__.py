@@ -15,6 +15,8 @@ from .stockout import (
     QUOTA_TTL_S as _QUOTA_TTL_S,
 )
 
+BAKED_AGENT_IMAGE_FAMILY = "wisent-agent"
+
 
 def _dict_value(data: dict, key, default):
     return data[key] if key in data else default
@@ -41,7 +43,7 @@ class GCPProvider(Provider):
         # deeplearning-platform-release base, dropping boot time from
         # ~5-10 install-rotations to ~30 install-secs.
         from google.api_core.exceptions import NotFound as _NotFound
-        baked_family = "wisent-agent"
+        baked_family = BAKED_AGENT_IMAGE_FAMILY
         baked_present = False
         from google.cloud import compute_v1 as _cv1
         images_client = _cv1.ImagesClient()
