@@ -37,6 +37,25 @@ from ._catalog.gpu_sku import (  # noqa: E402
 )
 
 
+DEPRECATED_ACTIVATION_ENTRYPOINT = "wisent.scripts.activations." + "extract_and_upload"
+
+
+def deprecated_activation_command_reason(command: str) -> str:
+    if DEPRECATED_ACTIVATION_ENTRYPOINT not in (command or ""):
+        return ""
+    return (
+        "refusing deprecated foreground activation uploader; use "
+        "wisent.scripts.activations.raw.extract_and_upload so extraction "
+        "hands upload to the detached worker pool"
+    )
+
+
+def activation_extraction_must_share_gpu(command: str) -> bool:
+    """Activation extraction jobs are VRAM-sized, not whole-GPU-exclusive."""
+    command = command or ""
+    return "wisent.scripts.activations.raw.extract_and_upload" in command
+
+
 @dataclass
 class Job:
     job_id: str

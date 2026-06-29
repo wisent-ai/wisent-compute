@@ -228,19 +228,7 @@ def _top_consumers() -> list[dict]:
 
 
 def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
-    """Returns (refuse_slots_this_tick, diag_updates).
-
-    refuse_slots_this_tick=True only if free disk is still below
-    MIN_FREE_DISK_GB AFTER:
-      1. Evicting oldest-accessed complete HF cache revisions
-      2. Evicting secondary caches (pip wheels, apt archives, wisent
-         cache, HF cache root, HF datasets cache) when HF eviction
-         freed 0 GB but disk is still tight
-
-    When we still refuse after both eviction passes, diag includes a
-    `top_disk_consumers` list of the biggest paths so the operator can
-    see what is filling the disk without needing to SSH in.
-    """
+    """Returns (refuse_slots_this_tick, diag_updates)."""
     home = os.path.expanduser("~")
     free_gb = _free_gb(home)
     diag: dict = {"free_disk_gb": round(free_gb, 1)}
@@ -269,10 +257,6 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
             f"eviction; refusing slots this tick"
         )
         diag["top_disk_consumers"] = _top_consumers()
-        # Surface which stale-training-dir candidates we found and what
-        # their newest-mtime age is, so the operator can see whether the
-        # mtime gate is correctly identifying reclaimable dirs versus
-        # incorrectly flagging an active writer.
         import time as _time
         now = _time.time()
         candidates_diag = []
@@ -289,12 +273,15 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
                 "eligible_for_eviction": age is None or age > STALE_TRAINING_MAX_AGE_S,
             })
         diag["training_dir_candidates"] = candidates_diag
-    # staging-pressure backpressure: refuse extraction admissions when the TMPDIR pending pool leaves too little headroom for an in-flight extraction to finish writing (else it refills the volume -> ENOSPC). Headroom = 2x the largest pending dir, CAPPED at half the volume so a single huge dir (e.g. 169GB ruler) can't demand more free space than the volume can ever offer and freeze extraction forever.
     import subprocess as _sp
     _td = os.environ.get("TMPDIR", "/tmp"); _us = shutil.disk_usage(_td); _sf = _us.free / (1024 ** 3)
     _b = _sp.run(["bash", "-c", f"du -s {_td}/wisent_raw_pending/*/ 2>/dev/null | sort -rn | head -1 | cut -f1"], capture_output=True, text=True).stdout.strip()
     _bg = (int(_b) / (1024 ** 2)) if _b.isdigit() else 0.0
     _need = min(2 * _bg, 0.5 * _us.total / (1024 ** 3))
     if not refuse and 0 <= _sf < _need:
-        log_fn(f"staging low (~{_sf:.0f}GB free < need {_need:.0f}GB; largest pending {_bg:.0f}GB); refusing slots"); refuse = True
+        log_fn(
+            f"staging low (~{_sf:.0f}GB free < need {_need:.0f}GB; "
+            f"largest pending {_bg:.0f}GB); refusing slots"
+        )
+        refuse = True
     return refuse, diag

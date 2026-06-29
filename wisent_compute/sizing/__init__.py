@@ -33,12 +33,15 @@ and the reaper completion-ref scan already use.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 
 from ..config import BUCKET
 
 _MODEL_RE = re.compile(r"--model\s+(\S+)")
+_OOM_PROC_RE = re.compile(r"this process has ([0-9.]+) GiB memory in use", re.IGNORECASE)
+_OOM_ALLOC_RE = re.compile(r"Tried to allocate ([0-9.]+) (MiB|GiB)", re.IGNORECASE)
 
 _COMPLETED_SAMPLE_CAP = 6000
 _TTL_S = 600
@@ -48,6 +51,18 @@ _cache: dict = {"map": None, "built_at": 0.0}
 def _model_of(command: str) -> str:
     m = _MODEL_RE.search(command or "")
     return m.group(1).strip("'\"") if m else ""
+
+
+def _oom_required_gb(text: str) -> int:
+    proc = _OOM_PROC_RE.search(text or "")
+    alloc = _OOM_ALLOC_RE.search(text or "")
+    if not proc:
+        return 0
+    need = float(proc.group(1))
+    if alloc:
+        x = float(alloc.group(1))
+        need += x if alloc.group(2).lower() == "gib" else x / 1024.0
+    return max(1, int(math.ceil(need)))
 
 
 def _build_observed_map() -> dict[str, int]:
@@ -123,6 +138,31 @@ def _build_observed_map() -> dict[str, int]:
         _u = [p for p in _s if _sl is None or p <= _sl]
         if _u:
             out[_m] = min(_u)
+    failed_blobs = []
+    for blob in bucket.list_blobs(prefix="failed/"):
+        failed_blobs.append(blob)
+        if len(failed_blobs) >= _COMPLETED_SAMPLE_CAP:
+            break
+    if failed_blobs:
+        live_vrams = _live_total_vrams()
+        max_live_vram = live_vrams[-1] if live_vrams else None
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            texts = list(ex.map(_fetch, failed_blobs))
+        floors: dict[str, int] = {}
+        for text in texts:
+            if text is None:
+                continue
+            doc = json.loads(text)
+            model = _model_of(doc.get("command") or "")
+            if not model:
+                continue
+            floor = _oom_required_gb(doc.get("error") or "")
+            if max_live_vram is not None and floor > max_live_vram:
+                continue
+            if floor > floors.get(model, 0):
+                floors[model] = floor
+        for model, floor in floors.items():
+            out[model] = max(out.get(model, 0), floor)
     return out
 
 
@@ -229,12 +269,19 @@ def escalate_on_oom(store, job, error_text: str) -> bool:
     model = _model_of(getattr(job, "command", "") or "")
     if not model:
         return False
-    if observed_vram_gb(model) is not None:
-        return False  # measured already; a real OOM is a real failure
     from ..models import JobState
 
     cur = int(getattr(job, "gpu_mem_gb", 0) or 0)
-    nxt = next_live_vram(cur)
+    measured_floor = _oom_required_gb(error_text)
+    if measured_floor > cur:
+        live_vrams = _live_total_vrams()
+        if live_vrams and measured_floor > live_vrams[-1]:
+            return False
+        nxt = measured_floor
+    else:
+        if observed_vram_gb(model) is not None:
+            return False  # measured already; a real OOM is a real failure
+        nxt = next_live_vram(cur)
     if nxt is None:
         return False  # no live GPU bigger than current — genuine failure
     job.gpu_mem_gb = nxt

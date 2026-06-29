@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 import urllib.request
 from importlib.metadata import PackageNotFoundError, version as _local_version
 
 _PACKAGES = ("wisent-compute", "wisent", "wisent-tools")
 _CACHE: dict[str, tuple[float, str]] = {}
+_IMPORT_CACHE: tuple[float, bool, str] | None = None
+_IMPORT_OK_TTL_SECONDS = 300
+_IMPORT_BAD_TTL_SECONDS = 30
 # Lower than the previous 300s so a freshly-published wheel reaches
 # running agents within a single agent-loop iteration's network round
 # trip rather than after a 5-minute cache miss. PyPI's CDN handles
@@ -44,10 +48,14 @@ def _pypi_latest(pkg: str) -> str | None:
     cached = _CACHE.get(pkg)
     if cached and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
         return cached[1]
-    with urllib.request.urlopen(
-        f"https://pypi.org/pypi/{pkg}/json",
-    ) as resp:
-        data = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(
+            f"https://pypi.org/pypi/{pkg}/json",
+            timeout=10,
+        ) as resp:
+            data = json.loads(resp.read())
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError):
+        return cached[1] if cached else None
     releases = data.get("releases") or {}
     if not releases:
         return None
@@ -81,14 +89,28 @@ def wisent_import_ok() -> tuple[bool, str]:
     did with ImageAdapter) triggers a self-repair upgrade rather than
     claiming jobs that will fail their first `python -m wisent...` line.
     """
+    global _IMPORT_CACHE
+    now = time.time()
+    if _IMPORT_CACHE is not None:
+        ts, ok, err = _IMPORT_CACHE
+        ttl = _IMPORT_OK_TTL_SECONDS if ok else _IMPORT_BAD_TTL_SECONDS
+        if now - ts < ttl:
+            return ok, err
     import subprocess, sys
-    res = subprocess.run(
-        [sys.executable, "-c", "import wisent; import wisent_compute"],
-        capture_output=True, text=True,
-    )
+    try:
+        res = subprocess.run(
+            [sys.executable, "-c", "import wisent; import wisent_compute"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        _IMPORT_CACHE = (now, False, "import smoke test timed out")
+        return False, _IMPORT_CACHE[2]
     if res.returncode == 0:
+        _IMPORT_CACHE = (now, True, "")
         return True, ""
-    return False, (res.stderr or res.stdout or "(no output)").strip()[:400]
+    err = (res.stderr or res.stdout or "(no output)").strip()[:400]
+    _IMPORT_CACHE = (now, False, err)
+    return False, err
 
 
 def maybe_drain_or_upgrade(slots: list, log_fn, kind: str = "local") -> bool:
@@ -122,6 +144,15 @@ def maybe_drain_or_upgrade(slots: list, log_fn, kind: str = "local") -> bool:
     Caller MUST advance slots BEFORE calling this so a drained slots
     list triggers the remediation path.
     """
+    # If a job is active, drift cannot be applied yet. Avoid making PyPI a
+    # liveness dependency for running work; a transient PyPI reset used to
+    # raise out of detect_drift() and crash the agent while a slot was active.
+    if slots:
+        ok, err = wisent_import_ok()
+        if ok:
+            return False
+        log_fn(f"venv broken while slots active: {err}")
+        return True
     drift = detect_drift()
     ok, err = wisent_import_ok()
     if not drift and ok:
@@ -169,8 +200,11 @@ def pip_upgrade_and_exec(log_fn) -> None:
     # already-satisfying the requirement, even when pypi has a newer
     # version. The editable install keeps the same code on disk forever.
     # --no-cache-dir avoids serving the same stale wheel from local cache.
+    # --no-deps is required on the workstation agent: the heavy dependency
+    # graph is already installed, and reinstalling it pulls CUDA wheels into
+    # TMPDIR during drift. Drift upgrades should replace Wisent packages only.
     pip_args = [sys.executable, "-m", "pip", "install", "--upgrade",
-                "--force-reinstall", "--no-cache-dir", *_PACKAGES]
+                "--force-reinstall", "--no-cache-dir", "--no-deps", *_PACKAGES]
     if os.geteuid() != 0 and not in_venv:
         pip_args.insert(4, "--user")
     pip_args.append("--break-system-packages")

@@ -16,7 +16,7 @@ import subprocess
 import urllib.request
 
 from ....config import estimate_gpu_memory
-from ....models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
+from ....models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT, activation_extraction_must_share_gpu
 from ....queue.storage import JobStorage
 
 
@@ -189,6 +189,8 @@ def _build_capacity_dict(gpu_type: str, free_vram_gb: int,
 
 def _slot_is_exclusive(slot: dict) -> bool:
     job = slot.get("job")
+    if activation_extraction_must_share_gpu(getattr(job, "command", "") or ""):
+        return False
     # Per-job opt-in: Job.exclusive=True takes precedence over the
     # regex-on-command path. Used for workloads (e.g. Z-Image LoRA
     # training, SDXL full finetune) whose peak VRAM is hard to bound

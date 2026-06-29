@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import urllib.request
 import urllib.error
 from pathlib import Path
 
-from ..models import Job, JobState
+from ..models import Job, JobState, activation_extraction_must_share_gpu, deprecated_activation_command_reason
 from ..config import estimate_gpu_memory, lookup_instance_type, BUCKET
 
 
@@ -121,6 +120,10 @@ def submit_job(
             "yieldable=True requires a yield_command (the save-and-sync hook "
             "run on eviction). Pass --on-yield '<command>' or drop --yieldable."
         )
+    reason = deprecated_activation_command_reason(command)
+    if reason:
+        raise ValueError(reason)
+    exclusive = exclusive and not activation_extraction_must_share_gpu(command)
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
     if api_key:
         return _submit_via_api(command, api_key, provider)

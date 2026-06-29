@@ -342,10 +342,16 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
         if not t:
             raise click.ClickException(f"hostname '{_os.uname().nodename}' not in registry")
         gpu_type = gpu_type or (t.gpu_type or "")
-        _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
+        env_slots = (_os.environ.get("WC_LOCAL_SLOTS", "") or "").strip()
+        if t.slots > 0 or not env_slots:
+            _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
         for k, v in (t.env_overrides or {}).items():
             _os.environ[k] = str(v)
-        click.echo(f"agent --auto: target={t.name} gpu_type={gpu_type} slots={t.slots}")
+        effective_slots = _os.environ.get("WC_LOCAL_SLOTS", str(t.slots))
+        click.echo(
+            f"agent --auto: target={t.name} gpu_type={gpu_type} "
+            f"slots={effective_slots} registry_slots={t.slots}"
+        )
     elif target:
         from .targets import lookup
         t = lookup(target)
@@ -354,8 +360,14 @@ def agent(gpu_type, target, auto, idle_shutdown, kind, vast_auto_list, vast_pric
         if t.kind != "local":
             raise click.ClickException(f"target '{target}' kind={t.kind}, expected local")
         gpu_type = gpu_type or (t.gpu_type or "")
-        _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
-        click.echo(f"agent: target={t.name} gpu_type={gpu_type} slots={t.slots}")
+        env_slots = (_os.environ.get("WC_LOCAL_SLOTS", "") or "").strip()
+        if t.slots > 0 or not env_slots:
+            _os.environ["WC_LOCAL_SLOTS"] = str(t.slots)
+        effective_slots = _os.environ.get("WC_LOCAL_SLOTS", str(t.slots))
+        click.echo(
+            f"agent: target={t.name} gpu_type={gpu_type} "
+            f"slots={effective_slots} registry_slots={t.slots}"
+        )
     # Auto-enable the Vast bridge when the box has VAST_API_KEY set
     # and is running as a local consumer — that combination is the
     # strong signal "this is a Vast-registered host", and the

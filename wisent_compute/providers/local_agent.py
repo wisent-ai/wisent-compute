@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 
 from ..config import BUCKET, estimate_gpu_memory
+from ..models import activation_extraction_must_share_gpu
 from ..queue.capacity import publish_capacity
 from ..queue.storage import JobStorage
 from .local.helpers import (
@@ -247,12 +248,24 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             last_fleet_flush = time.time()
         t = lookup_self(hostname, source="auto")
         if t and t.kind == "local":
-            registry_env = t.env_overrides or {}
+            registry_env = {}
+            for k, v in (t.env_overrides or {}).items():
+                # Registry slots=0 means "do not advertise this target by
+                # bundled registry defaults". It must not override an explicit
+                # systemd/local operator cap such as WC_LOCAL_SLOTS=1, or the
+                # env-drift restarter loops forever trying to restart into an
+                # impossible state.
+                if k == "WC_LOCAL_SLOTS" and str(v).strip() in ("", "0"):
+                    if str(initial_env.get("WC_LOCAL_SLOTS", "")).strip():
+                        continue
+                registry_env[k] = v
             env_delta = {
                 k: str(v) for k, v in registry_env.items()
                 if str(initial_env.get(k, "")) != str(v)
             }
             if env_delta and not slots:
+                for k, v in env_delta.items():
+                    os.environ[k] = str(v)
                 _log(f"Registry env override delta {env_delta}; pip_upgrade_and_exec for restart")
                 from .local.version_check import pip_upgrade_and_exec as _upgrade_exec
                 _upgrade_exec(_log)
@@ -313,7 +326,14 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                                      free_vram_gb, kind, consumer_id, _log):
             continue  # re-loop: recompute free VRAM, then claim the freed room
 
-        if free_vram_gb <= 0 or (hard_slot_cap > 0 and len(slots) >= hard_slot_cap):
+        all_active_share_gpu = all(
+            activation_extraction_must_share_gpu(
+                getattr(s.get("job"), "command", "") or ""
+            )
+            for s in slots
+        )
+        slot_cap_reached = hard_slot_cap > 0 and len(slots) >= hard_slot_cap
+        if free_vram_gb <= 0 or (slot_cap_reached and not all_active_share_gpu):
             time.sleep(10)
             continue
         # RAM gate: refuse new slots when system free RAM (MemAvailable, which
@@ -333,12 +353,44 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         diag_vram_rejected = 0
         diag_eligibility_rejected = 0
         diag_eligible = 0
+        max_claims = int(os.environ.get("WC_LOCAL_MAX_CLAIMS_PER_TICK", "0") or 0)
+        raw_reserve = float(os.environ.get("WISENT_RAW_CLAIM_RESERVE_GB", "180") or 180)
+        raw_min_free = float(os.environ.get(
+            "WISENT_RAW_CLAIM_MIN_FREE_GB",
+            os.environ.get("WISENT_RAW_HOT_FREE_TARGET_GB", "270"),
+        ) or 270)
+        raw_root = os.path.join(os.environ.get("TMPDIR", "/tmp"), "wisent_raw_pending")
+        try:
+            raw_free = shutil.disk_usage(raw_root).free / (1024 ** 3)
+        except OSError:
+            raw_free = -1.0
+        raw_reserved = raw_reserve * sum(
+            1 for s in slots
+            if activation_extraction_must_share_gpu(getattr(s.get("job"), "command", "") or "")
+        )
+        diag_raw_disk_rejected = 0
         for job in queued:
-            if hard_slot_cap > 0 and len(slots) >= hard_slot_cap:
-                break
+            cmd = getattr(job, "command", "") or ""
+            is_raw_share = activation_extraction_must_share_gpu(cmd)
+            if is_raw_share and raw_free >= 0 and raw_free - raw_reserved - raw_reserve < raw_min_free:
+                diag_raw_disk_rejected += 1
+                agent_diag["raw_claim_free_gb"] = round(raw_free, 1)
+                agent_diag["raw_claim_reserved_gb"] = round(raw_reserved, 1)
+                continue
+            all_active_share_gpu = all(
+                activation_extraction_must_share_gpu(
+                    getattr(s.get("job"), "command", "") or ""
+                )
+                for s in slots
+            )
+            slot_cap_reached = hard_slot_cap > 0 and len(slots) >= hard_slot_cap
+            if slot_cap_reached and not (
+                all_active_share_gpu and activation_extraction_must_share_gpu(cmd)
+            ):
+                continue
             need = max(
                 int(getattr(job, "gpu_mem_gb", 0) or 0),
-                estimate_gpu_memory(getattr(job, "command", "") or ""),
+                estimate_gpu_memory(cmd),
             )
             if need > free_vram_gb:
                 diag_vram_rejected += 1
@@ -365,12 +417,20 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 continue
             slots.append(new_slot)
             free_vram_gb -= need
+            if is_raw_share:
+                raw_reserved += raw_reserve
             started += 1
             agent_diag["last_started_job_id"] = job.job_id
             agent_diag["last_started_at"] = datetime.now(timezone.utc).isoformat()
-            break
+            if not is_raw_share:
+                break
+            if max_claims > 0 and started >= max_claims:
+                break
+            if free_vram_gb <= VRAM_SAFETY_BUFFER_GB:
+                break
         agent_diag["queue_scanned"] = len(queued)
         agent_diag["vram_rejected"] = diag_vram_rejected
+        agent_diag["raw_disk_rejected"] = diag_raw_disk_rejected
         agent_diag["eligibility_rejected"] = diag_eligibility_rejected
         agent_diag["eligible_count"] = diag_eligible
         agent_diag["claimed_this_loop"] = started
