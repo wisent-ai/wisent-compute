@@ -161,7 +161,7 @@ def setup_agent_staging(log_fn) -> str | None:
                 )
                 continue
         free = _free_gb(target)
-        if free <= max(tmp_free * 1.5, 50.0):
+        if free <= tmp_free:
             continue
         if best is None or free > best[1]:
             best = (target, free)

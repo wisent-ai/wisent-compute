@@ -37,14 +37,15 @@ import math
 import re
 import time
 
+from .. import constants as _wc
 from ..config import BUCKET
 
 _MODEL_RE = re.compile(r"--model\s+(\S+)")
 _OOM_PROC_RE = re.compile(r"this process has ([0-9.]+) GiB memory in use", re.IGNORECASE)
 _OOM_ALLOC_RE = re.compile(r"Tried to allocate ([0-9.]+) (MiB|GiB)", re.IGNORECASE)
 
-_COMPLETED_SAMPLE_CAP = 6000
-_TTL_S = 600
+_COMPLETED_SAMPLE_CAP = _wc.COMPLETED_SAMPLE_CAP
+_TTL_S = _wc.OBSERVED_MAP_TTL_S
 _cache: dict = {"map": None, "built_at": 0.0}
 
 
@@ -182,7 +183,7 @@ def observed_vram_gb(model: str) -> int | None:
 # Agent-liveness window: a capacity broadcast older than this means the
 # agent is gone, so its GPU is not part of "the actual fleet" right now.
 # This is a staleness threshold, not a VRAM figure.
-_LIVE_TTL_S = 180
+_LIVE_TTL_S = _wc.LIVE_CAPACITY_TTL_S
 _caps_cache: dict = {"vrams": None, "built_at": 0.0}
 
 

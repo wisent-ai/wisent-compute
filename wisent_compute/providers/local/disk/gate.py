@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from typing import Callable
 
-
-MIN_FREE_DISK_GB = 15
+from .... import constants as _wc
 
 
 def _free_gb(path: str) -> float:
@@ -34,6 +34,47 @@ def _free_gb(path: str) -> float:
         return shutil.disk_usage(path).free / (1024 ** 3)
     except OSError:
         return -1.0
+
+
+def _write_probe_ok(path: str) -> bool:
+    """True if the agent can create, flush, and remove a file on this FS."""
+    try:
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".wc-disk-probe-", delete=True) as fh:
+            fh.write(b"x")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return True
+    except OSError:
+        return False
+
+
+def _dir_size_gb(path: str) -> float:
+    total = 0
+    if not os.path.isdir(path):
+        return 0.0
+    for root, _, files in os.walk(path):
+        for name in files:
+            p = os.path.join(root, name)
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                continue
+    return total / (1024 ** 3)
+
+
+def _largest_child_dir_gb(path: str) -> float:
+    if not os.path.isdir(path):
+        return 0.0
+    largest = 0.0
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return 0.0
+    for name in names:
+        child = os.path.join(path, name)
+        if os.path.isdir(child):
+            largest = max(largest, _dir_size_gb(child))
+    return largest
 
 
 def _evict_complete_hf_revisions(log_fn: Callable[[str], None]) -> float:
@@ -73,7 +114,7 @@ def _evict_complete_hf_revisions(log_fn: Callable[[str], None]) -> float:
     return freed_bytes / (1024 ** 3)
 
 
-STALE_TRAINING_MAX_AGE_S = 3600  # mtime older than 1h => safe to evict
+STALE_TRAINING_MAX_AGE_S = _wc.STALE_TRAINING_MAX_AGE_S  # mtime older than 1h => safe to evict
 
 
 def _newest_mtime_in_tree(root: str) -> float:
@@ -228,11 +269,22 @@ def _top_consumers() -> list[dict]:
 
 
 def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
-    """Returns (refuse_slots_this_tick, diag_updates)."""
+    """Returns (refuse_slots_this_tick, diag_updates).
+
+    refuse_slots_this_tick=True only if $HOME is still not writable AFTER:
+      1. Evicting oldest-accessed complete HF cache revisions
+      2. Evicting secondary caches (pip wheels, apt archives, wisent
+         cache, HF cache root, HF datasets cache)
+
+    When we still refuse after both eviction passes, diag includes a
+    `top_disk_consumers` list of the biggest paths so the operator can
+    see what is filling the disk without needing to SSH in.
+    """
     home = os.path.expanduser("~")
     free_gb = _free_gb(home)
-    diag: dict = {"free_disk_gb": round(free_gb, 1)}
-    if 0 <= free_gb < MIN_FREE_DISK_GB:
+    home_writable = _write_probe_ok(home)
+    diag: dict = {"free_disk_gb": round(free_gb, 1), "home_write_probe_ok": home_writable}
+    if not home_writable:
         before = _free_gb(home)
         reclaimed = _evict_complete_hf_revisions(log_fn)
         after = _free_gb(home)
@@ -244,17 +296,18 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
         free_gb = after
         diag["free_disk_gb"] = round(free_gb, 1)
         diag["hf_cache_evicted_gb"] = round(actual_reclaimed, 1)
-        if free_gb < MIN_FREE_DISK_GB and actual_reclaimed < 1.0:
-            secondary = _evict_secondary_caches(log_fn)
-            after2 = _free_gb(home)
-            free_gb = after2
-            diag["free_disk_gb"] = round(free_gb, 1)
-            diag["secondary_evicted_gb"] = round(secondary, 1)
-    refuse = 0 <= free_gb < MIN_FREE_DISK_GB
+        secondary = _evict_secondary_caches(log_fn)
+        after2 = _free_gb(home)
+        free_gb = after2
+        home_writable = _write_probe_ok(home)
+        diag["free_disk_gb"] = round(free_gb, 1)
+        diag["secondary_evicted_gb"] = round(secondary, 1)
+        diag["home_write_probe_ok"] = home_writable
+    refuse = not home_writable
     if refuse:
         log_fn(
-            f"disk still low (~{free_gb:.1f} GB free in $HOME) after "
-            f"eviction; refusing slots this tick"
+            f"$HOME write probe failed (~{free_gb:.1f} GB free) after "
+            "eviction; refusing slots this tick"
         )
         diag["top_disk_consumers"] = _top_consumers()
         import time as _time
@@ -273,15 +326,21 @@ def gate_and_maybe_evict(log_fn: Callable[[str], None]) -> tuple[bool, dict]:
                 "eligible_for_eviction": age is None or age > STALE_TRAINING_MAX_AGE_S,
             })
         diag["training_dir_candidates"] = candidates_diag
-    import subprocess as _sp
-    _td = os.environ.get("TMPDIR", "/tmp"); _us = shutil.disk_usage(_td); _sf = _us.free / (1024 ** 3)
-    _b = _sp.run(["bash", "-c", f"du -s {_td}/wisent_raw_pending/*/ 2>/dev/null | sort -rn | head -1 | cut -f1"], capture_output=True, text=True).stdout.strip()
-    _bg = (int(_b) / (1024 ** 2)) if _b.isdigit() else 0.0
-    _need = min(2 * _bg, 0.5 * _us.total / (1024 ** 3))
+    # Staging-pressure backpressure: refuse extraction admissions when the
+    # TMPDIR pending pool leaves less free space than the largest pending
+    # output dir already observed. That is measured from the filesystem on
+    # each tick, not a fixed reserve.
+    _td = os.environ.get("TMPDIR", "/tmp")
+    _us = shutil.disk_usage(_td)
+    _sf = _us.free / (1024 ** 3)
+    _bg = _largest_child_dir_gb(os.path.join(_td, "wisent_raw_pending"))
+    _need = _bg
+    diag["staging_free_gb"] = round(_sf, 1)
+    diag["largest_pending_raw_dir_gb"] = round(_bg, 1)
     if not refuse and 0 <= _sf < _need:
         log_fn(
-            f"staging low (~{_sf:.0f}GB free < need {_need:.0f}GB; "
-            f"largest pending {_bg:.0f}GB); refusing slots"
+            f"staging low (~{_sf:.0f}GB free < measured pending dir "
+            f"{_need:.0f}GB); refusing slots"
         )
         refuse = True
     return refuse, diag

@@ -21,10 +21,11 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from .. import constants as _wc
 from .storage import JobStorage
 
 CAPACITY_PREFIX = "capacity/"
-CAPACITY_STALE_SECONDS = 180
+CAPACITY_STALE_SECONDS = _wc.CAPACITY_STALE_SECONDS
 
 
 def publish_capacity(

@@ -15,6 +15,7 @@ import os
 import subprocess
 import urllib.request
 
+from .... import constants as _wc
 from ....config import estimate_gpu_memory
 from ....models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT, activation_extraction_must_share_gpu
 from ....queue.storage import JobStorage
@@ -206,11 +207,47 @@ def _slot_is_exclusive(slot: dict) -> bool:
 
 
 def _slot_vram(slot: dict) -> int:
+    """Best known VRAM footprint for a running slot.
+
+    Prefer live per-process nvidia-smi attribution when available. Fall back
+    to the declared/observed model estimate only before the job has allocated
+    CUDA memory. This keeps admission tied to measured live usage instead of
+    a stale pre-start estimate.
+    """
     job = slot.get("job")
-    return max(
+    declared = max(
         int(getattr(job, "gpu_mem_gb", 0) or 0),
         estimate_gpu_memory(getattr(job, "command", "") or ""),
     )
+    live = _slot_live_vram_gb(slot)
+    peak = int(slot.get("peak_vram_gb", 0) or 0)
+    return max(declared, live, peak)
+
+
+def _slot_live_vram_gb(slot: dict) -> int:
+    proc = slot.get("proc")
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return 0
+    try:
+        from .gpu_probe import smi_job_used_gb
+        used = smi_job_used_gb(pid)
+    except Exception:
+        return 0
+    return max(0, int(used or 0))
+
+
+def _slot_waiting_for_vram(slot: dict) -> bool:
+    """True when a GPU slot is live but CUDA allocation is not visible yet."""
+    proc = slot.get("proc")
+    if not proc or proc.poll() is not None:
+        return False
+    job = slot.get("job")
+    declared = max(
+        int(getattr(job, "gpu_mem_gb", 0) or 0),
+        estimate_gpu_memory(getattr(job, "command", "") or ""),
+    )
+    return declared > 0 and _slot_live_vram_gb(slot) <= 0
 
 
 def _free_ram_gb() -> float:
@@ -240,6 +277,51 @@ def _total_ram_gb() -> float:
     except Exception:
         pass
     return -1.0
+
+
+def _static_ram_reserve_gb() -> float:
+    """Sum of non-wisent, non-slot resident RAM (GB).
+
+    Walks /proc/*/status and adds VmRSS for every process that is NOT the
+    agent itself and does not look like an extraction slot (extract_and_upload,
+    upload_worker) or the agent binary. This captures ComfyUI, system daemons,
+    and any other baseline load without hardcoding a reserve number."""
+    import glob as _glob
+    import os as _os
+    own = _os.getpid()
+    total_kb = 0
+    for status_path in _glob.glob("/proc/[0-9]*/status"):
+        try:
+            pid = int(status_path.split("/")[2])
+        except (ValueError, IndexError):
+            continue
+        if pid == own:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ")
+        except Exception:
+            continue
+        # Skip the agent binary, extraction slots, and their upload workers.
+        if any(token in cmd for token in (b"wc agent", b"extract_and_upload", b"upload_worker")):
+            continue
+        try:
+            with open(status_path) as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        total_kb += int(line.split()[1])
+                        break
+        except Exception:
+            continue
+    return total_kb / (1024 ** 2)
+
+
+def _ram_safety_buffer_gb() -> float:
+    """Dynamic RAM headroom: 5% of total RAM with a 4 GiB floor."""
+    total = _total_ram_gb()
+    if total <= 0:
+        return _wc.RAM_SAFETY_BUFFER_MIN_GB
+    return max(_wc.RAM_SAFETY_BUFFER_MIN_GB, total * _wc.RAM_SAFETY_BUFFER_FRACTION)
 
 
 def _slot_rss(slot: dict) -> float:

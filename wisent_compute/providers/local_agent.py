@@ -9,11 +9,13 @@ import glob
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 
+from .. import constants as _wc
 from ..config import BUCKET, estimate_gpu_memory
 from ..models import activation_extraction_must_share_gpu
 from ..queue.capacity import publish_capacity
@@ -26,7 +28,9 @@ from .local.helpers import (
     _no_eligible_in_queue,
     _slot_is_exclusive,
     _slot_vram,
+    _slot_waiting_for_vram,
     _slot_rss, _free_ram_gb, _total_ram_gb,
+    _static_ram_reserve_gb, _ram_safety_buffer_gb,
     _smi_free_vram_gb,
     _staging_size_gb,
     _vast_has_renter,
@@ -34,13 +38,8 @@ from .local.helpers import (
 from .local.disk.staging import setup_agent_staging
 
 
-POLL_INTERVAL = 10
-HEARTBEAT_INTERVAL = 300
-# Time to sleep after a successful claim so nvidia-smi can reflect the
-# freshly-spawned subprocess's CUDA allocation before the next iteration
-# decides whether to claim again. Empirically a torch model load starts
-# allocating GPU memory within ~5 seconds of subprocess start.
-SETTLE_AFTER_CLAIM_SECONDS = 5
+POLL_INTERVAL = _wc.POLL_INTERVAL_S
+HEARTBEAT_INTERVAL = _wc.CAPACITY_HEARTBEAT_INTERVAL_S
 # Hard VRAM safety buffer at admission. The agent refuses to claim a
 # job if accepting it would leave less than this margin between
 # declared total VRAM use and the GPU's physical capacity. Catches the
@@ -50,17 +49,85 @@ SETTLE_AFTER_CLAIM_SECONDS = 5
 # buffer is independent of the per-job multipliers because it's the
 # LAST line of defense — if the per-job estimate is wrong, this catches
 # it before the n+1th job OOMs the entire VM.
-VRAM_SAFETY_BUFFER_GB = 8
+# Derived from total VRAM instead of a flat constant.
+def _vram_safety_buffer_gb(total_vram_gb: int) -> int:
+    import math as _math
+    return max(_wc.VRAM_SAFETY_BUFFER_MIN_GB,
+               _math.ceil(total_vram_gb * _wc.VRAM_SAFETY_BUFFER_FRACTION))
 # Cooperative-yield anti-thrash floor: never evict a yieldable slot that has
 # run for less than this, so a just-(re)started background job gets real work
 # done before it can be bumped again. Pairs with Job.max_yields_before_protected.
-MIN_RUNTIME_BEFORE_YIELD_S = 300
+MIN_RUNTIME_BEFORE_YIELD_S = _wc.MIN_RUNTIME_BEFORE_YIELD_S
+CUDA_PROBE_CACHE_S = _wc.CUDA_PROBE_CACHE_S
+_CUDA_PROBE = {"checked_at": 0.0, "ok": False, "detail": "not checked"}
 
 
 def _log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     sys.stderr.write(f"[{ts}] [agent] {msg}\n")
     sys.stderr.flush()
+
+
+def _ensure_hf_token_from_cache() -> None:
+    """Synchronize HF_TOKEN from standard local token files.
+
+    The token file can be rotated while the agent is running. Do not keep an
+    already-populated process env token if the cache file now contains a newer
+    write token.
+    """
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    candidates = [
+        os.environ.get("HF_TOKEN_FILE", ""),
+        os.path.join(home, ".cache", "huggingface", "token"),
+        os.path.join(home, ".huggingface", "token"),
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError:
+            continue
+        if token:
+            if os.environ.get("HF_TOKEN") != token:
+                os.environ["HF_TOKEN"] = token
+                os.environ["HUGGINGFACE_HUB_TOKEN"] = token
+                os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+                _log(f"loaded HF_TOKEN from cached token file: {path}")
+            return
+
+
+def _cuda_child_available() -> tuple[bool, str]:
+    """True only if a child Python in the agent's launch environment can
+    initialize CUDA. nvidia-smi being healthy is not enough: the live failure
+    mode was nvidia-smi reporting an RTX PRO 6000 while every claimed job's
+    first Python process printed `CUDA available: False` and exited 66. Gate
+    claims on the exact child-process condition that jobs require."""
+    now = time.monotonic()
+    if now - float(_CUDA_PROBE["checked_at"] or 0.0) < CUDA_PROBE_CACHE_S:
+        return bool(_CUDA_PROBE["ok"]), str(_CUDA_PROBE["detail"])
+    code = (
+        "import torch, sys; "
+        "ok=torch.cuda.is_available(); "
+        "print(f'cuda_available={ok}', flush=True); "
+        "sys.exit(0 if ok else 66)"
+    )
+    try:
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+        detail = (res.stdout or res.stderr or f"rc={res.returncode}").strip()
+        ok = res.returncode == 0
+    except Exception as exc:
+        ok = False
+        detail = f"cuda probe raised: {exc}"
+    _CUDA_PROBE.update({"checked_at": now, "ok": ok, "detail": detail[-300:]})
+    return ok, str(_CUDA_PROBE["detail"])
 
 
 def _reap_dead_pid_workdirs() -> int:
@@ -195,7 +262,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     if not gpu_type: gpu_type = _detect_gpu_type()
     total_vram_gb = max(1, _detect_local_vram_gb())
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
-    if kind == "local" and hard_slot_cap <= 0: hard_slot_cap = 1
+    # No default cap: local admission is governed by live VRAM/RAM/disk gates.
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
     setup_agent_staging(_log)
 
@@ -214,7 +281,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     agent_diag: dict = {}
     fleet_staging = os.environ.get("WISENT_FLEET_STAGING_DIR", "/tmp/wisent_fleet_staging")
     last_fleet_flush = time.time()
-    FLEET_FLUSH_INTERVAL = 180  # ~20 commits/hour/agent << 200/hour HF cap
+    FLEET_FLUSH_INTERVAL = _wc.FLEET_FLUSH_INTERVAL_S
 
     _last_cap = None
     while True:
@@ -228,6 +295,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         except Exception:
             pass
         _reap_dead_pid_workdirs()
+        vast_active = _vast_has_renter()
+        slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
         if _last_cap is not None:
             try:
                 publish_capacity(
@@ -238,31 +307,21 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 )
             except Exception:
                 pass
-        if time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL or _staging_size_gb(fleet_staging) > 5:
-            from wisent.core.reading.modules.utilities.data.sources.hf.hf_writers import flush_staging_dir
-            if os.path.isdir(fleet_staging) and any(os.scandir(fleet_staging)):
-                flush_staging_dir(fleet_staging)
-                shutil.rmtree(fleet_staging)
-                os.makedirs(fleet_staging, exist_ok=True)
-                _log("flushed fleet staging dir to HF (1 commit)")
+        if (
+            time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL
+            and not slots
+        ):
+            from .local.fleet_flush import spawn_fleet_flush
+            if spawn_fleet_flush(fleet_staging, _log):
+                _log("fleet staging flush running asynchronously")
             last_fleet_flush = time.time()
         t = lookup_self(hostname, source="auto")
         if t and t.kind == "local":
-            registry_env = {}
-            for k, v in (t.env_overrides or {}).items():
-                # Registry slots=0 means "do not advertise this target by
-                # bundled registry defaults". It must not override an explicit
-                # systemd/local operator cap such as WC_LOCAL_SLOTS=1, or the
-                # env-drift restarter loops forever trying to restart into an
-                # impossible state.
-                if k == "WC_LOCAL_SLOTS" and str(v).strip() in ("", "0"):
-                    if str(initial_env.get("WC_LOCAL_SLOTS", "")).strip():
-                        continue
-                registry_env[k] = v
-            env_delta = {
-                k: str(v) for k, v in registry_env.items()
-                if str(initial_env.get(k, "")) != str(v)
-            }
+            registry_env = t.env_overrides or {}
+            # Env overrides are now owned by systemd (/etc/wisent/wisent-agent.env).
+            # Ignore registry env deltas so an external registry push cannot
+            # trigger a pip reinstall loop or override local tuning.
+            env_delta = {}
             if env_delta and not slots:
                 for k, v in env_delta.items():
                     os.environ[k] = str(v)
@@ -276,8 +335,6 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if t.vram_gb and int(t.vram_gb) != total_vram_gb:
                 _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
                 total_vram_gb = int(t.vram_gb)
-        vast_active = _vast_has_renter()
-        slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
         # Disk eviction MUST run before pip_upgrade_and_exec. Workstation
         # crash-looped at disk_pct=89% (n_restarts=2380) because the
         # drift handler ran pip install which exhausted the remaining
@@ -313,6 +370,46 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                              free_vram_gb=0, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
             time.sleep(10)
             continue
+        vram_buffer_gb = _vram_safety_buffer_gb(total_vram_gb)
+        settling_slots = [s for s in slots if _slot_waiting_for_vram(s)]
+        if settling_slots:
+            agent_diag["settling_slot_ids"] = [
+                getattr(s.get("job"), "job_id", "") for s in settling_slots
+            ]
+            publish_capacity(store, consumer_id, kind, {},
+                             free_vram_gb=0, total_vram_gb=total_vram_gb,
+                             diag=dict(agent_diag))
+            _last_cap = {"free_slots": {}, "free_vram_gb": 0,
+                         "total_vram_gb": total_vram_gb,
+                         "diag": dict(agent_diag)}
+            time.sleep(POLL_INTERVAL)
+            continue
+        if free_vram_gb < vram_buffer_gb:
+            agent_diag["vram_buffer_gb"] = vram_buffer_gb
+            agent_diag["vram_buffer_free_gb"] = free_vram_gb
+            publish_capacity(store, consumer_id, kind, {},
+                             free_vram_gb=0, total_vram_gb=total_vram_gb,
+                             diag=dict(agent_diag))
+            _last_cap = {"free_slots": {}, "free_vram_gb": 0,
+                         "total_vram_gb": total_vram_gb,
+                         "diag": dict(agent_diag)}
+            time.sleep(POLL_INTERVAL)
+            continue
+        if free_vram_gb > 0 and not slots:
+            cuda_ok, cuda_detail = _cuda_child_available()
+            agent_diag["cuda_child_ok"] = cuda_ok
+            agent_diag["cuda_child_detail"] = cuda_detail
+            agent_diag["cuda_child_checked_at"] = datetime.now(timezone.utc).isoformat()
+            if not cuda_ok:
+                _log(f"CUDA child probe failed; publishing zero capacity: {cuda_detail[:160]}")
+                publish_capacity(store, consumer_id, kind, {},
+                                 free_vram_gb=0, total_vram_gb=total_vram_gb,
+                                 diag=dict(agent_diag))
+                _last_cap = {"free_slots": {}, "free_vram_gb": 0,
+                             "total_vram_gb": total_vram_gb,
+                             "diag": dict(agent_diag)}
+                time.sleep(POLL_INTERVAL)
+                continue
         free_slots = _build_capacity_dict(gpu_type, free_vram_gb, total_vram_gb)
         publish_capacity(store, consumer_id, kind, free_slots,
                          free_vram_gb=free_vram_gb, total_vram_gb=total_vram_gb, diag=dict(agent_diag))
@@ -336,11 +433,14 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         if free_vram_gb <= 0 or (slot_cap_reached and not all_active_share_gpu):
             time.sleep(10)
             continue
-        # RAM gate: refuse new slots when system free RAM (MemAvailable, which
-        # captures the forked-worker procs + page-cache the per-slot RSS sum
-        # missed) drops below a MemTotal reserve. Prevents the ~100G OOM.
+        # RAM gate: refuse new slots when MemAvailable drops below the
+        # measured non-wisent baseline (ComfyUI, system daemons) plus a
+        # dynamic safety buffer. This replaces the previous 30%-of-total
+        # guess with a live reserve computed from /proc/*/status.
         _fr = _free_ram_gb()
-        if 0 <= _fr < _total_ram_gb() * 0.30:
+        _ram_reserve = _static_ram_reserve_gb() + _ram_safety_buffer_gb()
+        if 0 <= _fr < _ram_reserve:
+            _log(f"RAM gate: {int(_fr)} GB free < {int(_ram_reserve)} GB reserve; skipping claims")
             time.sleep(10); continue
 
         # Centralized assignment writes job.assigned_to on the queue blob;
@@ -392,14 +492,23 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 int(getattr(job, "gpu_mem_gb", 0) or 0),
                 estimate_gpu_memory(cmd),
             )
-            if need > free_vram_gb:
-                diag_vram_rejected += 1
-                continue
             # Hard VRAM safety buffer: refuse if declared use after admission
-            # would leave less than VRAM_SAFETY_BUFFER_GB, catching neighbor
-            # jobs whose actual peak exceeds their declared gpu_mem_gb.
+            # would leave less than the dynamic VRAM safety buffer. Use live
+            # free VRAM, not only slot-declared usage, so external users such
+            # as ComfyUI are included in the post-claim margin.
+            claimable_vram_gb = max(0, free_vram_gb - _vram_safety_buffer_gb(total_vram_gb))
+            if need > claimable_vram_gb:
+                diag_vram_rejected += 1
+                agent_diag["last_buffer_reject_job_id"] = job.job_id
+                agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()
+                agent_diag["last_buffer_reject_need_gb"] = need
+                agent_diag["last_buffer_reject_claimable_gb"] = claimable_vram_gb
+                continue
+            # Also retain the slot-declared projection as a backstop for
+            # cases where nvidia-smi temporarily under-reports a starting
+            # child process.
             projected_used = sum(_slot_vram(s) for s in slots) + need
-            if projected_used > total_vram_gb - VRAM_SAFETY_BUFFER_GB:
+            if projected_used > total_vram_gb - _vram_safety_buffer_gb(total_vram_gb):
                 diag_vram_rejected += 1
                 agent_diag["last_buffer_reject_job_id"] = job.job_id
                 agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()
@@ -437,7 +546,6 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         agent_diag["last_claim_attempt_at"] = datetime.now(timezone.utc).isoformat()
 
         if started > 0:
-            time.sleep(SETTLE_AFTER_CLAIM_SECONDS)
             continue
 
         if started == 0:

@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ... import constants as _wc
 from ...models import JobState, activation_extraction_must_share_gpu, deprecated_activation_command_reason
 from ...queue.storage import JobStorage
 from .helpers.gpu_probe import smi_job_used_gb
@@ -37,7 +38,7 @@ def _hf_write_token(store) -> str:
         _HF_WRITE_TOK["t"] = (store._download_text("config/hf_token") or "").strip()
     return _HF_WRITE_TOK["t"]
 
-HEARTBEAT_INTERVAL = 60  # write a fresh heartbeat every 60s; HEARTBEAT_STALE_MINUTES=15 leaves 15 missed-write tolerance
+HEARTBEAT_INTERVAL = _wc.SLOT_HEARTBEAT_INTERVAL_S  # write a fresh heartbeat every 60s; HEARTBEAT_STALE_MINUTES=15 leaves 15 missed-write tolerance
 
 
 def _raw_active_disk_refusal(command: str) -> str:
@@ -135,8 +136,15 @@ def _start_heartbeat_thread(store: JobStorage, job_id: str, proc):
             time.sleep(HEARTBEAT_INTERVAL)
             try:
                 _write_heartbeat(store, job_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                # The coordinator requeues local jobs when their heartbeat
+                # goes stale. Silent heartbeat failures leave live jobs looking
+                # dead, so make the next failure visible in the agent log.
+                print(
+                    f"[heartbeat] write failed for {job_id}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
 
     th = threading.Thread(target=_run, name=f"hb-{job_id}", daemon=True)
     th.start()
@@ -309,8 +317,10 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     # dir. wisent's upload_extracted_activations writes shards there and
     # SKIPS the per-job flush. The agent flushes the whole dir periodically
     # across ALL jobs as one HF commit — reduces 429 risk drastically.
-    fleet_staging = os.environ.get("WISENT_FLEET_STAGING_DIR",
-                                    "/tmp/wisent_fleet_staging")
+    fleet_staging = (
+        os.environ.get("WISENT_FLEET_STAGING_DIR")
+        or os.path.join(os.environ.get("TMPDIR", "/tmp"), "wisent_fleet_staging")
+    )
     os.makedirs(fleet_staging, exist_ok=True)
     job_env = {**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1", "HF_HUB_DISABLE_XET": "1",
                "WISENT_FLEET_STAGING_DIR": fleet_staging, "WC_JOB_ID": job.job_id}
@@ -529,7 +539,13 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # — canonical status/<id>/output/ is already written.
         _mirror_to_output_uri(store, job, log_fn)
         # log_file already flushed+closed above before _upload_output
-        log_fn(f"Job {job.job_id} {state.value}")
+        if state == JobState.FAILED:
+            log_fn(
+                f"Job {job.job_id} failed ret={ret} "
+                f"error_tail={(job.error or '')[-500:]}"
+            )
+        else:
+            log_fn(f"Job {job.job_id} {state.value}")
         return False
     now = time.time()
     _used = smi_job_used_gb(proc.pid)

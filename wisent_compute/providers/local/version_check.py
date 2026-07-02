@@ -15,6 +15,7 @@ jobs at ~80/hour.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -144,6 +145,8 @@ def maybe_drain_or_upgrade(slots: list, log_fn, kind: str = "local") -> bool:
     Caller MUST advance slots BEFORE calling this so a drained slots
     list triggers the remediation path.
     """
+    if os.environ.get("WC_SKIP_VERSION_CHECK", "").strip() == "1":
+        return False
     # If a job is active, drift cannot be applied yet. Avoid making PyPI a
     # liveness dependency for running work; a transient PyPI reset used to
     # raise out of detect_drift() and crash the agent while a slot was active.
