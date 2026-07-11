@@ -102,7 +102,11 @@ def _fetch_canonical_registry() -> dict:
 
     _, remainder = GCS_REGISTRY_URI.split("//", 1)
     bucket_name, blob_name = remainder.split("/", 1)
-    text = storage.Client().bucket(bucket_name).blob(blob_name).download_as_text()
+    blob = storage.Client().bucket(bucket_name).blob(blob_name)
+    blob.reload()
+    if blob.generation is None:
+        raise OSError("canonical registry generation unavailable")
+    text = blob.download_as_text(if_generation_match=int(blob.generation))
     value = json.loads(text)
     if not isinstance(value, dict):
         raise ValueError("canonical registry is not an object")

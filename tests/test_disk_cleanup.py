@@ -101,6 +101,82 @@ class HfCacheLayout:
         return snapshot
 
 
+class CanonicalRegistryFetchTests(unittest.TestCase):
+    def test_reload_pins_download_to_exact_generation_and_parses_json(self) -> None:
+        calls: list[object] = []
+        blob = Mock()
+        blob.generation = "4815162342"
+        blob.reload.side_effect = lambda: calls.append("reload")
+
+        def download(*, if_generation_match: int) -> str:
+            calls.append(("download", if_generation_match))
+            return '{"targets": [{"name": "worker-a"}]}'
+
+        blob.download_as_text.side_effect = download
+        bucket = Mock()
+        bucket.blob.return_value = blob
+        client = Mock()
+        client.bucket.return_value = bucket
+
+        with patch("google.cloud.storage.Client", return_value=client):
+            registry = cleanup._fetch_canonical_registry()
+
+        self.assertEqual(registry, {"targets": [{"name": "worker-a"}]})
+        self.assertEqual(calls, ["reload", ("download", 4815162342)])
+        generation = blob.download_as_text.call_args.kwargs["if_generation_match"]
+        self.assertIs(type(generation), int)
+
+    def test_missing_generation_propagates_before_policy_validation(self) -> None:
+        blob = Mock()
+        blob.generation = None
+        bucket = Mock()
+        bucket.blob.return_value = blob
+        client = Mock()
+        client.bucket.return_value = bucket
+
+        with (
+            patch("google.cloud.storage.Client", return_value=client),
+            patch.object(cleanup, "validate_registry") as validate_registry,
+        ):
+            with self.assertRaisesRegex(
+                OSError, "canonical registry generation unavailable"
+            ):
+                cleanup.resolve_canonical_policy("worker-a")
+
+        blob.reload.assert_called_once_with()
+        blob.download_as_text.assert_not_called()
+        validate_registry.assert_not_called()
+
+    def test_generation_mismatch_propagates_before_policy_validation(self) -> None:
+        mismatch = RuntimeError("object generation changed")
+        calls: list[str] = []
+        blob = Mock()
+        blob.generation = 73
+        blob.reload.side_effect = lambda: calls.append("reload")
+
+        def reject_download(*, if_generation_match: int) -> str:
+            calls.append("download")
+            self.assertEqual(if_generation_match, 73)
+            raise mismatch
+
+        blob.download_as_text.side_effect = reject_download
+        bucket = Mock()
+        bucket.blob.return_value = blob
+        client = Mock()
+        client.bucket.return_value = bucket
+
+        with (
+            patch("google.cloud.storage.Client", return_value=client),
+            patch.object(cleanup, "validate_registry") as validate_registry,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                cleanup.resolve_canonical_policy("worker-a")
+
+        self.assertIs(raised.exception, mismatch)
+        self.assertEqual(calls, ["reload", "download"])
+        validate_registry.assert_not_called()
+
+
 class DiskCleanupSafetyTests(unittest.TestCase):
     def run_pass(
         self,
