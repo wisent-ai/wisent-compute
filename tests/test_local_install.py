@@ -1,8 +1,9 @@
-"""Focused contracts for local service executable resolution."""
+"""Focused contracts for local service installation and executable resolution."""
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from wisent_compute.deploy import local_install
@@ -85,6 +86,53 @@ class WcBinResolutionTests(unittest.TestCase):
                     files=files,
                 )
                 self.assertEqual(resolved, str(expected))
+
+
+class DiskCleanupInstallTests(unittest.TestCase):
+    def test_project_precedence_is_rendered_without_dropping_adc(self) -> None:
+        from wisent_compute import config
+
+        cases = {
+            "explicit Google project": (
+                {"GOOGLE_CLOUD_PROJECT": "explicit-project", "GCP_PROJECT": "legacy-project"},
+                "explicit-project",
+            ),
+            "legacy GCP project": ({"GCP_PROJECT": "legacy-project"}, "legacy-project"),
+            "configured project": ({}, "configured-project"),
+        }
+
+        for name, (process_env, expected_project) in cases.items():
+            with self.subTest(name):
+                rendered: list[dict[str, str]] = []
+
+                def capture_install(
+                    label: str,
+                    exec_args: list[str],
+                    env: dict[str, str],
+                    echo: object,
+                ) -> None:
+                    rendered.append(dict(env))
+
+                with (
+                    patch.dict(local_install.os.environ, process_env, clear=True),
+                    patch.object(config, "PROJECT", "configured-project"),
+                    patch.object(local_install, "_adc_path", return_value="/secure/adc.json"),
+                    patch.object(local_install, "_exec_args_for", return_value=["wc", "disk-cleanup", "--watch"]),
+                    patch.object(local_install.platform, "system", return_value="Darwin"),
+                    patch.object(local_install, "_install_darwin", new=capture_install),
+                ):
+                    local_install.install_local(
+                        SimpleNamespace(name="cleanup-host"),
+                        "disk-cleanup",
+                        False,
+                        lambda message: None,
+                    )
+
+                self.assertEqual(rendered[0]["GOOGLE_CLOUD_PROJECT"], expected_project)
+                self.assertEqual(
+                    rendered[0]["GOOGLE_APPLICATION_CREDENTIALS"],
+                    "/secure/adc.json",
+                )
 
 
 if __name__ == "__main__":

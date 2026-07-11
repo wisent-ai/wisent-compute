@@ -218,6 +218,13 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
     adc = _adc_path()
     if adc:
         env["GOOGLE_APPLICATION_CREDENTIALS"] = adc
+    if kind == "disk-cleanup":
+        from ..config import PROJECT
+        env["GOOGLE_CLOUD_PROJECT"] = (
+            os.environ.get("GOOGLE_CLOUD_PROJECT")
+            or os.environ.get("GCP_PROJECT")
+            or PROJECT
+        )
     # Every kind needs the central write token: the agent spawns extraction
     # jobs that upload to wisent-ai/* (inherits this env), the coordinator
     # renders it into GCE agent startup, the failure-fixer's verify curl uses
