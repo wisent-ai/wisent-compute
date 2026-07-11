@@ -17,6 +17,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -187,10 +188,20 @@ def _install_darwin(label: str, exec_args: list[str], env: dict[str, str], echo:
     echo(f"[plist] wrote {plist_path}")
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
-    r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"launchctl bootstrap failed: {r.stderr or r.stdout}")
+    r = None
+    for attempt in range(5):
+        r = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0:
+            break
+        if attempt < 4:
+            time.sleep(0.5)
+    if r is None or r.returncode != 0:
+        detail = "launchctl did not run" if r is None else (r.stderr or r.stdout)
+        raise RuntimeError(f"launchctl bootstrap failed: {detail}")
     subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], capture_output=True)
     echo(f"[ok]   loaded launchd job {label} (logs: /tmp/{label}.log)")
 

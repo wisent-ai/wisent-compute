@@ -135,5 +135,71 @@ class DiskCleanupInstallTests(unittest.TestCase):
                 )
 
 
+class LaunchdInstallerTests(unittest.TestCase):
+    def test_transient_bootstrap_failure_retries_then_kickstarts(self) -> None:
+        actions: list[str] = []
+        delays: list[float] = []
+        bootstrap_results = iter((5, 0))
+
+        def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+            action = command[1]
+            actions.append(action)
+            return SimpleNamespace(
+                returncode=next(bootstrap_results) if action == "bootstrap" else 0,
+                stderr="transient launchd error",
+                stdout="",
+            )
+
+        with (
+            patch.object(local_install.Path, "home", return_value=Path("/Users/tester")),
+            patch.object(local_install.Path, "mkdir"),
+            patch.object(local_install.Path, "write_text"),
+            patch.object(local_install.os, "getuid", return_value=501),
+            patch.object(local_install.subprocess, "run", new=run),
+            patch.object(local_install.time, "sleep", new=delays.append),
+        ):
+            local_install._install_darwin(
+                "com.wisent.compute.disk-cleanup.host",
+                ["wc", "disk-cleanup", "--watch"],
+                {"GOOGLE_CLOUD_PROJECT": "test-project"},
+                lambda message: None,
+            )
+
+        self.assertEqual(actions, ["bootout", "bootstrap", "bootstrap", "kickstart"])
+        self.assertEqual(delays, [0.5])
+
+    def test_persistent_bootstrap_failure_raises_after_retry_limit(self) -> None:
+        actions: list[str] = []
+        delays: list[float] = []
+
+        def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+            action = command[1]
+            actions.append(action)
+            return SimpleNamespace(
+                returncode=5 if action == "bootstrap" else 0,
+                stderr="launchd unavailable",
+                stdout="",
+            )
+
+        with (
+            patch.object(local_install.Path, "home", return_value=Path("/Users/tester")),
+            patch.object(local_install.Path, "mkdir"),
+            patch.object(local_install.Path, "write_text"),
+            patch.object(local_install.os, "getuid", return_value=501),
+            patch.object(local_install.subprocess, "run", new=run),
+            patch.object(local_install.time, "sleep", new=delays.append),
+            self.assertRaisesRegex(RuntimeError, "launchctl bootstrap failed: launchd unavailable"),
+        ):
+            local_install._install_darwin(
+                "com.wisent.compute.disk-cleanup.host",
+                ["wc", "disk-cleanup", "--watch"],
+                {"GOOGLE_CLOUD_PROJECT": "test-project"},
+                lambda message: None,
+            )
+
+        self.assertEqual(actions, ["bootout", *("bootstrap",) * 5])
+        self.assertEqual(delays, [0.5] * 4)
+
+
 if __name__ == "__main__":
     unittest.main()
