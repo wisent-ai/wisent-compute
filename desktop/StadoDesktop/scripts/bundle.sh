@@ -34,9 +34,12 @@ if [[ -z "$IDENTITY" && "${STADO_ALLOW_DEVELOPMENT_SIGNING:-}" == "1" ]]; then
     IDENTITY=$(security find-identity -v -p codesigning \
         | awk -F '"' '/Apple Development/{print $2; exit}')
 fi
+if [[ -z "$IDENTITY" && "${STADO_ALLOW_ADHOC_SIGNING:-}" == "1" ]]; then
+    IDENTITY="-"
+fi
 if [[ -z "$IDENTITY" ]]; then
     print -u2 "No Developer ID Application signing identity found."
-    print -u2 "Set STADO_SIGN_IDENTITY, or set STADO_ALLOW_DEVELOPMENT_SIGNING=1 for a local development certificate."
+    print -u2 "Set STADO_SIGN_IDENTITY, STADO_ALLOW_DEVELOPMENT_SIGNING=1, or explicitly set STADO_ALLOW_ADHOC_SIGNING=1 for same-Mac use."
     exit 1
 fi
 
