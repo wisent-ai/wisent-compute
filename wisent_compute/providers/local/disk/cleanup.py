@@ -950,7 +950,8 @@ def _hf_scan_repo(
             root_fd, root_info, repo_parts + (".no_exist",), budget, deadline, report,
         )
     if not {"blobs", "snapshots"}.issubset(names):
-        raise OSError("incomplete repository layout")
+        _skip(report["cleaners"]["huggingface_cache"], "incomplete_repository")
+        return []
     blobs_fd = _hf_open_path(root_fd, repo_parts + ("blobs",))
     blobs: dict[tuple[str, ...], tuple[int, int, int, int, int, int]] = {}
     blob_sizes: dict[tuple[str, ...], int] = {}

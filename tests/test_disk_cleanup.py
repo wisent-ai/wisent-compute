@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import fcntl
 import json
 import os
+import stat
 import tempfile
 import time
 import unittest
@@ -675,6 +676,80 @@ class DiskCleanupSafetyTests(unittest.TestCase):
             follow_up = self.run_pass(home, policy(mode="report"), free_bytes=0)
             self.assertGreater(follow_up["cleaners"]["huggingface_cache"]["scanned_items"], 0)
             self.assertEqual(follow_up["errors"], [])
+
+    def test_safe_incomplete_repository_is_skipped_without_blocking_complete_repo(self) -> None:
+        cases = {
+            "report": ("report_only", 0, True),
+            "enforce": ("reclaimed_target", 1, False),
+        }
+        for mode, (outcome, deleted_items, complete_survives) in cases.items():
+            with self.subTest(mode), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                layout = HfCacheLayout(home)
+                complete_blob = layout.blob("a" * 64)
+                complete_revision = layout.revision(
+                    "1" * 40, {"weights.bin": complete_blob}, modified=0
+                )
+                incomplete = layout.root / "models--org--pending"
+                refs = incomplete / "refs"
+                refs.mkdir(parents=True)
+                pending_ref = refs / "main"
+                pending_ref.write_text("2" * 40 + "\n", encoding="ascii")
+
+                def free_bytes(_home: Path) -> int:
+                    return 12 * GIB if not complete_revision.exists() else 0
+
+                report = self.run_pass(
+                    home,
+                    policy(mode=mode),
+                    free_bytes=free_bytes,
+                )
+
+                hf = report["cleaners"]["huggingface_cache"]
+                self.assertEqual(report["outcome"], outcome)
+                self.assertEqual(report["errors"], [])
+                self.assertEqual(hf["skipped"].get("incomplete_repository"), 1)
+                self.assertEqual(hf["eligible_items"], 1)
+                self.assertEqual(hf["deleted_items"], deleted_items)
+                self.assertTrue(incomplete.is_dir())
+                self.assertEqual(pending_ref.read_text(encoding="ascii"), "2" * 40 + "\n")
+                self.assertEqual(complete_revision.exists(), complete_survives)
+                self.assertEqual(complete_blob.exists(), complete_survives)
+
+    def test_unsafe_required_directory_in_incomplete_repo_aborts_all_mutation(self) -> None:
+        for required_kind in ("symlink", "fifo"):
+            with self.subTest(required_kind), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                layout = HfCacheLayout(home)
+                complete_blob = layout.blob("a" * 64)
+                complete_revision = layout.revision(
+                    "1" * 40, {"weights.bin": complete_blob}, modified=0
+                )
+                unsafe = layout.root / "models--org--unsafe"
+                unsafe.mkdir()
+                required_entry = unsafe / "blobs"
+                if required_kind == "symlink":
+                    outside = home / "outside-required-directory"
+                    outside.mkdir()
+                    sentinel = outside / "sentinel"
+                    sentinel.write_bytes(b"never mutate")
+                    required_entry.symlink_to(outside, target_is_directory=True)
+                else:
+                    os.mkfifo(required_entry)
+
+                report = self.run_pass(home, policy(), free_bytes=0)
+
+                hf = report["cleaners"]["huggingface_cache"]
+                self.assertEqual(report["errors"], ["huggingface_cache:OSError"])
+                self.assertEqual(hf["eligible_items"], 0)
+                self.assertEqual(hf["deleted_items"], 0)
+                self.assertTrue(complete_revision.is_dir())
+                self.assertEqual(complete_blob.read_bytes(), b"x" * MIB)
+                if required_kind == "symlink":
+                    self.assertTrue(required_entry.is_symlink())
+                    self.assertEqual(sentinel.read_bytes(), b"never mutate")
+                else:
+                    self.assertTrue(stat.S_ISFIFO(required_entry.lstat().st_mode))
 
     def test_reserved_incomplete_and_untracked_content_abort_the_entire_cache_pass(self) -> None:
         cases = {
