@@ -339,6 +339,78 @@ class DiskCleanupSafetyTests(unittest.TestCase):
             self.assertTrue(retained_only.is_file())
             self.assertTrue(retained.is_dir())
 
+    def test_regular_cache_tag_is_scanned_preserved_and_allows_candidates(self) -> None:
+        cases = {
+            "report": ("report_only", 0, True),
+            "enforce": ("reclaimed_target", 1, False),
+        }
+        for mode, (outcome, deleted_items, revision_survives) in cases.items():
+            with self.subTest(mode), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                layout = HfCacheLayout(home)
+                blob = layout.blob("a" * 64)
+                old = layout.revision("1" * 40, {"weights.bin": blob}, modified=0)
+                cache_tag = layout.root / "CACHEDIR.TAG"
+                tag_contents = b"Signature: 8a477f597d28d172789f06886806bc55\n"
+                cache_tag.write_bytes(tag_contents)
+                self.assertEqual(cache_tag.stat().st_uid, os.geteuid())
+
+                def free_bytes(_home: Path) -> int:
+                    return 12 * GIB if not old.exists() else 0
+
+                report = self.run_pass(
+                    home,
+                    policy(mode=mode, max_scan_items=100),
+                    free_bytes=free_bytes,
+                )
+
+                hf = report["cleaners"]["huggingface_cache"]
+                self.assertEqual(report["outcome"], outcome)
+                self.assertEqual(report["errors"], [])
+                self.assertEqual(hf["eligible_items"], 1)
+                self.assertGreater(hf["expected_bytes"], 0)
+                self.assertEqual(hf["deleted_items"], deleted_items)
+                self.assertGreater(hf["scanned_items"], 0)
+                self.assertLessEqual(hf["scanned_items"], 100)
+                self.assertFalse(report["caps"]["scan"])
+                self.assertEqual(cache_tag.read_bytes(), tag_contents)
+                self.assertEqual(old.exists(), revision_survives)
+                self.assertEqual(blob.exists(), revision_survives)
+
+    def test_non_regular_cache_tag_fails_closed_without_mutation(self) -> None:
+        cases = ("symlink", "directory")
+        for tag_kind in cases:
+            with self.subTest(tag_kind), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                layout = HfCacheLayout(home)
+                blob = layout.blob("a" * 64)
+                old = layout.revision("1" * 40, {"weights.bin": blob}, modified=0)
+                cache_tag = layout.root / "CACHEDIR.TAG"
+                sentinel = home / "outside-cache-tag"
+                if tag_kind == "symlink":
+                    sentinel.write_bytes(b"never mutate")
+                    cache_tag.symlink_to(sentinel)
+                else:
+                    cache_tag.mkdir()
+                    (cache_tag / "sentinel").write_bytes(b"never mutate")
+
+                report = self.run_pass(home, policy(), free_bytes=0)
+
+                hf = report["cleaners"]["huggingface_cache"]
+                self.assertEqual(hf["eligible_items"], 0)
+                self.assertEqual(hf["deleted_items"], 0)
+                self.assertEqual(report["errors"], ["huggingface_cache:OSError"])
+                self.assertTrue(old.is_dir())
+                self.assertEqual(blob.read_bytes(), b"x" * MIB)
+                if tag_kind == "symlink":
+                    self.assertTrue(cache_tag.is_symlink())
+                    self.assertEqual(sentinel.read_bytes(), b"never mutate")
+                else:
+                    self.assertTrue(cache_tag.is_dir())
+                    self.assertEqual(
+                        (cache_tag / "sentinel").read_bytes(), b"never mutate"
+                    )
+
     def test_symlinked_cache_root_is_rejected_without_touching_outside_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory).resolve()

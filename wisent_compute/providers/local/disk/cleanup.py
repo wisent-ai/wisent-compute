@@ -1027,6 +1027,9 @@ def _hf_scan_cache(
                 raise OSError("unsafe lock root")
         elif entry.name in {"blobs", "refs", "snapshots"}:
             direct_layout = True
+        elif entry.name == "CACHEDIR.TAG":
+            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise OSError("unsafe cache tag")
         elif entry.name == "version.txt":
             if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
                 raise OSError("unsafe cache version")
