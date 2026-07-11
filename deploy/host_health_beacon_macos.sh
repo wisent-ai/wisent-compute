@@ -25,6 +25,32 @@ ADC_PATH="${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/application_def
 VENV_PY="${WC_VENV_PYTHON:-$HOME/.venvs/wisent-compute/bin/python}"
 [ -x "$VENV_PY" ] || exit 1
 
+# Use the existing health schedule for a bounded, best-effort policy pass.
+WC_BIN="${WC_BIN:-$HOME/.venvs/wisent-compute/bin/wc}"
+if [ -x "$WC_BIN" ]; then
+    GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH" "$VENV_PY" - "$WC_BIN" <<'CLEANUPPY' >/dev/null 2>&1
+import subprocess
+import sys
+
+try:
+    subprocess.run(
+        [sys.argv[1], "disk-cleanup", "--once"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=40,
+        check=True,
+    )
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit(1)
+CLEANUPPY
+    if [ "$?" -ne 0 ]; then
+        echo "host_health_beacon: wc disk-cleanup did not complete; leaving disk state unchanged" >&2
+    fi
+else
+    echo "host_health_beacon: wc disk-cleanup unavailable; leaving disk state unchanged" >&2
+fi
+
 reported_at=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Root fs: BSD df. KB blocks via `df -k`.
@@ -60,17 +86,6 @@ for lbl in $LABELS; do
     units_json="$units_json\"$lbl\":{\"state\":\"$state\",\"n_restarts\":\"$n_restarts\",\"active_since\":\"$active_since\"}"
 done
 
-# Last 4KB of any wisent-compute log (whichever exists, in priority order).
-last_log='""'
-for p in "$HOME/Library/Logs/wisent-compute-coordinator.err" \
-         "$HOME/Library/Logs/wisent-compute-auto-deployer.err" \
-         "$HOME/Library/Logs/wisent-hf-refresh.err"; do
-    if [ -r "$p" ]; then
-        last_log=$(/usr/bin/tail -c 4096 "$p" 2>/dev/null \
-            | /usr/bin/python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-        break
-    fi
-done
 
 tmpfile=$(/usr/bin/mktemp)
 cat > "$tmpfile" <<EOF
@@ -79,8 +94,7 @@ cat > "$tmpfile" <<EOF
   "reported_at": "${reported_at}",
   "disk_pct": ${disk_pct:-0},
   "disk_avail_gb": ${disk_avail_gb:-0},
-  "units": {${units_json}},
-  "last_log": ${last_log}
+  "units": {${units_json}}
 }
 EOF
 

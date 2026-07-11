@@ -7,7 +7,6 @@
 #   - reported_at (ISO8601 UTC)
 #   - disk_pct, disk_avail_gb (root filesystem)
 #   - units: { <unit>: {state, restart_counter, since} }
-#   - last_log: tail of the agent log (truncated)
 #
 # Why it exists: the wisent-agent itself only publishes capacity to
 # gs://wisent-compute/capacity/ AFTER it successfully starts. A unit
@@ -25,7 +24,6 @@ set -u
 PROJECT="wisent-480400"
 BUCKET="wisent-compute"
 UNITS_TO_WATCH="${WC_HEALTH_UNITS:-wisent-agent.service}"
-LOG_PATHS="${WC_HEALTH_LOGS:-/var/log/wisent-agent.log}"
 HOST_SLUG=$(/bin/hostname -s 2>/dev/null | /usr/bin/tr '[:upper:]' '[:lower:]')
 
 # Discover gcloud (the GCP SDK is at different paths on Linux/macOS).
@@ -41,6 +39,15 @@ if [ -z "$GCLOUD_BIN" ]; then
     exit 1
 fi
 
+# Use the existing health schedule for a bounded, best-effort policy pass.
+WC_BIN="${WC_BIN:-${HOME:-/home/ubuntu}/.local/bin/wc}"
+if [ -x "$WC_BIN" ]; then
+    /usr/bin/timeout 40s "$WC_BIN" disk-cleanup --once >/dev/null 2>&1 || \
+        echo "host_health_beacon: wc disk-cleanup did not complete; leaving disk state unchanged" >&2
+else
+    echo "host_health_beacon: wc disk-cleanup unavailable; leaving disk state unchanged" >&2
+fi
+
 reported_at=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Root fs usage
@@ -50,37 +57,6 @@ disk_pct="${disk_pct_str%%%}"
 # Avail in GB (rounded down).
 disk_avail_gb=$(( ${disk_avail_kb:-0} / 1024 / 1024 ))
 
-# Self-heal: when disk is 90%+ full AND the wisent-agent unit has been
-# stuck for at least one restart, evict caches before reporting. Without
-# this the agent restart-loops forever on a full disk (the workstation
-# spent 30+ hours in a 3,645-restart loop on 2026-05-09 with pip-upgrade
-# failing on a 46GB HF cache). The eviction targets are non-canonical
-# state: HF datasets/snapshots, wheel cache, wisent corrupt pair-text
-# cache. All are reproducible from the upstream source on next access.
-SELF_HEAL_DISK_PCT_THRESHOLD=85
-HOME_DIR="${HOME:-/home/ubuntu}"
-if [ "${disk_pct:-0}" -ge "$SELF_HEAL_DISK_PCT_THRESHOLD" ]; then
-    # Only run if wisent-agent is NOT actively serving (state != active).
-    primary_unit="${UNITS_TO_WATCH%%,*}"
-    if ! /usr/bin/systemctl is-active "$primary_unit" >/dev/null 2>&1; then
-        for tgt in "$HOME_DIR/.cache/huggingface/hub" \
-                   "$HOME_DIR/.cache/pip" \
-                   "$HOME_DIR/.wisent_cache" \
-                   /root/.cache/huggingface/hub \
-                   /root/.cache/pip; do
-            [ -d "$tgt" ] && /bin/rm -rf "$tgt" 2>/dev/null || true
-        done
-        # Trigger a fresh systemd restart so the agent's pip ExecStartPre
-        # runs on the now-cleaned disk.
-        /usr/bin/systemctl restart "$primary_unit" >/dev/null 2>&1 || true
-        # Re-read disk after eviction so the same beacon tick reports
-        # the post-heal state.
-        disk_line=$(/bin/df -k / 2>/dev/null | /usr/bin/awk 'NR==2 {print $3, $4, $5}')
-        read -r disk_used_kb disk_avail_kb disk_pct_str <<<"$disk_line"
-        disk_pct="${disk_pct_str%%%}"
-        disk_avail_gb=$(( ${disk_avail_kb:-0} / 1024 / 1024 ))
-    fi
-fi
 
 # systemctl unit states (one entry per UNITS_TO_WATCH item, comma-sep).
 units_json=""
@@ -99,42 +75,6 @@ for unit in ${UNITS_TO_WATCH//,/ }; do
     units_json="$units_json\"$unit\":{\"state\":\"$state\",\"n_restarts\":\"$n_restarts\",\"active_since\":\"$since\"}"
 done
 
-# Last log lines (truncate to 4 KB).
-last_log=""
-for p in ${LOG_PATHS//,/ }; do
-    if [ -r "$p" ]; then
-        last_log=$(/usr/bin/tail -c 4096 "$p" 2>/dev/null \
-            | /usr/bin/python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-        break
-    fi
-done
-[ -z "$last_log" ] && last_log='""'
-
-# Top disk consumers under $HOME and /var, capped to 10 each, so the
-# operator can see what is filling the disk without needing to SSH in.
-# Only computed when disk is tight (>80%); avoids running du on every
-# beacon tick on a healthy host.
-top_consumers='[]'
-if [ "${disk_pct:-0}" -ge 80 ]; then
-    top_consumers=$(
-        {
-            /usr/bin/du -h --max-depth=1 "$HOME_DIR" 2>/dev/null
-            /usr/bin/du -h --max-depth=1 /var 2>/dev/null
-            /usr/bin/du -h --max-depth=1 /opt 2>/dev/null
-            /usr/bin/du -h --max-depth=1 /tmp 2>/dev/null
-        } | /usr/bin/sort -hr | /usr/bin/head -n 20 \
-          | /usr/bin/python3 -c '
-import json, sys
-out = []
-for line in sys.stdin:
-    parts = line.strip().split(None, 1)
-    if len(parts) == 2:
-        out.append({"size": parts[0], "path": parts[1]})
-print(json.dumps(out))
-' 2>/dev/null
-    )
-    [ -z "$top_consumers" ] && top_consumers='[]'
-fi
 
 tmpfile=$(/usr/bin/mktemp)
 cat > "$tmpfile" <<EOF
@@ -143,9 +83,7 @@ cat > "$tmpfile" <<EOF
   "reported_at": "${reported_at}",
   "disk_pct": ${disk_pct:-0},
   "disk_avail_gb": ${disk_avail_gb:-0},
-  "units": {${units_json}},
-  "top_consumers": ${top_consumers},
-  "last_log": ${last_log}
+  "units": {${units_json}}
 }
 EOF
 

@@ -40,6 +40,9 @@ def _adc_path() -> str:
     explicit = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     if explicit and Path(explicit).is_file():
         return explicit
+    standard = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+    if standard.is_file():
+        return str(standard)
     candidates = list((Path.home() / ".config" / "gcloud" / "legacy_credentials").glob("*/adc.json"))
     return str(candidates[0]) if candidates else ""
 
@@ -143,6 +146,8 @@ def _exec_args_for(entry, kind: str) -> list[str]:
         return [bin_path, "agent", "--auto"]
     if kind == "coordinator":
         return [bin_path, "coordinator", "--target", entry.name]
+    if kind == "disk-cleanup":
+        return [bin_path, "disk-cleanup", "--watch"]
     if kind == "failure-fixer":
         # Run scan_and_dispatch every iteration. Loop in shell so a
         # single failure of scan_and_dispatch (transient GCS hiccup,
@@ -211,10 +216,11 @@ def install_local(entry, kind: str, dry_run: bool, echo: Callable[[str], None]) 
     # renders it into GCE agent startup, the failure-fixer's verify curl uses
     # it. Sourced from GCS config so it's correct regardless of the box's
     # ambient HF_TOKEN (which was read-only -> 403 on upload).
-    hf = _hf_write_token()
-    if hf:
-        env["HF_TOKEN"] = hf
-        env["HUGGING_FACE_HUB_TOKEN"] = hf
+    if kind != "disk-cleanup":
+        hf = _hf_write_token()
+        if hf:
+            env["HF_TOKEN"] = hf
+            env["HUGGING_FACE_HUB_TOKEN"] = hf
     # failure-fixer authenticates via the local `claude` CLI's OAuth
     # session (maintained by wisent-claude-reauth on the mac mini), not
     # via env-var HMAC creds. PATH is forwarded so the LaunchAgent's

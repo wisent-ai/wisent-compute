@@ -524,6 +524,8 @@ if [ -f "$HHB_SCRIPT" ]; then
         <string>${HOME}</string>
         <key>PATH</key>
         <string>${GCLOUD_BIN_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>WC_BIN</key>
+        <string>${WC_BIN}</string>
         <key>GOOGLE_APPLICATION_CREDENTIALS</key>
         <string>${ADC_PATH}</string>
     </dict>

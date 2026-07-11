@@ -52,6 +52,51 @@ def _validate_action_list(value: Any, location: str) -> None:
         _fail(location, "wildcard '*' must be the only action")
 
 
+def _require_int(value: Any, location: str, minimum: int, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        _fail(location, "must be an integer")
+    if value < minimum or (maximum is not None and value > maximum):
+        upper = f" and <= {maximum}" if maximum is not None else ""
+        _fail(location, f"must be >= {minimum}{upper}")
+    return value
+
+
+def _validate_disk_cleanup(value: Any, location: str) -> None:
+    if not isinstance(value, dict):
+        _fail(location, "must be an object")
+    required = {
+        "mode", "check_interval_seconds", "low_free_gb", "target_free_gb",
+        "max_bytes_per_pass", "max_items_per_pass", "max_scan_items", "cleaners",
+    }
+    if set(value) != required:
+        _fail(location, f"must contain exactly {sorted(required)!r}")
+    if value["mode"] not in {"off", "report", "enforce"}:
+        _fail(f"{location}.mode", "must be one of 'off', 'report', or 'enforce'")
+    _require_int(value["check_interval_seconds"], f"{location}.check_interval_seconds", 60, 86400)
+    low = _require_int(value["low_free_gb"], f"{location}.low_free_gb", 1)
+    target = _require_int(value["target_free_gb"], f"{location}.target_free_gb", 1)
+    if target <= low:
+        _fail(f"{location}.target_free_gb", "must be greater than low_free_gb")
+    _require_int(value["max_bytes_per_pass"], f"{location}.max_bytes_per_pass", 1024 ** 2, 1024 ** 4)
+    max_items = _require_int(value["max_items_per_pass"], f"{location}.max_items_per_pass", 1, 10000)
+    max_scan = _require_int(value["max_scan_items"], f"{location}.max_scan_items", 1, 100000)
+    if max_scan < max_items:
+        _fail(f"{location}.max_scan_items", "must be >= max_items_per_pass")
+    cleaners = value["cleaners"]
+    if not isinstance(cleaners, dict):
+        _fail(f"{location}.cleaners", "must be an object")
+    allowed = {"huggingface_cache", "weles_recordings"}
+    unknown = set(cleaners) - allowed
+    if unknown:
+        _fail(f"{location}.cleaners", f"unknown cleaners {sorted(unknown)!r}")
+    for name, cleaner in cleaners.items():
+        cleaner_location = f"{location}.cleaners.{name}"
+        if not isinstance(cleaner, dict) or set(cleaner) != {"min_age_seconds"}:
+            _fail(cleaner_location, "must contain exactly 'min_age_seconds'")
+        minimum = 3600 if name == "huggingface_cache" else 86400
+        _require_int(cleaner["min_age_seconds"], f"{cleaner_location}.min_age_seconds", minimum)
+
+
 def _target_identities(target: dict[str, Any], location: str) -> list[tuple[str, str]]:
     identities: list[tuple[str, str]] = []
     name = target["name"]
@@ -124,6 +169,11 @@ def validate_registry(data: Any) -> dict[str, Any]:
             if not isinstance(weles["enabled"], bool):
                 _fail(f"{location}.weles.enabled", "must be a boolean")
             _validate_action_list(weles["actions"], f"{location}.weles.actions")
+
+        if "disk_cleanup" in target:
+            if kind != "local":
+                _fail(f"{location}.disk_cleanup", "is allowed only for kind='local'")
+            _validate_disk_cleanup(target["disk_cleanup"], f"{location}.disk_cleanup")
 
         for identity, identity_location in _target_identities(target, location):
             previous = identities.get(identity)

@@ -45,6 +45,27 @@ wc agent --auto
 wc coordinator --once
 ```
 
+## Registry-controlled disk cleanup
+
+Local targets can opt into bounded cleanup through their canonical GCS registry entry. Cleanup fails closed when the registry is unavailable, invalid, stale, or does not uniquely match the local hostname. Start every rollout in `report` mode; switch to `enforce` only after inspecting the host report.
+
+```json
+"disk_cleanup": {
+  "mode": "report",
+  "check_interval_seconds": 300,
+  "low_free_gb": 30,
+  "target_free_gb": 60,
+  "max_bytes_per_pass": 42949672960,
+  "max_items_per_pass": 20,
+  "max_scan_items": 10000,
+  "cleaners": {
+    "huggingface_cache": {"min_age_seconds": 604800}
+  }
+}
+```
+
+`wc disk-cleanup --once` performs one policy-controlled check; use registry `mode: "report"` for a read-only pass. `wc disk-cleanup --watch` follows the registry interval. On the local Mac, `wc install-disk-cleanup` installs the watch as a launchd LaunchAgent. Only complete, old, exclusively referenced Hugging Face cache revisions are eligible; active compute slots, held cache locks, unknown layouts, scan/deadline caps, and path or ownership changes block deletion.
+
 ## Documentation
 
 - [`docs/cli.md`](docs/cli.md) — full CLI reference (`wc submit`, `wc agent`, `wc coordinator`, `wc registry`, `wc cost`, `wc bootstrap`).

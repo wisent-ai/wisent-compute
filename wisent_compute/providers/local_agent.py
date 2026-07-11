@@ -5,13 +5,13 @@ Runs as a long-lived daemon. Picks up jobs when Vast.ai has no active renter.
 """
 from __future__ import annotations
 
-import glob
+import json
 import os
 import shutil
+import stat
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -36,6 +36,7 @@ from .local.helpers import (
     _vast_has_renter,
 )
 from .local.disk.staging import setup_agent_staging
+from .local.disk import acquire_workload_lock, release_workload_lock, run_cleanup_once
 
 
 POLL_INTERVAL = _wc.POLL_INTERVAL_S
@@ -130,45 +131,85 @@ def _cuda_child_available() -> tuple[bool, str]:
     return ok, str(_CUDA_PROBE["detail"])
 
 
-def _reap_dead_pid_workdirs() -> int:
-    """Reap dead-PID workdirs + unreferenced wisent_raw_stage_* across /tmp
-    and the staging root (TMPDIR may be off-tmpfs on a disk volume; orphans
-    there filled a 3.6T disk once). Skips the wisent_raw_pending pool."""
-    reaped = 0
-    import subprocess as _sp
-    _cmd = _sp.run(["bash", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null"],
-                   capture_output=True, text=True).stdout
-    for base in {"/tmp", os.environ.get("TMPDIR", "/tmp")}:
-        for d in glob.glob(f"{base}/wisent_act_*") + glob.glob(f"{base}/wisent_raw_*"):
-            if "wisent_raw_pending" in d:
-                continue
-            if "_pid" in d:
-                try:
-                    pid = int(d.rsplit("_pid", 1)[-1].split("_")[0])
-                except (ValueError, IndexError):
-                    continue
-                try:
-                    os.kill(pid, 0); continue
-                except OSError:
-                    pass
-                shutil.rmtree(d, ignore_errors=True); reaped += 1
-            elif "wisent_raw_stage_" in d and d not in _cmd:
-                shutil.rmtree(d, ignore_errors=True); reaped += 1
-    return reaped
+def _persisted_disk_low_bytes() -> int | None:
+    """Read the last canonical low watermark from janitor-owned safe state.
+
+    Cleanup may be unable to reach the registry during agent startup.  Reuse a
+    threshold only when it came from the janitor's owner-controlled, no-follow
+    state file and the report identifies a validated canonical policy.
+    """
+    current = os.path.expanduser("~")
+    state_path = os.path.join(current, ".cache", "wisent-compute", "disk-cleanup-state.json")
+    try:
+        for directory in (
+            current,
+            os.path.join(current, ".cache"),
+            os.path.join(current, ".cache", "wisent-compute"),
+        ):
+            info = os.lstat(directory)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                return None
+            if info.st_uid != os.geteuid():
+                return None
+        fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                return None
+            if info.st_size > 1024 * 1024:
+                return None
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as handle:
+                state = json.load(handle)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(state, dict) or state.get("version") != 1:
+        return None
+    report = state.get("report")
+    if not isinstance(report, dict):
+        return None
+    digest = report.get("policy_digest")
+    low_bytes = report.get("low_bytes")
+    if not isinstance(digest, str) or len(digest) != 64:
+        return None
+    try:
+        int(digest, 16)
+    except ValueError:
+        return None
+    if isinstance(low_bytes, int) and not isinstance(low_bytes, bool) and low_bytes > 0:
+        return low_bytes
+    return None
 
 
-def _reap_orphan_workdirs(hostname: str) -> None:
-    """Startup reap: PID-dead extraction workdirs + all /tmp/wc-* dirs.
+def _validated_report_low_bytes(report: dict) -> int | None:
+    """Return a threshold only from a successfully resolved policy report."""
+    digest = report.get("policy_digest")
+    low_bytes = report.get("low_bytes")
+    if not isinstance(digest, str) or len(digest) != 64:
+        return None
+    try:
+        int(digest, 16)
+    except ValueError:
+        return None
+    if isinstance(low_bytes, int) and not isinstance(low_bytes, bool) and low_bytes > 0:
+        return low_bytes
+    return None
 
-    The wc-* wipe is unconditional and therefore startup-only — a fresh
-    agent process owns no active job, so any leftover wc-* is stale. The
-    periodic in-loop cleanup uses _reap_dead_pid_workdirs (PID-aware)."""
-    _reap_dead_pid_workdirs()
-    wc_dirs = glob.glob("/tmp/wc-*")
-    for d in wc_dirs:
-        shutil.rmtree(d, ignore_errors=True)
-    if wc_dirs:
-        _log(f"reaped {len(wc_dirs)} stale /tmp/wc-* dirs")
+
+def _disk_pressure_unresolved(low_bytes: int | None, free_bytes: int | None) -> bool:
+    """Fail admission closed until both policy threshold and free space are known."""
+    return low_bytes is None or free_bytes is None or free_bytes < low_bytes
+
+
+def _release_slot_workload_lock(slot: dict, log_fn) -> None:
+    handle = slot.pop("disk_cleanup_lock", None)
+    if handle is None:
+        return
+    try:
+        release_workload_lock(handle)
+    except OSError as exc:
+        log_fn(f"disk cleanup workload lock release failed: {type(exc).__name__}")
 
 
 def _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
@@ -234,6 +275,7 @@ def _maybe_yield_for_priority(store, slots, gpu_type, total_vram_gb,
     for s in chosen:
         try:
             if request_yield(s, store, log_fn):
+                _release_slot_workload_lock(s, log_fn)
                 slots.remove(s)
                 n += 1
         except Exception as e:
@@ -267,9 +309,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     setup_agent_staging(_log)
 
     hostname = socket.gethostname()
-    _log("init: pre-reap_orphan_workdirs")
-    _reap_orphan_workdirs(hostname)
-    _log("init: reap done; pre-JobStorage")
+    _log("init: legacy workdir reaping disabled; cleanup is policy-owned")
 
     initial_env: dict[str, str] = dict(os.environ)
     initial_gpu = gpu_type
@@ -284,6 +324,9 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     FLEET_FLUSH_INTERVAL = _wc.FLEET_FLUSH_INTERVAL_S
 
     _last_cap = None
+    disk_low_bytes = _persisted_disk_low_bytes()
+    if disk_low_bytes is not None:
+        _log("init: loaded validated disk low watermark from janitor state")
     while True:
         # Phase breadcrumbs for the 40GB a2-highgpu-1g first-iter hang.
         _log("loop: iter-start")
@@ -294,9 +337,56 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             # (else a restart leaves the pending pool orphaned).
         except Exception:
             pass
-        _reap_dead_pid_workdirs()
         vast_active = _vast_has_renter()
-        slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
+        advanced_slots = []
+        for slot in slots:
+            if advance_slot(slot, store, vast_active, _log):
+                advanced_slots.append(slot)
+            else:
+                _release_slot_workload_lock(slot, _log)
+        slots = advanced_slots
+        try:
+            cleanup_report = run_cleanup_once(
+                active_slot_count=len(slots), log_fn=_log,
+            )
+        except BaseException as exc:
+            _log(f"disk cleanup pass failed: {type(exc).__name__}")
+            cleanup_report = {
+                "outcome": "runtime_error",
+                "active_slot_count": len(slots),
+                "errors": [f"runtime:{type(exc).__name__}"],
+            }
+        agent_diag["disk_cleanup"] = cleanup_report
+        reported_low = _validated_report_low_bytes(cleanup_report)
+        if reported_low is not None:
+            disk_low_bytes = reported_low
+        try:
+            current_free_bytes = shutil.disk_usage(os.path.expanduser("~")).free
+        except OSError:
+            current_free_bytes = None
+        disk_policy_known = disk_low_bytes is not None
+        disk_pressure_unresolved = _disk_pressure_unresolved(
+            disk_low_bytes, current_free_bytes,
+        )
+        agent_diag["disk_cleanup_policy_known"] = disk_policy_known
+        agent_diag["disk_pressure_unresolved"] = disk_pressure_unresolved
+        if disk_pressure_unresolved:
+            zero_cap = {
+                "free_slots": {},
+                "free_vram_gb": 0,
+                "total_vram_gb": total_vram_gb,
+                "diag": dict(agent_diag),
+            }
+            try:
+                publish_capacity(
+                    store, consumer_id, kind, {}, free_vram_gb=0,
+                    total_vram_gb=total_vram_gb, diag=zero_cap["diag"],
+                )
+            except Exception:
+                pass
+            _last_cap = zero_cap
+            time.sleep(POLL_INTERVAL)
+            continue
         if _last_cap is not None:
             try:
                 publish_capacity(
@@ -335,13 +425,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if t.vram_gb and int(t.vram_gb) != total_vram_gb:
                 _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
                 total_vram_gb = int(t.vram_gb)
-        # Disk eviction MUST run before pip_upgrade_and_exec. Workstation
-        # crash-looped at disk_pct=89% (n_restarts=2380) because the
-        # drift handler ran pip install which exhausted the remaining
-        # 10 GB and crashed before stale_training_dirs eviction in
-        # gate_and_maybe_evict could free disk. Running the gate first
-        # gives pip room to work; the second gate call later in the
-        # loop is a fast no-op when disk is already healthy.
+        # Cleanup already ran before upgrade checks. This gate is now strictly
+        # admission/diagnostics-only and has no destructive side effects.
         from .local.disk import gate_and_maybe_evict as _disk_gate_pre
         _pre_refuse, _pre_diag = _disk_gate_pre(_log)
         agent_diag.update(_pre_diag)
@@ -519,11 +604,25 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 diag_eligibility_rejected += 1
                 continue
             diag_eligible += 1
-            new_slot = start_slot(store, job, hostname, _log, kind=kind)
+            try:
+                workload_lock = acquire_workload_lock()
+            except OSError as exc:
+                _log(f"disk cleanup workload lock unavailable: {type(exc).__name__}")
+                agent_diag["disk_cleanup_admission"] = "lock_error"
+                break
+            if workload_lock is None:
+                agent_diag["disk_cleanup_admission"] = "cleanup_in_progress"
+                break
+            try:
+                new_slot = start_slot(store, job, hostname, _log, kind=kind)
+            except BaseException:
+                release_workload_lock(workload_lock)
+                raise
             if new_slot is None:
-                # apt-install refused or failed; job stays in queue/ for
-                # another (cloud-kind or registry-fixed) agent to claim.
+                # Admission failed before spawn; do not retain a workload lock.
+                release_workload_lock(workload_lock)
                 continue
+            new_slot["disk_cleanup_lock"] = workload_lock
             slots.append(new_slot)
             free_vram_gb -= need
             if is_raw_share:

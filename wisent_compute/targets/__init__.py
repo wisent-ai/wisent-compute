@@ -26,6 +26,24 @@ class WelesPolicy:
     enabled: bool
     actions: list[str]
 
+
+@dataclass(frozen=True)
+class DiskCleanerPolicy:
+    min_age_seconds: int
+
+
+@dataclass(frozen=True)
+class DiskCleanupPolicy:
+    mode: str
+    check_interval_seconds: int
+    low_free_gb: int
+    target_free_gb: int
+    max_bytes_per_pass: int
+    max_items_per_pass: int
+    max_scan_items: int
+    cleaners: dict[str, DiskCleanerPolicy]
+
+
 REGISTRY_PATH = Path(__file__).parent / "registry.json"
 GCS_REGISTRY_URI = "gs://wisent-compute/registry.json"
 _GCS_CACHE: dict[str, object] = {"ts": 0.0, "data": None}
@@ -46,6 +64,7 @@ class ComputeTarget:
     notes: str = ""
     hostnames: list[str] = field(default_factory=list)
     weles: Optional[WelesPolicy] = None
+    disk_cleanup: Optional[DiskCleanupPolicy] = None
     # env_overrides and agent_args propagate via the GCS registry to running
     # agents — the agent compares them every poll and exits-for-restart when
     # they change, so systemd brings it back up with the new env / CLI flags.
@@ -62,7 +81,7 @@ def _from_dict(d: dict) -> ComputeTarget:
     known = {
         "name", "kind", "gpu_type", "slots", "ssh", "region",
         "spot", "max_concurrent", "team_id", "notes", "hostnames", "weles",
-        "env_overrides", "agent_args", "vram_gb",
+        "disk_cleanup", "env_overrides", "agent_args", "vram_gb",
     }
     extra = {k: v for k, v in d.items() if k not in known}
     weles_data = d.get("weles")
@@ -72,6 +91,24 @@ def _from_dict(d: dict) -> ComputeTarget:
             actions=list(weles_data["actions"]),
         )
         if isinstance(weles_data, dict)
+        else None
+    )
+    cleanup_data = d.get("disk_cleanup")
+    disk_cleanup = (
+        DiskCleanupPolicy(
+            mode=cleanup_data["mode"],
+            check_interval_seconds=cleanup_data["check_interval_seconds"],
+            low_free_gb=cleanup_data["low_free_gb"],
+            target_free_gb=cleanup_data["target_free_gb"],
+            max_bytes_per_pass=cleanup_data["max_bytes_per_pass"],
+            max_items_per_pass=cleanup_data["max_items_per_pass"],
+            max_scan_items=cleanup_data["max_scan_items"],
+            cleaners={
+                name: DiskCleanerPolicy(min_age_seconds=value["min_age_seconds"])
+                for name, value in cleanup_data["cleaners"].items()
+            },
+        )
+        if isinstance(cleanup_data, dict)
         else None
     )
     return ComputeTarget(
@@ -87,6 +124,7 @@ def _from_dict(d: dict) -> ComputeTarget:
         notes=d.get("notes", ""),
         hostnames=list(d.get("hostnames") or []),
         weles=weles,
+        disk_cleanup=disk_cleanup,
         env_overrides=dict(d.get("env_overrides") or {}),
         agent_args=list(d.get("agent_args") or []),
         vram_gb=d.get("vram_gb"),

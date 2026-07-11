@@ -25,6 +25,24 @@ def local_target(**overrides: object) -> dict[str, object]:
 def registry(*targets: dict[str, object]) -> dict[str, object]:
     return {"schema_version": 2, "targets": list(targets)}
 
+def disk_cleanup_policy(**overrides: object) -> dict[str, object]:
+    policy: dict[str, object] = {
+        "mode": "enforce",
+        "check_interval_seconds": 300,
+        "low_free_gb": 10,
+        "target_free_gb": 20,
+        "max_bytes_per_pass": 1024 ** 3,
+        "max_items_per_pass": 10,
+        "max_scan_items": 100,
+        "cleaners": {
+            "huggingface_cache": {"min_age_seconds": 3600},
+            "weles_recordings": {"min_age_seconds": 86400},
+        },
+    }
+    policy.update(overrides)
+    return policy
+
+
 
 class RegistryValidationTests(unittest.TestCase):
     def test_accepts_exact_lowercase_actions_and_sole_wildcard(self) -> None:
@@ -109,6 +127,81 @@ class RegistryValidationTests(unittest.TestCase):
                 ):
                     validate_registry(registry(*targets))
 
+
+    def test_accepts_cleanup_policy_modes_boundaries_and_cleaner_subsets(self) -> None:
+        cases = {
+            "off with no cleaners": disk_cleanup_policy(mode="off", cleaners={}),
+            "report at numeric minima": disk_cleanup_policy(
+                mode="report",
+                check_interval_seconds=60,
+                low_free_gb=1,
+                target_free_gb=2,
+                max_bytes_per_pass=1024 ** 2,
+                max_items_per_pass=1,
+                max_scan_items=1,
+                cleaners={"huggingface_cache": {"min_age_seconds": 3600}},
+            ),
+            "enforce at bounded maxima": disk_cleanup_policy(
+                check_interval_seconds=86400,
+                max_bytes_per_pass=1024 ** 4,
+                max_items_per_pass=10000,
+                max_scan_items=100000,
+                cleaners={"weles_recordings": {"min_age_seconds": 86400}},
+            ),
+        }
+        for name, policy in cases.items():
+            with self.subTest(name):
+                document = registry(local_target(disk_cleanup=policy))
+                self.assertIs(validate_registry(document), document)
+
+    def test_rejects_cleanup_policy_type_range_and_closed_schema_violations(self) -> None:
+        base = disk_cleanup_policy()
+        cases = {
+            "unknown mode": {**base, "mode": "delete"},
+            "boolean interval": {**base, "check_interval_seconds": True},
+            "interval below minimum": {**base, "check_interval_seconds": 59},
+            "interval above maximum": {**base, "check_interval_seconds": 86401},
+            "target not above low": {**base, "target_free_gb": 10},
+            "byte cap below minimum": {**base, "max_bytes_per_pass": 1024 ** 2 - 1},
+            "item cap above maximum": {**base, "max_items_per_pass": 10001},
+            "scan cap below item cap": {**base, "max_scan_items": 9},
+            "unknown policy key": {**base, "path": "/tmp"},
+            "unknown cleaner": {**base, "cleaners": {"home": {"min_age_seconds": 3600}}},
+            "cleaner command field": {
+                **base,
+                "cleaners": {"huggingface_cache": {"min_age_seconds": 3600, "command": "rm"}},
+            },
+            "boolean retention": {
+                **base,
+                "cleaners": {"huggingface_cache": {"min_age_seconds": True}},
+            },
+            "HF retention below minimum": {
+                **base,
+                "cleaners": {"huggingface_cache": {"min_age_seconds": 3599}},
+            },
+            "Weles retention below minimum": {
+                **base,
+                "cleaners": {"weles_recordings": {"min_age_seconds": 86399}},
+            },
+        }
+        for name, policy in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(RegistryValidationError):
+                    validate_registry(registry(local_target(disk_cleanup=policy)))
+
+    def test_rejects_cleanup_policy_on_non_local_targets(self) -> None:
+        for kind in ("gcp", "vast"):
+            with self.subTest(kind):
+                non_local = local_target(
+                    kind=kind,
+                    disk_cleanup=disk_cleanup_policy(),
+                )
+                del non_local["weles"]
+                with self.assertRaisesRegex(
+                    RegistryValidationError,
+                    "allowed only for kind='local'",
+                ):
+                    validate_registry(registry(non_local))
 
 class RegistryLookupTests(unittest.TestCase):
     def test_lookup_self_normalizes_canonical_name_and_alias_inputs(self) -> None:

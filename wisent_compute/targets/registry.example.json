@@ -9,6 +9,19 @@
         "enabled": true,
         "actions": ["linkedin_register"]
       },
+      "disk_cleanup": {
+        "mode": "report",
+        "check_interval_seconds": 300,
+        "low_free_gb": 30,
+        "target_free_gb": 60,
+        "max_bytes_per_pass": 53687091200,
+        "max_items_per_pass": 50,
+        "max_scan_items": 10000,
+        "cleaners": {
+          "huggingface_cache": {"min_age_seconds": 604800},
+          "weles_recordings": {"min_age_seconds": 604800}
+        }
+      },
       "ssh": "root@198.51.100.10",
       "gpu_type": "nvidia-tesla-t4",
       "slots": 0,

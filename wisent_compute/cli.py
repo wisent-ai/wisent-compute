@@ -40,6 +40,34 @@ def main():
     """Wisent Compute — GPU job queue management."""
 
 
+@main.command("disk-cleanup")
+@click.option("--once", is_flag=True, default=False, help="Run one interval-gated cleanup check (default).")
+@click.option("--watch", is_flag=True, default=False, help="Continuously check at the canonical policy interval.")
+def disk_cleanup(once, watch):
+    """Run registry-authorized cleanup for this local target."""
+    if once and watch:
+        raise click.UsageError("--once and --watch are mutually exclusive")
+    from .providers.local.disk import run_cleanup_once
+
+    while True:
+        report = run_cleanup_once(
+            active_slot_count=0, log_fn=lambda _message: None,
+        )
+        click.echo(json.dumps(report, sort_keys=True, separators=(",", ":")))
+        if not watch:
+            return
+        interval = report.get("check_interval_seconds")
+        time.sleep(max(60, interval if isinstance(interval, int) else 60))
+
+@main.command("install-disk-cleanup")
+def install_disk_cleanup():
+    """Install the registry-controlled cleanup watch on this Mac."""
+    from types import SimpleNamespace
+    from .deploy.local_install import install_local
+
+    install_local(SimpleNamespace(name="disk-cleanup"), "disk-cleanup", False, click.echo)
+
+
 @main.command()
 @click.argument("command")
 @click.option("--provider", default="gcp",
