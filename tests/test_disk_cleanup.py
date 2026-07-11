@@ -716,6 +716,110 @@ class DiskCleanupSafetyTests(unittest.TestCase):
                 self.assertEqual(complete_revision.exists(), complete_survives)
                 self.assertEqual(complete_blob.exists(), complete_survives)
 
+    def test_safe_partial_download_artifacts_skip_only_their_repository(self) -> None:
+        artifact_kinds = ("incomplete_file", "work_directory", "both")
+        modes = {
+            "report": ("report_only", 0, True),
+            "enforce": ("reclaimed_target", 1, False),
+        }
+        for artifact_kind in artifact_kinds:
+            for mode, (outcome, deleted_items, complete_survives) in modes.items():
+                with (
+                    self.subTest(artifact=artifact_kind, mode=mode),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    home = Path(directory).resolve()
+                    layout = HfCacheLayout(home)
+                    complete_blob = layout.blob("a" * 64)
+                    complete_revision = layout.revision(
+                        "1" * 40, {"weights.bin": complete_blob}, modified=0
+                    )
+                    incomplete = layout.root / "models--org--downloading"
+                    blobs = incomplete / "blobs"
+                    blobs.mkdir(parents=True)
+                    (incomplete / "snapshots").mkdir()
+                    partial = blobs / "weights.incomplete"
+                    work = blobs / ".work"
+                    if artifact_kind in {"incomplete_file", "both"}:
+                        partial.write_bytes(b"partial download")
+                    if artifact_kind in {"work_directory", "both"}:
+                        work.mkdir()
+                        (work / "state").write_bytes(b"resume state")
+
+                    def free_bytes(_home: Path) -> int:
+                        return 12 * GIB if not complete_revision.exists() else 0
+
+                    report = self.run_pass(
+                        home,
+                        policy(mode=mode),
+                        free_bytes=free_bytes,
+                    )
+
+                    hf = report["cleaners"]["huggingface_cache"]
+                    self.assertEqual(report["outcome"], outcome)
+                    self.assertEqual(report["errors"], [])
+                    self.assertEqual(hf["skipped"].get("incomplete_repository"), 1)
+                    self.assertEqual(hf["eligible_items"], 1)
+                    self.assertEqual(hf["deleted_items"], deleted_items)
+                    if partial.exists():
+                        self.assertEqual(partial.read_bytes(), b"partial download")
+                    if work.exists():
+                        self.assertEqual((work / "state").read_bytes(), b"resume state")
+                    self.assertEqual(complete_revision.exists(), complete_survives)
+                    self.assertEqual(complete_blob.exists(), complete_survives)
+
+    def test_unsafe_partial_download_artifacts_abort_all_mutation(self) -> None:
+        artifact_kinds = (
+            "incomplete_symlink",
+            "incomplete_fifo",
+            "work_symlink",
+            "work_fifo",
+        )
+        for artifact_kind in artifact_kinds:
+            with self.subTest(artifact_kind), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                layout = HfCacheLayout(home)
+                complete_blob = layout.blob("a" * 64)
+                complete_revision = layout.revision(
+                    "1" * 40, {"weights.bin": complete_blob}, modified=0
+                )
+                unsafe = layout.root / "models--org--unsafe-download"
+                blobs = unsafe / "blobs"
+                blobs.mkdir(parents=True)
+                (unsafe / "snapshots").mkdir()
+                artifact_name = (
+                    ".work" if artifact_kind.startswith("work") else "weights.incomplete"
+                )
+                artifact = blobs / artifact_name
+                if artifact_kind.endswith("symlink"):
+                    outside = home / f"outside-{artifact_kind}"
+                    if artifact_kind.startswith("work"):
+                        outside.mkdir()
+                        sentinel = outside / "sentinel"
+                    else:
+                        sentinel = outside
+                    sentinel.write_bytes(b"never mutate")
+                    artifact.symlink_to(
+                        outside,
+                        target_is_directory=artifact_kind.startswith("work"),
+                    )
+                else:
+                    os.mkfifo(artifact)
+
+                report = self.run_pass(home, policy(), free_bytes=0)
+
+                hf = report["cleaners"]["huggingface_cache"]
+                self.assertEqual(report["errors"], ["huggingface_cache:OSError"])
+                self.assertEqual(hf["eligible_items"], 0)
+                self.assertEqual(hf["deleted_items"], 0)
+                self.assertTrue(complete_revision.is_dir())
+                self.assertEqual(complete_blob.read_bytes(), b"x" * MIB)
+                if artifact_kind.endswith("symlink"):
+                    self.assertTrue(artifact.is_symlink())
+                    self.assertEqual(sentinel.read_bytes(), b"never mutate")
+                else:
+                    self.assertTrue(stat.S_ISFIFO(artifact.lstat().st_mode))
+
     def test_unsafe_required_directory_in_incomplete_repo_aborts_all_mutation(self) -> None:
         for required_kind in ("symlink", "fifo"):
             with self.subTest(required_kind), tempfile.TemporaryDirectory() as directory:
@@ -754,7 +858,6 @@ class DiskCleanupSafetyTests(unittest.TestCase):
     def test_reserved_incomplete_and_untracked_content_abort_the_entire_cache_pass(self) -> None:
         cases = {
             "work directory": lambda layout, old: (layout.repo / ".work").mkdir(),
-            "incomplete blob": lambda layout, old: (layout.repo / "blobs" / "download.incomplete").write_bytes(b"partial"),
             "untracked snapshot file": lambda layout, old: (old / "unknown.bin").write_bytes(b"unknown"),
             "untracked root": lambda layout, old: (layout.root / "attacker-data").write_bytes(b"unknown"),
         }

@@ -955,12 +955,17 @@ def _hf_scan_repo(
     blobs_fd = _hf_open_path(root_fd, repo_parts + ("blobs",))
     blobs: dict[tuple[str, ...], tuple[int, int, int, int, int, int]] = {}
     blob_sizes: dict[tuple[str, ...], int] = {}
+    has_incomplete_blob = False
     try:
         for entry in _hf_entries(blobs_fd, budget, deadline, report):
-            if entry.name.endswith(".incomplete") or entry.name == ".work":
-                raise OSError("incomplete blob data")
             info = entry.stat(follow_symlinks=False)
             _hf_check_info(info, root_info)
+            if entry.name.endswith(".incomplete") or entry.name == ".work":
+                expected_type = stat.S_ISDIR if entry.name == ".work" else stat.S_ISREG
+                if stat.S_ISLNK(info.st_mode) or not expected_type(info.st_mode):
+                    raise OSError("unsafe incomplete blob data")
+                has_incomplete_blob = True
+                continue
             if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
                 raise OSError("unsafe blob data")
             blobs[repo_parts + ("blobs", entry.name)] = _hf_identity(info)
@@ -969,6 +974,9 @@ def _hf_scan_repo(
             )
     finally:
         os.close(blobs_fd)
+    if has_incomplete_blob:
+        _skip(report["cleaners"]["huggingface_cache"], "incomplete_repository")
+        return []
     refs = _hf_scan_refs(root_fd, root_info, repo_parts, budget, deadline, report)
     snapshots_fd = _hf_open_path(root_fd, repo_parts + ("snapshots",))
     candidates: list[dict] = []
