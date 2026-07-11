@@ -1504,7 +1504,15 @@ def run_cleanup_once(
         before = _free_bytes(home)
         report["free_bytes_before"] = before
         report["free_bytes_after"] = before
-        report["pressure_active"] = before < policy.low_free_gb * _GIB
+        continuing_reclaim = (
+            previous_report.get("policy_digest") == digest
+            and previous_report.get("outcome") == "cap_reached"
+            and previous_report.get("pressure_active") is True
+            and before < policy.target_free_gb * _GIB
+        )
+        report["pressure_active"] = (
+            before < policy.low_free_gb * _GIB or continuing_reclaim
+        )
         if policy.mode == "off" or not report["pressure_active"]:
             report["outcome"] = "healthy_noop"
             report["last_success_at"] = _utc_now()

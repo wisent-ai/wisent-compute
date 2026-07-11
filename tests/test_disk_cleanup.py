@@ -185,6 +185,7 @@ class DiskCleanupSafetyTests(unittest.TestCase):
         cleanup_policy: DiskCleanupPolicy,
         *,
         free_bytes: object,
+        digest: str = "digest",
         active_slots: int = 0,
         force: bool = True,
     ) -> dict:
@@ -193,7 +194,7 @@ class DiskCleanupSafetyTests(unittest.TestCase):
             patch.object(
                 cleanup,
                 "resolve_canonical_policy",
-                return_value=(target(cleanup_policy), cleanup_policy, "digest"),
+                return_value=(target(cleanup_policy), cleanup_policy, digest),
             ),
             patch.object(
                 cleanup,
@@ -955,6 +956,173 @@ class DiskCleanupSafetyTests(unittest.TestCase):
         self.assertEqual(weles["deleted_items"], 0)
         self.assertEqual(weles["skipped"]["upload_proof_unavailable_v1"], 1)
         self.assertEqual(weles["skipped"]["reserved_or_hidden"], 3)
+
+    def test_persisted_pressure_continues_to_target_then_clears(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            layout = HfCacheLayout(home)
+            first_blob = layout.blob("a" * 64)
+            second_blob = layout.blob("b" * 64)
+            first_revision = layout.revision(
+                "1" * 40, {"weights.bin": first_blob}, modified=10
+            )
+            second_revision = layout.revision(
+                "2" * 40, {"weights.bin": second_blob}, modified=20
+            )
+
+            def free_bytes(_home: Path) -> int:
+                if first_revision.exists():
+                    return 9 * GIB
+                if second_revision.exists():
+                    return 11 * GIB
+                return 12 * GIB
+
+            capped_policy = policy(max_items_per_pass=1)
+            first = self.run_pass(home, capped_policy, free_bytes=free_bytes)
+            second = self.run_pass(home, capped_policy, free_bytes=free_bytes)
+            with patch.object(
+                cleanup,
+                "_run_hf",
+                side_effect=AssertionError("cleanup continued after reaching target"),
+            ):
+                third = self.run_pass(home, capped_policy, free_bytes=free_bytes)
+
+        self.assertEqual(first["outcome"], "cap_reached")
+        self.assertEqual(first["free_bytes_before"], 9 * GIB)
+        self.assertEqual(first["free_bytes_after"], 11 * GIB)
+        self.assertTrue(first["pressure_active"])
+        self.assertEqual(first["cleaners"]["huggingface_cache"]["deleted_items"], 1)
+        self.assertEqual(second["outcome"], "reclaimed_target")
+        self.assertEqual(second["free_bytes_before"], 11 * GIB)
+        self.assertEqual(second["free_bytes_after"], 12 * GIB)
+        self.assertTrue(second["pressure_active"])
+        self.assertEqual(second["cleaners"]["huggingface_cache"]["deleted_items"], 1)
+        self.assertEqual(third["outcome"], "healthy_noop")
+        self.assertEqual(third["free_bytes_before"], 12 * GIB)
+        self.assertFalse(third["pressure_active"])
+
+    def test_persisted_pressure_continuation_requires_every_guard(self) -> None:
+        cases = ("policy_digest", "prior_pressure", "off_mode", "target_reached")
+        for guard in cases:
+            with self.subTest(guard), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                layout = HfCacheLayout(home)
+                first_blob = layout.blob("a" * 64)
+                second_blob = layout.blob("b" * 64)
+                first_revision = layout.revision(
+                    "1" * 40, {"weights.bin": first_blob}, modified=10
+                )
+                second_revision = layout.revision(
+                    "2" * 40, {"weights.bin": second_blob}, modified=20
+                )
+                capped_policy = policy(max_items_per_pass=1)
+
+                if guard == "prior_pressure":
+                    prior = self.run_pass(home, capped_policy, free_bytes=11 * GIB)
+                    self.assertFalse(prior["pressure_active"])
+                else:
+                    def seed_free_bytes(_home: Path) -> int:
+                        return 9 * GIB if first_revision.exists() else 11 * GIB
+
+                    prior = self.run_pass(
+                        home,
+                        capped_policy,
+                        free_bytes=seed_free_bytes,
+                    )
+                    self.assertEqual(prior["outcome"], "cap_reached")
+                    self.assertTrue(prior["pressure_active"])
+
+                next_policy = policy(mode="off") if guard == "off_mode" else capped_policy
+                next_digest = "replacement-digest" if guard == "policy_digest" else "digest"
+                next_free_bytes = 12 * GIB if guard == "target_reached" else 11 * GIB
+                with patch.object(
+                    cleanup,
+                    "_run_hf",
+                    side_effect=AssertionError(f"cleanup bypassed {guard} guard"),
+                ):
+                    current = self.run_pass(
+                        home,
+                        next_policy,
+                        free_bytes=next_free_bytes,
+                        digest=next_digest,
+                    )
+
+                self.assertEqual(current["outcome"], "healthy_noop")
+                self.assertEqual(
+                    current["cleaners"]["huggingface_cache"]["deleted_items"], 0
+                )
+                self.assertTrue(second_revision.is_dir())
+                self.assertTrue(second_blob.is_file())
+
+    def test_non_capped_outcomes_never_resume_persisted_pressure(self) -> None:
+        outcomes = (
+            "no_eligible_items",
+            "report_only",
+            "blocked_active",
+            "partial_error",
+            "reclaimed_target",
+        )
+        for prior_outcome in outcomes:
+            with self.subTest(prior_outcome), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve()
+                layout = HfCacheLayout(home)
+                candidate_blob: Path | None = None
+                candidate_revision: Path | None = None
+                if prior_outcome != "no_eligible_items":
+                    candidate_blob = layout.blob("a" * 64)
+                    candidate_revision = layout.revision(
+                        "1" * 40, {"weights.bin": candidate_blob}, modified=0
+                    )
+
+                unsafe_root = layout.root / "attacker-data"
+                if prior_outcome == "partial_error":
+                    unsafe_root.write_bytes(b"untracked")
+
+                def prior_free_bytes(_home: Path) -> int:
+                    if prior_outcome == "reclaimed_target" and not candidate_revision.exists():
+                        return 12 * GIB
+                    return 9 * GIB
+
+                prior_policy = (
+                    policy(mode="report")
+                    if prior_outcome == "report_only"
+                    else policy()
+                )
+                prior = self.run_pass(
+                    home,
+                    prior_policy,
+                    free_bytes=prior_free_bytes,
+                    active_slots=1 if prior_outcome == "blocked_active" else 0,
+                )
+                self.assertEqual(prior["outcome"], prior_outcome)
+                self.assertTrue(prior["pressure_active"])
+
+                if unsafe_root.exists():
+                    unsafe_root.unlink()
+                if prior_outcome in {"no_eligible_items", "reclaimed_target"}:
+                    digest = "b" * 64 if prior_outcome == "reclaimed_target" else "a" * 64
+                    candidate_blob = layout.blob(digest)
+                    candidate_revision = layout.revision(
+                        "2" * 40, {"weights.bin": candidate_blob}, modified=0
+                    )
+
+                with patch.object(
+                    cleanup,
+                    "_run_hf",
+                    side_effect=AssertionError(
+                        f"cleanup resumed after {prior_outcome}"
+                    ),
+                ):
+                    current = self.run_pass(
+                        home,
+                        policy(),
+                        free_bytes=11 * GIB,
+                    )
+
+                self.assertEqual(current["outcome"], "healthy_noop")
+                self.assertFalse(current["pressure_active"])
+                self.assertTrue(candidate_revision.is_dir())
+                self.assertTrue(candidate_blob.is_file())
 
     def test_recent_state_suppresses_repeat_cleanup_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
