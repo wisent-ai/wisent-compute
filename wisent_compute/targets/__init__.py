@@ -18,6 +18,13 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from .validation import normalize_hostname, ssh_hostname
+
+
+@dataclass(frozen=True)
+class WelesPolicy:
+    enabled: bool
+    actions: list[str]
 
 REGISTRY_PATH = Path(__file__).parent / "registry.json"
 GCS_REGISTRY_URI = "gs://wisent-compute/registry.json"
@@ -37,6 +44,8 @@ class ComputeTarget:
     max_concurrent: Optional[int] = None
     team_id: Optional[int] = None
     notes: str = ""
+    hostnames: list[str] = field(default_factory=list)
+    weles: Optional[WelesPolicy] = None
     # env_overrides and agent_args propagate via the GCS registry to running
     # agents — the agent compares them every poll and exits-for-restart when
     # they change, so systemd brings it back up with the new env / CLI flags.
@@ -52,10 +61,19 @@ class ComputeTarget:
 def _from_dict(d: dict) -> ComputeTarget:
     known = {
         "name", "kind", "gpu_type", "slots", "ssh", "region",
-        "spot", "max_concurrent", "team_id", "notes",
+        "spot", "max_concurrent", "team_id", "notes", "hostnames", "weles",
         "env_overrides", "agent_args", "vram_gb",
     }
     extra = {k: v for k, v in d.items() if k not in known}
+    weles_data = d.get("weles")
+    weles = (
+        WelesPolicy(
+            enabled=weles_data["enabled"],
+            actions=list(weles_data["actions"]),
+        )
+        if isinstance(weles_data, dict)
+        else None
+    )
     return ComputeTarget(
         name=d["name"],
         kind=d["kind"],
@@ -67,6 +85,8 @@ def _from_dict(d: dict) -> ComputeTarget:
         max_concurrent=d.get("max_concurrent"),
         team_id=d.get("team_id"),
         notes=d.get("notes", ""),
+        hostnames=list(d.get("hostnames") or []),
+        weles=weles,
         env_overrides=dict(d.get("env_overrides") or {}),
         agent_args=list(d.get("agent_args") or []),
         vram_gb=d.get("vram_gb"),
@@ -208,15 +228,26 @@ def lookup_coordinator(name: str, source: str = "auto") -> Optional[Coordinator]
 
 
 def lookup_self(hostname: str, source: str = "gcs") -> Optional[ComputeTarget]:
-    """Find the registry entry whose ssh ends in @<hostname> or whose name == hostname.
+    """Find the unique target declaring the normalized host identity.
 
-    Used by `wc agent --auto`: the box knows its own hostname; the registry
-    is the source of truth for slots/gpu_type/kind. GCS-first by default so
-    a registry edit takes effect without re-installing the package on the box.
+    Names, explicit hostname aliases, and the host part of legacy SSH
+    destinations are identities. Ambiguous registry data is rejected rather
+    than allowing target order to decide which configuration a host receives.
     """
-    for t in load_targets(source=source):
-        if t.name == hostname:
-            return t
-        if t.ssh and "@" in t.ssh and t.ssh.split("@", 1)[1] == hostname:
-            return t
-    return None
+    identity = normalize_hostname(hostname)
+    if not identity:
+        return None
+
+    matches: list[ComputeTarget] = []
+    for target in load_targets(source=source):
+        target_identities = {normalize_hostname(target.name)}
+        target_identities.update(normalize_hostname(alias) for alias in target.hostnames)
+        if target.ssh:
+            target_identities.add(ssh_hostname(target.ssh))
+        if identity in target_identities:
+            matches.append(target)
+
+    if len(matches) > 1:
+        names = ", ".join(sorted(target.name for target in matches))
+        raise ValueError(f"hostname {identity!r} matches multiple registry targets: {names}")
+    return matches[0] if matches else None

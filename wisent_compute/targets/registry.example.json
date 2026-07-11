@@ -1,8 +1,14 @@
 {
+  "schema_version": 2,
   "targets": [
     {
       "name": "rtx-pro-6000-workstation",
       "kind": "local",
+      "hostnames": ["ubuntu-server"],
+      "weles": {
+        "enabled": true,
+        "actions": ["linkedin_register"]
+      },
       "ssh": "root@198.51.100.10",
       "gpu_type": "nvidia-tesla-t4",
       "slots": 0,
@@ -13,20 +19,6 @@
       },
       "agent_args": ["--gpu-type", "nvidia-tesla-t4"],
       "notes": "ubuntu-server LAN host (RTX PRO 6000 Blackwell, 96GB). slots=0 means no hard concurrency cap; admission is purely VRAM-based (sum of in-flight job.gpu_mem_gb <= vram_gb). gpu_type=nvidia-tesla-t4 is the SKU label the agent uses for its broadcast; the scheduler yields any job whose gpu_mem_gb fits, regardless of label."
-    },
-    {
-      "name": "ubuntu-server",
-      "kind": "local",
-      "ssh": "root@198.51.100.10",
-      "gpu_type": "nvidia-tesla-t4",
-      "slots": 0,
-      "vram_gb": 96,
-      "env_overrides": {
-        "WC_LOCAL_SLOTS": "0",
-        "WISENT_DTYPE": "auto"
-      },
-      "agent_args": ["--gpu-type", "nvidia-tesla-t4"],
-      "notes": "Alias matching the actual hostname so wc agent --auto resolves on the box itself; same target as rtx-pro-6000-workstation."
     },
     {
       "name": "gcp-spot-t4",

@@ -1144,6 +1144,20 @@ def registry():
     """Manage the canonical compute-target registry hosted in GCS."""
 
 
+@registry.command("validate")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False), required=False)
+def registry_validate(path):
+    """Validate a local registry-v2 JSON document."""
+    from .targets import REGISTRY_PATH
+    from .targets.validation import RegistryValidationError, validate_registry_file
+    src = path or str(REGISTRY_PATH)
+    try:
+        validate_registry_file(src)
+    except RegistryValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"valid registry: {src}")
+
+
 @registry.command("push")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False), required=False)
 def registry_push(path):
@@ -1151,6 +1165,11 @@ def registry_push(path):
     import shutil, subprocess
     from .targets import REGISTRY_PATH, GCS_REGISTRY_URI
     src = path or str(REGISTRY_PATH)
+    from .targets.validation import RegistryValidationError, validate_registry_file
+    try:
+        validate_registry_file(src)
+    except RegistryValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
     gsutil = shutil.which("gsutil") or "gsutil"
     r = subprocess.run([gsutil, "cp", src, GCS_REGISTRY_URI], capture_output=True, text=True)
     if r.returncode != 0:
