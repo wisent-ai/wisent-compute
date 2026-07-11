@@ -16,6 +16,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -23,6 +24,12 @@ LABEL_PREFIX = "com.wisent.compute"
 
 
 def _wc_bin() -> str:
+    invoked = Path(sys.argv[0]).resolve()
+    if invoked.name == "wc" and invoked.is_file() and str(invoked) != "/usr/bin/wc":
+        return str(invoked)
+    sibling = Path(sys.executable).resolve().with_name("wc")
+    if sibling.is_file() and str(sibling) != "/usr/bin/wc":
+        return str(sibling)
     found = shutil.which("wc")
     if found and found != "/usr/bin/wc":
         return found
