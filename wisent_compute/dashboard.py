@@ -1,24 +1,23 @@
-"""Read-only HTTP dashboard for the wisent-compute queue.
-
-Renders one HTML page covering queue counts, per-model breakdown, live
-agent capacity, recent failures, and a throughput-based completion
-projection. Exposed via the wc dashboard CLI command; in production runs
-as the com.wisent.compute.dashboard LaunchAgent on the mac mini.
+"""HTTP operator dashboard for the wisent-compute queue and disk cleanup.
 
 GET /                  - HTML overview (auto-refresh)
-GET /api/state.json    - same data as JSON
+GET /api/state.json    - queue dashboard data as JSON
+GET /api/cleanup.json  - sanitized current cleanup state
+POST /api/cleanup/run  - one parameterless registry-controlled cleanup pass
 
-Summary/parsing helpers live in dashboard_summary/. This module holds
-the HTTP plumbing, refresh loop, and HTML rendering only.
+Summary and rendering helpers live in dashboard_summary/. This module holds
+only the HTTP plumbing and refresh loop.
 """
 from __future__ import annotations
 
+from ipaddress import ip_address
 import json
 import sys
 import threading
 import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlsplit
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .config import (
@@ -28,110 +27,15 @@ from .config import (
     DASHBOARD_REFRESH_SECONDS,
 )
 from .dashboard_summary import _fast_counts, _summarize
+from .dashboard_summary.web_view import cleanup_envelope, render_html
+from .providers.local.disk import (
+    read_cleanup_state,
+    run_cleanup_once,
+    sanitize_cleanup_report,
+)
 from .queue.storage import JobStorage
 
 
-def _format_age(s: float | None) -> str:
-    if s is None:
-        return "?"
-    if s < 60:
-        return f"{int(s)}s"
-    if s < 3600:
-        return f"{int(s/60)}m{int(s%60)}s"
-    return f"{int(s/3600)}h{int((s%3600)/60)}m"
-
-
-def _render_html(state: dict[str, Any]) -> str:
-    refresh = DASHBOARD_REFRESH_SECONDS
-    counts = state["counts"]
-    th = state["throughput"]
-    avg = th.get("avg_wall_seconds_per_completed_job")
-    proj = th.get("projected_remaining_seconds")
-
-    rows_models = []
-    for model, st in sorted(state["by_model_state"].items(),
-                            key=lambda kv: -sum(kv[1].values())):
-        rows_models.append(
-            f"<tr><td>{model}</td><td>{st['queue']}</td>"
-            f"<td>{st['running']}</td><td>{st['completed']}</td>"
-            f"<td>{st['failed']}</td></tr>")
-    rows_live_agents = []
-    for a in state["live_agents"]:
-        slots = ", ".join(f"{k}:{v}" for k, v in a["free_slots"].items())
-        rows_live_agents.append(
-            f"<tr><td>{a['consumer_id']}</td><td>{a['kind']}</td>"
-            f"<td>{slots}</td>"
-            f"<td>{a.get('free_vram_gb','?')}/"
-            f"{a.get('total_vram_gb','?')}</td>"
-            f"<td>{_format_age(a.get('age_seconds'))} ago</td></tr>")
-    rows_recent_failed = []
-    for r in state["recent_failed"]:
-        rows_recent_failed.append(
-            f"<tr><td>{r['job_id']}</td><td>{r['model']}</td>"
-            f"<td>{r['task']}</td><td>{r['error']}</td></tr>")
-    rows_recent_completed = []
-    for r in state["completed_recent"]:
-        wall = _format_age(r.get("wall_seconds"))
-        rows_recent_completed.append(
-            f"<tr><td>{r['job_id']}</td><td>{r['model']}</td>"
-            f"<td>{r['task']}</td><td>{wall}</td>"
-            f"<td>{r.get('completed_at') or '?'}</td></tr>")
-
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="{refresh}">
-<title>wisent-compute dashboard</title>
-<style>
-body{{font-family:-apple-system,system-ui,sans-serif;margin:1em;color:#222}}
-h2{{margin-top:1.2em;border-bottom:1px solid #ddd;padding-bottom:.3em}}
-table{{border-collapse:collapse;font-size:13px;margin:.4em 0}}
-th,td{{border:1px solid #ddd;padding:4px 8px;text-align:left;vertical-align:top}}
-th{{background:#f5f5f5}}
-.big{{font-size:24px;font-weight:600}}
-.muted{{color:#666;font-size:12px}}
-.warn{{color:#a00}}
-</style></head><body>
-<h1>wisent-compute</h1>
-<div class="muted">bucket gs://{state['bucket']}/ &middot; refreshed every {refresh}s &middot; now {state['now']}</div>
-
-<h2>queue</h2>
-<div class="big">
-queued <strong>{counts.get('queue',0)}</strong> &nbsp;
-running <strong>{counts.get('running',0)}</strong> &nbsp;
-completed <strong>{counts.get('completed',0)}</strong> &nbsp;
-failed <strong>{counts.get('failed',0)}</strong>
-</div>
-
-<h2>throughput &amp; ETA</h2>
-<div>avg wall per completed job: <strong>{_format_age(avg)}</strong>
-({th.get('samples',0)} samples)</div>
-<div>live free slots across all agents: <strong>{th.get('live_total_free_slots',0)}</strong></div>
-<div>projected drain of current queue: <strong>{_format_age(proj)}</strong></div>
-
-<h2>per model</h2>
-<table><tr><th>model</th><th>queued</th><th>running</th>
-<th>completed</th><th>failed</th></tr>
-{''.join(rows_models) or '<tr><td colspan=5 class=muted>no jobs</td></tr>'}
-</table>
-
-<h2>live agents</h2>
-<table><tr><th>consumer_id</th><th>kind</th><th>free_slots</th>
-<th>free/total vram (GB)</th><th>last heartbeat</th></tr>
-{''.join(rows_live_agents) or '<tr><td colspan=5 class=warn>no live agents</td></tr>'}
-</table>
-<div class="muted">stale agents (heartbeat older than threshold): {len(state['stale_agents'])}</div>
-
-<h2>recent failed</h2>
-<table><tr><th>job_id</th><th>model</th><th>task</th><th>error</th></tr>
-{''.join(rows_recent_failed) or '<tr><td colspan=4 class=muted>none recent</td></tr>'}
-</table>
-
-<h2>recent completed</h2>
-<table><tr><th>job_id</th><th>model</th><th>task</th>
-<th>wall</th><th>completed_at</th></tr>
-{''.join(rows_recent_completed) or '<tr><td colspan=5 class=muted>none recent</td></tr>'}
-</table>
-</body></html>"""
 
 
 # Background refresh state — populated by a daemon thread and read by
@@ -184,24 +88,54 @@ def _refresh_loop(interval: int) -> None:
         time.sleep(interval)
 
 
+
+
+def _trusted_request_host(value: str | None) -> bool:
+    """Require a direct IP Host header to prevent DNS rebinding."""
+    if not value:
+        return False
+    try:
+        parsed = urlsplit(f"//{value}")
+        host = parsed.hostname
+        _ = parsed.port
+        if not host or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+            return False
+        ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 class _Handler(BaseHTTPRequestHandler):
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":")).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _cleanup_failure(self, status: int = 500) -> None:
+        report = sanitize_cleanup_report({"outcome": "invalid_or_unavailable_policy"})
+        self._send_json(status, {"ok": False, "service": "error", "report": report})
+
     def do_GET(self):  # noqa: N802 (stdlib API)
-        # HTTP 500 on internal error is the documented error contract for
-        # an HTTP handler; this except surfaces the failure to the client
-        # rather than hanging the connection.
+        if not _trusted_request_host(self.headers.get("Host")):
+            self._cleanup_failure(403)
+            return
         try:
             with _CACHE_LOCK:
                 state = dict(_CACHE_STATE)
             if self.path == "/api/state.json":
-                body = json.dumps(state, default=str).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(200, state)
+                return
+            if self.path == "/api/cleanup.json":
+                payload = cleanup_envelope(read_cleanup_state())
+                self._send_json(409 if payload["service"] == "busy" else 200, payload)
                 return
             if self.path in ("/", "/index.html"):
-                body = _render_html(state).encode()
+                cleanup = cleanup_envelope(read_cleanup_state())
+                body = render_html(state, cleanup, DASHBOARD_REFRESH_SECONDS).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -210,13 +144,45 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self.send_response(404)
             self.end_headers()
-        except Exception as exc:
-            body = f"dashboard error: {exc!r}".encode()
+        except Exception:
+            if self.path == "/api/cleanup.json":
+                self._cleanup_failure()
+                return
+            body = b"dashboard error"
             self.send_response(500)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+    def do_POST(self):  # noqa: N802 (stdlib API)
+        if not _trusted_request_host(self.headers.get("Host")):
+            self._cleanup_failure(403)
+            return
+        if self.path != "/api/cleanup/run":
+            if self.path.partition("?")[0] == "/api/cleanup/run":
+                self._cleanup_failure(400)
+            else:
+                self.send_response(404)
+                self.end_headers()
+            return
+        try:
+            if self.headers.get("X-Stado-Action") != "cleanup":
+                self._cleanup_failure(403)
+                return
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                self._cleanup_failure(400)
+                return
+            if content_length != 0 or self.headers.get("Transfer-Encoding"):
+                self._cleanup_failure(400)
+                return
+            report = sanitize_cleanup_report(run_cleanup_once(active_slot_count=0, force=True))
+            payload = cleanup_envelope(report)
+            self._send_json(409 if payload["service"] == "busy" else 200, payload)
+        except Exception:
+            self._cleanup_failure()
 
     def log_message(self, fmt, *args):  # noqa: N802
         sys.stderr.write("[dashboard] " + (fmt % args) + "\n")
@@ -230,7 +196,7 @@ def serve(host: str | None = None, port: int | None = None) -> None:
         target=_refresh_loop, args=(DASHBOARD_REFRESH_SECONDS,),
         daemon=True, name="dashboard-refresh")
     refresher.start()
-    server = HTTPServer((h, p), _Handler)
+    server = ThreadingHTTPServer((h, p), _Handler)
     sys.stderr.write(f"[dashboard] listening on http://{h}:{p}\n")
     sys.stderr.flush()
     server.serve_forever()

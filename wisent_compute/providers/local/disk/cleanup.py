@@ -250,6 +250,140 @@ def _read_state(state_dir: Path) -> dict:
         os.close(fd)
 
 
+_PUBLIC_OUTCOMES = {
+    "never_run",
+    "invalid_or_unavailable_policy",
+    "lock_busy",
+    "interval_noop",
+    "healthy_noop",
+    "report_only",
+    "blocked_active",
+    "reclaimed_target",
+    "cap_reached",
+    "partial_error",
+    "no_eligible_items",
+}
+_PUBLIC_SKIP_REASONS = {
+    "active_slots",
+    "blob_link_count_uncertain",
+    "byte_cap",
+    "cache_locked",
+    "incomplete_repository",
+    "lock_root_absent",
+    "not_run_directory",
+    "reserved_or_hidden",
+    "root_absent",
+    "root_changed",
+    "scan_cap",
+    "scan_deadline",
+    "stat_failed",
+    "too_young",
+    "unsafe_owner_or_device",
+    "upload_proof_unavailable_v1",
+}
+
+
+def _public_nonnegative(value: object) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return max(0, value)
+
+
+def _public_cleaner(value: object) -> dict:
+    source = value if isinstance(value, dict) else {}
+    skipped_source = source.get("skipped")
+    skipped = {}
+    if isinstance(skipped_source, dict):
+        for reason in sorted(_PUBLIC_SKIP_REASONS):
+            count = _public_nonnegative(skipped_source.get(reason))
+            if count:
+                skipped[reason] = count
+    return {
+        "scanned_items": _public_nonnegative(source.get("scanned_items")) or 0,
+        "eligible_items": _public_nonnegative(source.get("eligible_items")) or 0,
+        "deleted_items": _public_nonnegative(source.get("deleted_items")) or 0,
+        "expected_bytes": _public_nonnegative(source.get("expected_bytes")) or 0,
+        "actual_free_delta_bytes": _public_nonnegative(source.get("actual_free_delta_bytes")) or 0,
+        "skipped": skipped,
+    }
+
+
+def _public_timestamp(value: object) -> Optional[str]:
+    if not isinstance(value, str) or len(value) > 48:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.isoformat()
+
+
+def _sanitize_report(value: object, *, lock_busy: bool = False) -> dict:
+    """Return the stable public report without host, path, or policy identity data."""
+    source = value if isinstance(value, dict) else {}
+    cleaners = source.get("cleaners") if isinstance(source.get("cleaners"), dict) else {}
+    caps = source.get("caps") if isinstance(source.get("caps"), dict) else {}
+    errors = source.get("errors") if isinstance(source.get("errors"), list) else []
+    safe_errors = []
+    for item in errors[:_MAX_ERRORS]:
+        if isinstance(item, str) and 1 <= len(item) <= 128:
+            area, separator, code = item.partition(":")
+            if (separator and area.replace("_", "").isalnum()
+                    and code.replace("_", "").isalnum()):
+                safe_errors.append(item)
+    outcome = source.get("outcome")
+    if lock_busy:
+        outcome = "lock_busy"
+    elif outcome not in _PUBLIC_OUTCOMES:
+        outcome = "never_run"
+    mode = source.get("mode") if source.get("mode") in {"off", "report", "enforce"} else None
+    return {
+        "version": _STATE_VERSION,
+        "mode": mode,
+        "check_interval_seconds": _public_nonnegative(source.get("check_interval_seconds")),
+        "started_at": _public_timestamp(source.get("started_at")),
+        "duration_ms": _public_nonnegative(source.get("duration_ms")) or 0,
+        "outcome": outcome,
+        "free_bytes_before": _public_nonnegative(source.get("free_bytes_before")),
+        "free_bytes_after": _public_nonnegative(source.get("free_bytes_after")),
+        "low_bytes": _public_nonnegative(source.get("low_bytes")),
+        "target_bytes": _public_nonnegative(source.get("target_bytes")),
+        "pressure_active": source.get("pressure_active") if isinstance(source.get("pressure_active"), bool) else None,
+        "cleaners": {
+            "huggingface_cache": _public_cleaner(cleaners.get("huggingface_cache")),
+            "weles_recordings": _public_cleaner(cleaners.get("weles_recordings")),
+        },
+        "caps": {name: caps.get(name) is True for name in ("bytes", "items", "scan", "deadline")},
+        "lock_busy": lock_busy or source.get("lock_busy") is True,
+        "active_slot_count": _public_nonnegative(source.get("active_slot_count")) or 0,
+        "last_success_at": _public_timestamp(source.get("last_success_at")),
+        "errors": safe_errors,
+    }
+
+
+def sanitize_cleanup_report(report: object) -> dict:
+    """Return the path- and identity-free public form of a cleanup report."""
+    return _sanitize_report(report)
+
+
+def read_cleanup_state() -> dict:
+    """Read the owner-controlled state under a shared, no-follow-safe lock."""
+    home = _secure_home()
+    state_dir = _ensure_state_dir(home)
+    lock_fd = _open_lock(state_dir)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                return _sanitize_report({}, lock_busy=True)
+            raise
+        state = _read_state(state_dir)
+        return _sanitize_report(state.get("report"))
+    finally:
+        os.close(lock_fd)
+
+
 def _write_state(state_dir: Path, report: dict, attempted_at: float) -> None:
     destination = state_dir / _STATE_NAME
     try:
