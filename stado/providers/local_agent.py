@@ -59,6 +59,14 @@ def _effective_registry_vram(physical_vram_gb: int, registry_vram_gb: int) -> in
     return min(physical_vram_gb, registry_vram_gb)
 
 
+def _claim_search_vram_limit(slots: list[dict], total_vram_gb: int,
+                             free_vram_gb: int) -> int:
+    """Include the nominal full-device tier despite small driver overhead."""
+    if not slots and free_vram_gb >= total_vram_gb - IDLE_DEVICE_OVERHEAD_GB:
+        return total_vram_gb
+    return free_vram_gb
+
+
 def _is_full_device_claim(slots: list[dict], need: int,
                           total_vram_gb: int, free_vram_gb: int) -> bool:
     return (not slots and need == total_vram_gb
@@ -375,7 +383,12 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         # _job_eligible(consumer_id=...) below filters to ONLY the jobs this
         # agent owns. The coordinator's makespan matcher already made the
         # choice; this loop executes it.
-        queued = store.list_jobs_fitting("queue", max_gpu_mem_gb=free_vram_gb, cap=2000)
+        queued = store.list_jobs_fitting(
+            "queue",
+            max_gpu_mem_gb=_claim_search_vram_limit(
+                slots, total_vram_gb, free_vram_gb),
+            cap=2000,
+        )
         queued.sort(key=lambda j: (-getattr(j, "priority", 0), j.created_at))
         started = 0
         diag_vram_rejected = 0
