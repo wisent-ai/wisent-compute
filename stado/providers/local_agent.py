@@ -269,12 +269,17 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             except Exception:
                 pass
         if time.time() - last_fleet_flush > FLEET_FLUSH_INTERVAL or _staging_size_gb(fleet_staging) > 5:
-            from wisent.core.reading.modules.utilities.data.sources.hf.hf_writers import flush_staging_dir
-            if os.path.isdir(fleet_staging) and any(os.scandir(fleet_staging)):
-                flush_staging_dir(fleet_staging)
-                shutil.rmtree(fleet_staging)
-                os.makedirs(fleet_staging, exist_ok=True)
-                _log("flushed fleet staging dir to HF (1 commit)")
+            try:
+                if os.path.isdir(fleet_staging) and any(os.scandir(fleet_staging)):
+                    from wisent.core.reading.modules.utilities.data.sources.hf.hf_writers import flush_staging_dir
+                    flush_staging_dir(fleet_staging)
+                    shutil.rmtree(fleet_staging)
+                    os.makedirs(fleet_staging, exist_ok=True)
+                    _log("flushed fleet staging dir to HF (1 commit)")
+            except Exception as exc:
+                # Stado must remain alive when a job's editable checkout changes
+                # Wisent internals or an optional HF staging flush fails.
+                _log(f"optional fleet staging flush skipped: {exc}")
             last_fleet_flush = time.time()
         t = lookup_self(hostname, source="auto")
         if t and t.kind == "local":

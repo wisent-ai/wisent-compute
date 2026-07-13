@@ -57,7 +57,7 @@ _WC_LOG_SHIPPER_PID=$!
 # (wisent-agent family, built via deploy/bake_agent_image.sh), skip the
 # install path entirely. Otherwise fall through to the legacy install path
 # so VMs running on the deeplearning-platform-release base still work.
-if [ ! -x /opt/wisent-agent/.venv/bin/wc ]; then
+if [ ! -x /opt/wisent-agent/.venv/bin/stado ]; then
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
         echo "Waiting for apt lock..."
     done
