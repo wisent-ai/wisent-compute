@@ -14,7 +14,7 @@
 set -u
 
 PROJECT="wisent-480400"
-BUCKET="wisent-compute"
+BUCKET="stado"
 HOST_SLUG=$(/bin/hostname -s 2>/dev/null | /usr/bin/tr '[:upper:]' '[:lower:]')
 ADC_PATH="${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/application_default_credentials.json}"
 # The macOS gcloud CLI tries to write OAuth tokens to the user keychain

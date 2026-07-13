@@ -1,0 +1,240 @@
+"""Agent-mode VM dispatch.
+
+For each (accel, machine_type) bucket of queued work that isn't already
+yielded to a local consumer, launch enough agent VMs to fill remaining
+quota — but no more than the bucket's job count. Each VM runs
+`wc agent --idle-shutdown`, polls the queue, packs jobs by nvidia-smi
+VRAM, and self-terminates when no eligible queued job remains.
+
+Replaces the legacy 1-VM-per-job dispatch path. VRAM (read live from the
+hardware) is the only admission constant; there is no per-VM slot count.
+"""
+from __future__ import annotations
+
+import time
+from datetime import datetime
+from pathlib import Path
+
+from ...config import INSTANCE_PREFIX
+from ...models import GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
+from ...providers.base import Provider
+from ...sizing import (
+    _model_of,
+    observed_vram_gb,
+    smallest_live_vram,
+)
+
+
+_TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
+# Per-provider agent startup-script templates. Each launches `wc agent
+# --kind <provider> --gpu-type <accel> --idle-shutdown` after installing
+# wisent-compute, but with provider-specific bootstrap (gsutil vs azcopy,
+# managed identity vs SA JSON, etc.).
+_TEMPLATES_BY_PROVIDER = {
+    "gcp": "startup_gpu_agent.sh",
+    "azure": "startup_gpu_agent_azure.sh",
+}
+
+
+def _accel_hourly_rate(accel: str, preemptible: bool) -> float:
+    base = GPU_HOURLY_RATE_USD.get(accel, 0.0)
+    if not preemptible:
+        return base
+    return base * SPOT_DISCOUNT.get(accel, 0.5)
+
+
+def dispatch_agent_vms(
+    *,
+    queued: list,
+    yield_targets: dict,
+    available: dict,
+    accel_dispatched: dict,
+    per_accel_share: int,
+    per_tick_cap: int,
+    scheduled_so_far: int,
+    provider: Provider,
+    provider_name: str,
+    bucket_name: str,
+    secrets: dict,
+    backoff_due,
+    log_fn,
+    now_utc: datetime,
+) -> int:
+    """Group queued jobs by (accel, machine_type) and launch agent VMs.
+
+    Returns the number of agent VMs created. Mutates `available` and
+    `accel_dispatched` in-place so the caller's per-tick budgets stay
+    consistent with cloud reality.
+    """
+    if not bucket_name:
+        raise ValueError("bucket_name must be non-empty")
+    template_name = _TEMPLATES_BY_PROVIDER.get(provider_name, "startup_gpu_agent.sh")
+    template = (_TEMPLATES_DIR / template_name).read_text()
+
+    # Bucket key is (accel, mt). Default: derive from current GPU_SIZING
+    # via lookup_instance_type — protects against stale job-level machine
+    # specs (e.g. a2-highgpu-2g + nvidia-tesla-a100 for 60GB jobs that GCP
+    # rejects with 'Invalid accelerator specs for accelerator optimized
+    # instances'). Override: caller-pinned job.machine_type wins so users
+    # who need a specific host (g2-standard-8 for 32 GB RAM on an L4 job)
+    # don't get silently downgraded back to the default-tier g2-standard-4
+    # (16 GB RAM, repeated host-OOM source for diffusion training).
+    from ...config import lookup_instance_type
+    buckets: dict[tuple[str, str], list] = {}
+    for j in queued:
+        if getattr(j, "pin_to_provider", False) and j.provider != provider_name:
+            continue
+        if j.job_id in yield_targets:
+            continue
+        if not backoff_due(j, now_utc):
+            continue
+        gpu_mem = int(getattr(j, "gpu_mem_gb", 0) or 0)
+        if gpu_mem <= 0:
+            # Unmeasured on the queue blob — normalize_queue_sizing forces
+            # gpu_mem_gb=0 whenever observed_vram_gb(model) is None at sizing
+            # time (sizing/__init__.py docstring). Previously this branch
+            # was a hard `continue`, which combined with the always-write-0
+            # behaviour to lock the entire unmeasured-model queue out of
+            # the autoscaler (199 gpt-oss-20b jobs stuck at gpu_mem_gb=0
+            # observed live 2026-05-20). Recover by:
+            #   1. Re-checking observed_vram_gb (a sibling job of the same
+            #      model may have just completed and populated the map),
+            #   2. Falling back to smallest_live_vram() — the documented
+            #      start size for unmeasured models (see escalate_on_oom).
+            #      If the job overflows that tier, escalate_on_oom climbs
+            #      to next_live_vram on requeue.
+            # If neither yields a number, the fleet has no live GPU
+            # broadcasting at all and the job is genuinely unschedulable
+            # this tick; defer to the next.
+            model = _model_of(getattr(j, "command", "") or "")
+            peak = observed_vram_gb(model) if model else None
+            if isinstance(peak, int) and peak > 0:
+                gpu_mem = peak
+            else:
+                live_small = smallest_live_vram()
+                if live_small is None:
+                    continue
+                gpu_mem = live_small
+        default_mt, default_accel = lookup_instance_type(provider_name, gpu_mem)
+        if not (default_accel and default_mt):
+            continue
+        # Caller-pinned overrides — fall back to catalog if either is empty.
+        mt = (getattr(j, "machine_type", "") or default_mt).strip() or default_mt
+        accel = (getattr(j, "gpu_type", "") or default_accel).strip() or default_accel
+        cap = getattr(j, "max_cost_per_hour_usd", 0.0) or 0.0
+        if cap > 0 and accel:
+            preempt = getattr(j, "preemptible", False)
+            rate = _accel_hourly_rate(accel, preempt)
+            if rate > 0 and rate > cap:
+                continue
+        buckets.setdefault((accel, mt), []).append(j)
+
+    tick_tag = str(int(time.time()))
+    created = 0
+    scheduled = scheduled_so_far
+    # Time budget: each create_instance can spend ~10s/zone × 7+ zones for
+    # first-encounter stockouts, plus a full retry on the larger tier in
+    # the escalation branch. With n_to_dispatch=2-3 per bucket, the
+    # autoscaler can easily eat 300+ seconds — confirmed live 03:39Z
+    # 2026-05-15 tick 504'd at 540s. Bail out after 120s in the
+    # dispatcher and let the next tick try again (caches will be warm).
+    _DISPATCH_BUDGET_S = 120
+    _start = time.time()
+    for (accel, mt), jobs in buckets.items():
+        if scheduled >= per_tick_cap:
+            break
+        if (time.time() - _start) > _DISPATCH_BUDGET_S:
+            log_fn(f"dispatch budget exhausted after {scheduled} scheduled; deferring remaining buckets to next tick")
+            break
+        quota_left = available.get(accel, 0)
+        if quota_left <= 0:
+            log_fn(f"Skip bucket accel={accel} machine={mt}: 0 quota slots")
+            continue
+        share_left = per_accel_share - accel_dispatched.get(accel, 0)
+        if share_left <= 0:
+            continue
+        n_to_dispatch = min(len(jobs), quota_left, share_left,
+                            per_tick_cap - scheduled)
+        biggest = max(jobs, key=lambda j: int(getattr(j, "gpu_mem_gb", 0) or 0))
+        # No-preemptible policy: per user instruction (2026-05-06), this
+        # codebase is NOT to dispatch Spot/preemptible VMs even when the
+        # job's `preemptible` field is True. Repeated Spot reclaims of
+        # A100-80 capacity in us-central1 caused 8 cloud-agent VMs to be
+        # deleted under instance_termination_action=DELETE in a single
+        # 3-second window (22:21:10-13Z), forcing requeues that burned
+        # restart-budget on misclassified jobs (since fixed in 0.4.55,
+        # but the underlying preemption noise persists). Override the
+        # job-level flag and force every dispatch to STANDARD.
+        preemptible_for_call = False
+        for i in range(n_to_dispatch):
+            if (time.time() - _start) > _DISPATCH_BUDGET_S:
+                log_fn(f"dispatch budget exhausted mid-bucket {accel}; deferring")
+                return created
+            script = (template.replace("${ACCEL_TYPE}", accel)
+                      .replace("${WC_BUCKET}", bucket_name))
+            for key, val in secrets.items():
+                script = script.replace(f"${{{key}}}", val)
+            instance_name = (
+                f"{INSTANCE_PREFIX}-agent-{accel.split('-')[-1]}-{tick_tag}-{i}"
+            )
+            ref = provider.create_instance(
+                name=instance_name,
+                machine_type=mt,
+                accel_type=accel,
+                boot_disk_gb=biggest.boot_disk_gb,
+                image=biggest.image,
+                image_project=biggest.image_project,
+                startup_script=script,
+                preemptible=preemptible_for_call,
+            )
+            if ref is None:
+                log_fn(f"Agent VM create failed accel={accel} machine={mt}")
+                # Stockout-aware escalation: when create_instance returns
+                # None (zone STOCKOUTs across all configured zones for
+                # this accel), try the next-larger tier from GPU_SIZING.
+                # The job is larger than needed but routes around the
+                # capacity shortage. The same VM tier returns on next
+                # tick if the operator hasn't manually re-routed.
+                from ...models import GPU_SIZING
+                from ...config import lookup_instance_type
+                pmem = int(getattr(biggest, "gpu_mem_gb", 0) or 0)
+                sizing = GPU_SIZING.get(provider_name, {})
+                larger_tiers = sorted([m for m in sizing.keys() if m > pmem])
+                escalated = False
+                for next_mem in larger_tiers:
+                    next_mt, next_accel = sizing[next_mem]
+                    if next_accel == accel and next_mt == mt:
+                        continue
+                    if available.get(next_accel, 0) <= 0:
+                        continue
+                    log_fn(
+                        f"escalating {accel}/{mt} -> {next_accel}/{next_mt} "
+                        f"(stockout on {accel}, next tier mem={next_mem})"
+                    )
+                    ref = provider.create_instance(
+                        name=instance_name,
+                        machine_type=next_mt,
+                        accel_type=next_accel,
+                        boot_disk_gb=biggest.boot_disk_gb,
+                        image=biggest.image,
+                        image_project=biggest.image_project,
+                        startup_script=script,
+                        preemptible=preemptible_for_call,
+                    )
+                    if ref is not None:
+                        accel = next_accel
+                        escalated = True
+                        break
+                if not escalated:
+                    continue
+            available[accel] = available.get(accel, 0) - 1
+            accel_dispatched[accel] = accel_dispatched.get(accel, 0) + 1
+            scheduled += 1
+            created += 1
+            log_fn(
+                f"Dispatched agent VM {ref} accel={accel} machine={mt} "
+                f"preemptible={preemptible_for_call}"
+            )
+            if scheduled >= per_tick_cap:
+                break
+    return created

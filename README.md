@@ -16,9 +16,9 @@ condition-driven idle-shutdown for cloud VMs.
 pip install wisent-compute
 ```
 
-The package installs a `wc` CLI plus the `wisent_compute` Python
+The package installs a `wc` CLI plus the `stado` Python
 package. Cloud Function code lives at
-`wisent_compute/cloud_function/main.py`.
+`stado/cloud_function/main.py`.
 
 ## Quick start
 
@@ -55,7 +55,7 @@ wc coordinator --once
 ## Project layout
 
 ```
-wisent_compute/
+stado/
   cli.py                              # `wc` Click entry points
   config.py                           # GCP_PROJECT, ZONE_ROTATION, MACHINE_TYPE_ZONES, ...
   models.py                           # Job dataclass, GPU_SIZING, GPU_HOURLY_RATE_USD, SPOT_DISCOUNT
@@ -84,7 +84,7 @@ correctness.
 
 For a release: bump the version in `pyproject.toml`, commit, push to
 `main`. CI redeploys the Cloud Function. PyPI publishing is currently
-manual (`python -m build && twine upload dist/wisent_compute-*`).
+manual (`python -m build && twine upload dist/stado-*`).
 
 ## License
 

@@ -16,8 +16,8 @@
 
 ## Registry
 
-`wisent_compute/targets/registry.example.json` is the template.
-Operators ship their own `wisent_compute/targets/registry.json`
+`stado/targets/registry.example.json` is the template.
+Operators ship their own `stado/targets/registry.json`
 (gitignored) or `gsutil cp` it directly to
 `gs://$WC_BUCKET/registry.json` — running agents re-fetch every poll
 so edits propagate without restart.
@@ -69,7 +69,7 @@ useful when you want to reserve capacity for non-wisent workloads.
 The `total` field is ignored; setting it has no effect.
 
 The metric-name → internal accel mapping
-(`wisent_compute/scheduler/quota.py:_GCP_METRIC_TO_ACCEL`):
+(`stado/scheduler/quota.py:_GCP_METRIC_TO_ACCEL`):
 
 ```python
 _GCP_METRIC_TO_ACCEL = {
@@ -95,7 +95,7 @@ For workload-identity federation from GitHub Actions: edit the
 
 ## Per-machine-type zone rotation
 
-`MACHINE_TYPE_ZONES` in `wisent_compute/config.py` is consulted by
+`MACHINE_TYPE_ZONES` in `stado/config.py` is consulted by
 `providers/gcp.py:create_instance` before the default
 `ZONE_ROTATION`. It exists because some accelerator-optimized SKUs
 (`a2-ultragpu-1g`, the A100-80GB single-GPU machine) only exist in a
@@ -118,7 +118,7 @@ or 400 "machine type does not exist" cause it to walk to the next zone.
 
 ## Pinned cloud-agent dependencies
 
-`wisent_compute/templates/startup_gpu_agent.sh` pins the following
+`stado/templates/startup_gpu_agent.sh` pins the following
 deps. Each pin has a known reason — don't relax them without reading
 the comments in the template:
 

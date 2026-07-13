@@ -67,7 +67,7 @@ wcomp submit --profile ai_toolkit_zimage \
 | `wc profiles` | List available profiles with one-line descriptions. |
 | `wc profiles NAME` | Print the profile's resolved JSON. |
 
-A profile is a JSON file under `wisent_compute/profiles/` (bundled with
+A profile is a JSON file under `stado/profiles/` (bundled with
 the wheel) or `$WC_PROFILES_DIR/` (operator-local override). It bundles
 the `wc submit` flags for a recurring workflow — `gpu_type`, `vram_gb`,
 `apt`, `pre_command`, `repo`, `repo_workdir`, `repo_extras`,
@@ -77,7 +77,7 @@ the `wc submit` flags for a recurring workflow — `gpu_type`, `vram_gb`,
 Discovery order:
 
 1. `$WC_PROFILES_DIR/<name>.json` — operator-local; first hit wins.
-2. `wisent_compute/profiles/<name>.json` — bundled with the package.
+2. `stado/profiles/<name>.json` — bundled with the package.
 
 **Merge rule:** CLI flags always win. A kwarg that equals the
 wisent-compute default (empty string / 0 / False / [] / "train" for
@@ -90,7 +90,7 @@ value. To override a profile field, pass the explicit flag.
 |---|---|
 | `ai_toolkit_zimage` | Z-Image Turbo LoRA training via Ostris ai-toolkit. L4 (22 GB request), apt deps for cv2 + git-lfs + build tools, cu128/cu129 cuBLAS `LD_LIBRARY_PATH` fix as `pre_command`, ai-toolkit repo clone. |
 
-To add a new bundled profile: drop a JSON file in `wisent_compute/profiles/` and bump the package version. To add an operator-local profile without a release: `WC_PROFILES_DIR=/path/to/profiles wcomp submit --profile mything ...`.
+To add a new bundled profile: drop a JSON file in `stado/profiles/` and bump the package version. To add an operator-local profile without a release: `WC_PROFILES_DIR=/path/to/profiles wcomp submit --profile mything ...`.
 
 ## `wc status [filter]`
 
@@ -142,7 +142,7 @@ unavailable.
 
 | Subcommand | Behavior |
 |---|---|
-| `wc registry push [path]` | Upload `wisent_compute/targets/registry.json` (or `path`) to `gs://$WC_BUCKET/registry.json`. |
+| `wc registry push [path]` | Upload `stado/targets/registry.json` (or `path`) to `gs://$WC_BUCKET/registry.json`. |
 | `wc registry pull` | Print the GCS registry to stdout. |
 
 ## `wc cost`

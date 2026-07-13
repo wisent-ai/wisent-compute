@@ -7,7 +7,7 @@ set -euo pipefail
 
 PROJECT="${GCP_PROJECT:?GCP_PROJECT required}"
 REGION="${GCP_REGION:-us-central1}"
-BUCKET="wisent-compute"
+BUCKET="stado"
 SA_EMAIL="wisent-compute-sa@${PROJECT}.iam.gserviceaccount.com"
 FUNCTION="wisent-compute-tick"
 SCHEDULER="wisent-compute-cron"
@@ -22,9 +22,9 @@ echo "Quotas refreshed at gs://${BUCKET}/config/quotas.json"
 
 # 2. Stage Cloud Function source
 STAGING="$(mktemp -d)"
-cp -r "$REPO_DIR/wisent_compute" "$STAGING/"
-cp "$REPO_DIR/wisent_compute/cloud_function/main.py" "$STAGING/main.py"
-cp "$REPO_DIR/wisent_compute/cloud_function/requirements.txt" "$STAGING/requirements.txt"
+cp -r "$REPO_DIR/stado" "$STAGING/"
+cp "$REPO_DIR/stado/cloud_function/main.py" "$STAGING/main.py"
+cp "$REPO_DIR/stado/cloud_function/requirements.txt" "$STAGING/requirements.txt"
 cp "$REPO_DIR/pyproject.toml" "$STAGING/"
 
 # 3. Deploy function (cloudfunctions.developer + iam.serviceAccountUser)

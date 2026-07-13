@@ -23,7 +23,7 @@
 set -u
 
 PROJECT="wisent-480400"
-BUCKET="wisent-compute"
+BUCKET="stado"
 UNITS_TO_WATCH="${WC_HEALTH_UNITS:-wisent-agent.service}"
 LOG_PATHS="${WC_HEALTH_LOGS:-/var/log/wisent-agent.log}"
 HOST_SLUG=$(/bin/hostname -s 2>/dev/null | /usr/bin/tr '[:upper:]' '[:lower:]')

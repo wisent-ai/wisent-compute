@@ -84,8 +84,8 @@ PATH_VAL="$TARGET_HOME/google-cloud-sdk/bin:$TARGET_HOME/.local/bin:/usr/bin:/bi
 
 # Resolve the deploy templates shipped inside the installed package.
 TEMPLATE_DIR=$(sudo -u "$TARGET_USER" python3 - <<'PY'
-import os, wisent_compute
-print(os.path.join(os.path.dirname(wisent_compute.__file__), "deploy", "templates"))
+import os, stado
+print(os.path.join(os.path.dirname(stado.__file__), "deploy", "templates"))
 PY
 )
 if [ ! -d "$TEMPLATE_DIR" ]; then
@@ -125,12 +125,12 @@ render_template "$TEMPLATE_DIR/wisent-host-health.service.tmpl" /etc/systemd/sys
 render_template "$TEMPLATE_DIR/wisent-host-health.timer.tmpl"   /etc/systemd/system/wisent-host-health.timer
 
 # Drop the beacon script next to the user home so the service unit
-# above can find it. The script ships inside the wisent_compute Python
+# above can find it. The script ships inside the stado Python
 # package as deploy/host_health_beacon.sh (see pyproject.toml
 # package-data).
 HHB_SRC=$(sudo -u "$TARGET_USER" python3 -c '
-import os, wisent_compute
-print(os.path.join(os.path.dirname(wisent_compute.__file__), "deploy", "host_health_beacon.sh"))
+import os, stado
+print(os.path.join(os.path.dirname(stado.__file__), "deploy", "host_health_beacon.sh"))
 ')
 if [ -f "$HHB_SRC" ]; then
     echo "[install] copying $HHB_SRC -> $TARGET_HOME/host_health_beacon.sh"
@@ -147,8 +147,8 @@ fi
 # improvements to the cleanup logic flow automatically without ever
 # re-rendering the .service file.
 PSC_SRC=$(sudo -u "$TARGET_USER" python3 -c '
-import os, wisent_compute
-print(os.path.join(os.path.dirname(wisent_compute.__file__), "deploy", "pre_start_cleanup.sh"))
+import os, stado
+print(os.path.join(os.path.dirname(stado.__file__), "deploy", "pre_start_cleanup.sh"))
 ')
 if [ -f "$PSC_SRC" ]; then
     echo "[install] copying $PSC_SRC -> $TARGET_HOME/wisent_pre_start_cleanup.sh"

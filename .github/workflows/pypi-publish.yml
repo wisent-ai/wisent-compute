@@ -14,7 +14,7 @@ on:
     branches: [main]
     paths:
       - "pyproject.toml"
-      - "wisent_compute/**"
+      - "stado/**"
   workflow_dispatch:
 
 concurrency:
