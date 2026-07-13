@@ -7,7 +7,7 @@ set -euo pipefail
 
 PROJECT="${GCP_PROJECT:?GCP_PROJECT required}"
 REGION="${GCP_REGION:-us-central1}"
-BUCKET="stado"
+BUCKET="${WC_BUCKET:-wisent-compute}"
 SA_EMAIL="wisent-compute-sa@${PROJECT}.iam.gserviceaccount.com"
 FUNCTION="wisent-compute-tick"
 SCHEDULER="wisent-compute-cron"
