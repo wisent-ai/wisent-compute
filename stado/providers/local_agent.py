@@ -54,6 +54,11 @@ VRAM_SAFETY_BUFFER_GB = 8
 IDLE_DEVICE_OVERHEAD_GB = 1
 
 
+def _effective_registry_vram(physical_vram_gb: int, registry_vram_gb: int) -> int:
+    """Apply a registry override without exceeding measured GPU capacity."""
+    return min(physical_vram_gb, registry_vram_gb)
+
+
 def _is_full_device_claim(slots: list[dict], need: int,
                           total_vram_gb: int, free_vram_gb: int) -> bool:
     return (not slots and need == total_vram_gb
@@ -209,7 +214,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     from .local.slots import advance_slot, start_slot
     from ..targets import lookup_self
     if not gpu_type: gpu_type = _detect_gpu_type()
-    total_vram_gb = max(1, _detect_local_vram_gb(gpu_type))
+    physical_vram_gb = max(1, _detect_local_vram_gb(gpu_type))
+    total_vram_gb = physical_vram_gb
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
     if kind == "local" and hard_slot_cap <= 0: hard_slot_cap = 1
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
@@ -289,9 +295,15 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 _log(f"Registry gpu_type {initial_gpu} -> {t.gpu_type}; pip_upgrade_and_exec for restart")
                 from .local.version_check import pip_upgrade_and_exec as _upgrade_exec
                 _upgrade_exec(_log)
-            if t.vram_gb and int(t.vram_gb) != total_vram_gb:
-                _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
-                total_vram_gb = int(t.vram_gb)
+            if t.vram_gb:
+                registry_vram_gb = int(t.vram_gb)
+                effective_vram_gb = _effective_registry_vram(
+                    physical_vram_gb, registry_vram_gb)
+                if effective_vram_gb != total_vram_gb:
+                    _log(f"Registry vram_gb override {total_vram_gb} -> "
+                         f"{effective_vram_gb} (requested={registry_vram_gb}, "
+                         f"physical_cap={physical_vram_gb})")
+                    total_vram_gb = effective_vram_gb
         vast_active = _vast_has_renter()
         slots = [s for s in slots if advance_slot(s, store, vast_active, _log)]
         # Disk eviction MUST run before pip_upgrade_and_exec. Workstation
