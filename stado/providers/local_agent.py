@@ -51,6 +51,22 @@ SETTLE_AFTER_CLAIM_SECONDS = 5
 # LAST line of defense — if the per-job estimate is wrong, this catches
 # it before the n+1th job OOMs the entire VM.
 VRAM_SAFETY_BUFFER_GB = 8
+IDLE_DEVICE_OVERHEAD_GB = 1
+
+
+def _is_full_device_claim(slots: list[dict], need: int,
+                          total_vram_gb: int, free_vram_gb: int) -> bool:
+    return (not slots and need == total_vram_gb
+            and free_vram_gb >= total_vram_gb - IDLE_DEVICE_OVERHEAD_GB)
+
+
+def _exceeds_vram_admission_limit(slots: list[dict], need: int,
+                                  total_vram_gb: int, free_vram_gb: int) -> bool:
+    """Reject unsafe packing while permitting one exact-capacity idle claim."""
+    projected_used = sum(_slot_vram(slot) for slot in slots) + need
+    return (not _is_full_device_claim(slots, need, total_vram_gb, free_vram_gb)
+            and projected_used > total_vram_gb - VRAM_SAFETY_BUFFER_GB)
+
 # Cooperative-yield anti-thrash floor: never evict a yieldable slot that has
 # run for less than this, so a just-(re)started background job gets real work
 # done before it can be bumped again. Pairs with Job.max_yields_before_protected.
@@ -193,7 +209,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     from .local.slots import advance_slot, start_slot
     from ..targets import lookup_self
     if not gpu_type: gpu_type = _detect_gpu_type()
-    total_vram_gb = max(1, _detect_local_vram_gb())
+    total_vram_gb = max(1, _detect_local_vram_gb(gpu_type))
     hard_slot_cap = int(os.environ.get("WC_LOCAL_SLOTS", "0") or 0)
     if kind == "local" and hard_slot_cap <= 0: hard_slot_cap = 1
     _log(f"Agent started. kind={kind}  GPU: {gpu_type}  vram_gb={total_vram_gb}  hard_slot_cap={hard_slot_cap}")
@@ -392,14 +408,18 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 int(getattr(job, "gpu_mem_gb", 0) or 0),
                 estimate_gpu_memory(cmd),
             )
-            if need > free_vram_gb:
+            if (need > free_vram_gb
+                    and not _is_full_device_claim(
+                        slots, need, total_vram_gb, free_vram_gb)):
                 diag_vram_rejected += 1
                 continue
-            # Hard VRAM safety buffer: refuse if declared use after admission
-            # would leave less than VRAM_SAFETY_BUFFER_GB, catching neighbor
-            # jobs whose actual peak exceeds their declared gpu_mem_gb.
-            projected_used = sum(_slot_vram(s) for s in slots) + need
-            if projected_used > total_vram_gb - VRAM_SAFETY_BUFFER_GB:
+            # Keep the safety margin between packed jobs. A request for the
+            # exact device capacity on an otherwise idle GPU is inherently a
+            # single-slot claim: it consumes all free capacity and cannot
+            # admit a neighbor, so reserving packing headroom would make the
+            # device's own nominal resource tier impossible to run.
+            if _exceeds_vram_admission_limit(
+                    slots, need, total_vram_gb, free_vram_gb):
                 diag_vram_rejected += 1
                 agent_diag["last_buffer_reject_job_id"] = job.job_id
                 agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()

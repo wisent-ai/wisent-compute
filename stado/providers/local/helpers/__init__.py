@@ -83,8 +83,23 @@ def _detect_gpu_type() -> str:
     return "cpu"
 
 
-def _detect_local_vram_gb() -> int:
-    """Total VRAM in GB on the first detected GPU, 0 if none."""
+def _mib_to_decimal_gb(mib: int) -> int:
+    """Convert nvidia-smi MiB to the decimal GB used by GPU SKU names."""
+    return mib * 1024 * 1024 // 1_000_000_000
+
+
+def _catalog_vram_gb(gpu_type: str) -> int:
+    """Return the scheduler's nominal capacity for an exact accelerator."""
+    from ....models import GPU_SIZING
+    nominal = 0
+    for tier, (_, accel) in GPU_SIZING.get("gcp", {}).items():
+        if accel == gpu_type and tier > nominal:
+            nominal = tier
+    return nominal
+
+
+def _detect_local_vram_gb(gpu_type: str = "") -> int:
+    """Total VRAM in scheduler GB on the first detected GPU, 0 if none."""
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total",
@@ -93,14 +108,16 @@ def _detect_local_vram_gb() -> int:
         )
         if r.returncode == 0:
             mib = int(r.stdout.strip().splitlines()[0])
-            return mib // 1024
+            measured = _mib_to_decimal_gb(mib)
+            nominal = _catalog_vram_gb(gpu_type or _detect_gpu_type())
+            return min(nominal, measured) if nominal else measured
     except Exception:
         pass
     return 0
 
 
 def _smi_free_vram_gb() -> int:
-    """Live nvidia-smi free VRAM in GB on the first GPU, -1 if unreadable."""
+    """Live free VRAM in scheduler GB on the first GPU, -1 if unreadable."""
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.free",
@@ -109,7 +126,7 @@ def _smi_free_vram_gb() -> int:
         )
         if r.returncode == 0:
             mib = int(r.stdout.strip().splitlines()[0])
-            return mib // 1024
+            return _mib_to_decimal_gb(mib)
     except Exception:
         pass
     return -1
