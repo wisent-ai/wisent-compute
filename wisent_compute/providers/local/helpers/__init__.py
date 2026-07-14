@@ -216,9 +216,11 @@ def _slot_vram(slot: dict) -> int:
     a stale pre-start estimate.
     """
     job = slot.get("job")
-    declared = max(
-        int(getattr(job, "gpu_mem_gb", 0) or 0),
-        estimate_gpu_memory(getattr(job, "command", "") or ""),
+    explicit_vram = int(getattr(job, "gpu_mem_gb", 0) or 0)
+    declared = (
+        explicit_vram
+        if explicit_vram > 0
+        else estimate_gpu_memory(getattr(job, "command", "") or "")
     )
     live = _slot_live_vram_gb(slot)
     peak = int(slot.get("peak_vram_gb", 0) or 0)
@@ -244,9 +246,11 @@ def _slot_waiting_for_vram(slot: dict) -> bool:
     if not proc or proc.poll() is not None:
         return False
     job = slot.get("job")
-    declared = max(
-        int(getattr(job, "gpu_mem_gb", 0) or 0),
-        estimate_gpu_memory(getattr(job, "command", "") or ""),
+    explicit_vram = int(getattr(job, "gpu_mem_gb", 0) or 0)
+    declared = (
+        explicit_vram
+        if explicit_vram > 0
+        else estimate_gpu_memory(getattr(job, "command", "") or "")
     )
     if declared <= 0 or _slot_live_vram_gb(slot) > 0:
         return False
