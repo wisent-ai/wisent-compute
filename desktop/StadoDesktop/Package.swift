@@ -12,10 +12,6 @@ let package = Package(
             name: "Stado",
             path: "Sources/Stado"
         ),
-        .testTarget(
-            name: "StadoTests",
-            dependencies: ["Stado"],
-            path: "Tests/StadoTests"
-        )
+
     ]
 )

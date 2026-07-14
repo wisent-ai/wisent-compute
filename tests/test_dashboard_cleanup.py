@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
 
-from wisent_compute import dashboard
-from wisent_compute.providers.local.disk import cleanup
+from stado import dashboard
+from stado.providers.local.disk import cleanup
 
 
 SAFE_REPORT = {

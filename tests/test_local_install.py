@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from wisent_compute.deploy import local_install
+from stado.deploy import local_install
 
 
 class WcBinResolutionTests(unittest.TestCase):
@@ -90,7 +90,7 @@ class WcBinResolutionTests(unittest.TestCase):
 
 class DiskCleanupInstallTests(unittest.TestCase):
     def test_project_precedence_is_rendered_without_dropping_adc(self) -> None:
-        from wisent_compute import config
+        from stado import config
 
         cases = {
             "explicit Google project": (

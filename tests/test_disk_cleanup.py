@@ -13,13 +13,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from wisent_compute import targets
-from wisent_compute.providers import local_agent
-from wisent_compute.providers.local import disk as local_disk
-from wisent_compute.providers.local import slots as local_slots
-from wisent_compute.providers.local import version_check
-from wisent_compute.providers.local.disk import cleanup
-from wisent_compute.targets import ComputeTarget, DiskCleanerPolicy, DiskCleanupPolicy
+from stado import targets
+from stado.providers import local_agent
+from stado.providers.local import disk as local_disk
+from stado.providers.local import slots as local_slots
+from stado.providers.local import version_check
+from stado.providers.local.disk import cleanup
+from stado.targets import ComputeTarget, DiskCleanerPolicy, DiskCleanupPolicy
 
 
 GIB = 1024 ** 3

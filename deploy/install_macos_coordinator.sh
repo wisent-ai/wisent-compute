@@ -574,7 +574,7 @@ cat > "$BEACON_TMP" <<BEACONEOF
 {
   "host": "${HOST_SHORT}",
   "installed_at": "${INSTALLED_AT}",
-  "wisent_compute_head": "${DEPLOY_HEAD}",
+  "stado_head": "${DEPLOY_HEAD}",
   "wisent_enterprise_head": "${HFR_REPO_HEAD}",
   "agents": {
     "coordinator": "${COORD_STATE}",

@@ -3,8 +3,8 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wisent-compute"
-version = "0.4.375"
+name = "stado"
+version = "0.4.376"
 description = "Job queue and compute management for Wisent GPU workloads"
 requires-python = ">=3.10"
 dependencies = [
@@ -48,13 +48,14 @@ azure = [
 dev = ["functions-framework>=3.0.0"]
 
 [project.scripts]
-wc = "wisent_compute.cli:main"
-wc-coverage = "wisent_compute.coverage.cli:main"
-wc-fix = "wisent_compute.failure_fixer.cli:main"
-wc-watchdog = "wisent_compute.deploy.watchdog.cli:main"
+stado = "stado.cli:main"
+stado-coverage = "stado.coverage.cli:main"
+stado-fix = "stado.failure_fixer.cli:main"
+stado-watchdog = "stado.deploy.watchdog.cli:main"
+stado-mcp = "stado.mcp.server:serve"
 
 [tool.setuptools.packages.find]
-include = ["wisent_compute*"]
+include = ["stado*"]
 
 [tool.setuptools.package-data]
-wisent_compute = ["templates/*.sh", "targets/*.json", "deploy/templates/*.tmpl", "deploy/*.sh", "profiles/*.json", "deploy/pre_start_cleanup.sh"]
+stado = ["templates/*.sh", "targets/*.json", "deploy/templates/*.tmpl", "deploy/*.sh", "profiles/*.json", "deploy/pre_start_cleanup.sh"]

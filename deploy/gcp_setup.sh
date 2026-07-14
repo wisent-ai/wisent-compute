@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT="${GCP_PROJECT:?GCP_PROJECT required}"
 REGION="${GCP_REGION:-us-central1}"
-BUCKET="wisent-compute"
+BUCKET="stado"
 SA_NAME="wisent-compute-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 FUNCTION="wisent-compute-tick"
@@ -54,11 +54,11 @@ for secret in wisent-hf-token wisent-gh-token; do
 done
 
 # 6. Deploy Cloud Function
-# Package the entire wisent_compute module for the function
+# Package the entire stado module for the function
 STAGING=$(mktemp -d)
-cp -r "$REPO_DIR/wisent_compute" "$STAGING/"
-cp "$REPO_DIR/wisent_compute/cloud_function/main.py" "$STAGING/main.py"
-cp "$REPO_DIR/wisent_compute/cloud_function/requirements.txt" "$STAGING/requirements.txt"
+cp -r "$REPO_DIR/stado" "$STAGING/"
+cp "$REPO_DIR/stado/cloud_function/main.py" "$STAGING/main.py"
+cp "$REPO_DIR/stado/cloud_function/requirements.txt" "$STAGING/requirements.txt"
 cp "$REPO_DIR/pyproject.toml" "$STAGING/"
 
 gcloud functions deploy "$FUNCTION" \

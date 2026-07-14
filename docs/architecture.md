@@ -57,7 +57,7 @@ State transitions are atomic from the caller's POV:
 
 ## Scheduling rules
 
-The scheduler (`wisent_compute/scheduler/scheduler.py`) sorts queued jobs
+The scheduler (`stado/scheduler/scheduler.py`) sorts queued jobs
 by `(-priority, created_at)` and applies, in order:
 
 1. **Per-tick listing cap** — `_dynamic_per_tick_cap(queue_depth) * 8`
@@ -80,7 +80,7 @@ by `(-priority, created_at)` and applies, in order:
    `DISPATCH_BACKOFF_MINUTES = [0, 1, 5, 15, 30, 60, 120, 240]`
    minutes per attempt count.
 
-The local agent (`wisent_compute/providers/local_agent.py`) walks the
+The local agent (`stado/providers/local_agent.py`) walks the
 queue FIFO and claims any job whose `gpu_mem_gb <= free_vram_gb` AND
 passes `_job_eligible` (gpu_type-compat or pinned-local). No slot count
 — pure VRAM admission.
@@ -88,7 +88,7 @@ passes `_job_eligible` (gpu_type-compat or pinned-local). No slot count
 ## Cloud-agent VM lifecycle
 
 - **Spawn** — scheduler tick calls `provider.create_instance(...)` with
-  `wisent_compute/templates/startup_gpu_agent.sh` rendered into the VM's
+  `stado/templates/startup_gpu_agent.sh` rendered into the VM's
   startup script (`HF_TOKEN` substituted from Secret Manager).
 - **Boot** — VM runs `apt-get install python3-venv`, creates a venv,
   `pip install wisent wisent-compute wisent-extractors wisent-evaluators
@@ -101,10 +101,31 @@ passes `_job_eligible` (gpu_type-compat or pinned-local). No slot count
   the queue, claims jobs, spawns subprocesses.
 - **Self-shutdown** — when `len(slots) == 0 AND no_eligible_in_queue`,
   the agent exits cleanly. On GCE,
-  `wisent_compute/providers/local/gcp_self.py` calls `gcloud compute
+  `stado/providers/local/gcp_self.py` calls `gcloud compute
   instances delete --quiet` against the VM's own metadata-derived
   `(name, zone)` to release the Spot reservation back to the pool.
   No-op outside GCE.
+
+## Box sandbox lifecycle
+
+Box is an explicitly selected, provider-pinned CPU sandbox path; it does not
+run through the GPU startup-agent scheduler. The Box dispatcher performs
+fixed-shape capability admission, then acquires a conditional object-store
+lease before every provider mutation. Each invocation has a unique owner and
+fencing token. Normal ticks relinquish ownership; a crashed tick remains fenced
+until its owner lease expires.
+
+The durable lifecycle is `allocating → provisioning → ready → starting →
+running → collecting → releasing → released`, with a recoverable failure path.
+The opaque Box identifier, launch intent, prompt identifier, terminal outcome,
+and output state are persisted before the next external mutation. Commands use
+a relative `.stado/<job>/` namespace, a create-once launch marker, detached
+process group, bounded logs, optional verification command, and declared
+bounded artifacts. Prompt jobs reconcile the official nested prompt-run status
+and collect only final response events matching their prompt task identifier.
+Resources are renewed only through active execution states and are archived or
+deleted only after output persistence. Every terminal state is restartable, so
+a coordinator crash cannot silently duplicate a launch or strand collection.
 
 ## Consumer capacity broadcasts
 

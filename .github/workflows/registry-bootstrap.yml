@@ -1,7 +1,7 @@
 name: registry-bootstrap
 
 # Auto-provisions agents on every kind=local registry entry whose `ssh` field
-# is set, triggered when wisent_compute/targets/registry.json changes on main.
+# is set, triggered when stado/targets/registry.json changes on main.
 # After the operator has dropped the deploy public key into the workstation's
 # ~/.ssh/authorized_keys ONCE, every subsequent registry edit lands the agent
 # (or refreshes the unit) on the named host without anyone touching the box.
@@ -10,7 +10,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "wisent_compute/targets/registry.json"
+      - "stado/targets/registry.json"
       - ".github/workflows/registry-bootstrap.yml"
   workflow_dispatch:
 
@@ -60,7 +60,7 @@ jobs:
         run: |
           python - <<'PY'
           import json, os
-          with open("wisent_compute/targets/registry.json") as f:
+          with open("stado/targets/registry.json") as f:
               data = json.load(f)
           targets = [
               t for t in data.get("targets", [])

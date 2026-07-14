@@ -93,9 +93,9 @@ git commit -m "release: X.Y.Z+1"
 git push origin main
 
 # 3. build + upload the wheel
-rm -rf build/ dist/ wisent_compute.egg-info/
+rm -rf build/ dist/ stado.egg-info/
 python -m build
-twine upload dist/wisent_compute-*
+twine upload dist/stado-*
 
 # 4. (optional) verify
 curl -s https://pypi.org/pypi/wisent-compute/json | grep -oE '"version":"[^"]+"' | head -1
@@ -121,7 +121,7 @@ pip install --user wisent-compute
 gcloud auth application-default login
 
 # Configure registry entry (also pushed to gs:// for cluster-wide visibility)
-cat >> wisent_compute/targets/registry.json <<EOF
+cat >> stado/targets/registry.json <<EOF
 {"name": "$(hostname)", "kind": "local", "ssh": "user@$(hostname)",
  "gpu_type": "auto", "slots": 0, "vram_gb": 96}
 EOF

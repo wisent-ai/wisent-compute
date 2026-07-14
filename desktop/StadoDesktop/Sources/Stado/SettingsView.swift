@@ -1,19 +1,21 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @ObservedObject var store: CleanupStore
+    @ObservedObject var operationsStore: OperationsStore
+    @ObservedObject var cleanupStore: CleanupStore
     @Environment(\.dismiss) private var dismiss
     @State private var draftURL = ""
     @State private var validationMessage: String?
 
     var body: some View {
         Form {
-            Section("Dashboard") {
-                TextField("Base URL", text: $draftURL, prompt: Text(DashboardAddress.defaultString))
+            Section("Dashboard state source") {
+                TextField("Base URL", text: $draftURL, prompt: Text(OperationsDashboardAddress.localDefault))
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Stado dashboard base URL")
                     .onSubmit(save)
 
-                Text("Stado uses plain HTTP only for loopback IP addresses. Tailnet and other remote dashboard URLs must use HTTPS. Credentials are never requested or stored.")
+                Text("Stado reads the existing /api/state.json interface. Plain HTTP is accepted only for IPv4 and IPv6 loopback addresses; remote sources require HTTPS. URLs containing credentials, query parameters, or fragments are rejected.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -21,12 +23,19 @@ struct SettingsView: View {
                     Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.red)
+                        .accessibilityLabel("Invalid dashboard URL: \(validationMessage)")
                 }
+            }
+
+            Section("Privacy") {
+                Label("The app uses an ephemeral URL session and does not request or persist dashboard credentials.", systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             HStack {
                 Button("Use Local Default") {
-                    draftURL = DashboardAddress.defaultString
+                    draftURL = OperationsDashboardAddress.localDefault
                     validationMessage = nil
                 }
                 Spacer()
@@ -40,21 +49,21 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
+        .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
-            draftURL = store.dashboardURLString
+            draftURL = operationsStore.dashboardURLString
         }
     }
 
     private func save() {
         do {
-            try store.saveDashboardURL(draftURL)
+            try operationsStore.saveDashboardURL(draftURL)
+            try cleanupStore.saveDashboardURL(draftURL)
             validationMessage = nil
             dismiss()
         } catch {
-            validationMessage = (error as? LocalizedError)?.errorDescription
-                ?? "Enter a valid dashboard URL."
+            validationMessage = (error as? LocalizedError)?.errorDescription ?? "Enter a valid dashboard URL."
         }
     }
 }

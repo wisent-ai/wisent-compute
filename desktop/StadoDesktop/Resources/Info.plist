@@ -4,6 +4,8 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Stado</string>
     <key>CFBundleExecutable</key>
     <string>Stado</string>
     <key>CFBundleIdentifier</key>
@@ -12,18 +14,15 @@
     <string>6.0</string>
     <key>CFBundleName</key>
     <string>Stado</string>
-    <key>CFBundleDisplayName</key>
-    <string>Stado</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>1.0.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
+
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>
@@ -33,9 +32,6 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
-    <key>NSSupportsAutomaticTermination</key>
-    <true/>
-    <key>NSSupportsSuddenTermination</key>
-    <true/>
+
 </dict>
 </plist>

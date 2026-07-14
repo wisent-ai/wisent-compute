@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from wisent_compute.targets import lookup_self
-from wisent_compute.targets.validation import RegistryValidationError, validate_registry
+from stado.targets import lookup_self
+from stado.targets.validation import RegistryValidationError, validate_registry
 
 
 def local_target(**overrides: object) -> dict[str, object]:
@@ -41,7 +41,6 @@ def disk_cleanup_policy(**overrides: object) -> dict[str, object]:
     }
     policy.update(overrides)
     return policy
-
 
 
 class RegistryValidationTests(unittest.TestCase):
@@ -202,14 +201,13 @@ class RegistryValidationTests(unittest.TestCase):
                     "allowed only for kind='local'",
                 ):
                     validate_registry(registry(non_local))
-
 class RegistryLookupTests(unittest.TestCase):
     def test_lookup_self_normalizes_canonical_name_and_alias_inputs(self) -> None:
         document = registry(local_target())
         with tempfile.TemporaryDirectory() as directory:
             registry_path = Path(directory) / "registry.json"
             registry_path.write_text(json.dumps(document), encoding="utf-8")
-            with patch("wisent_compute.targets.REGISTRY_PATH", registry_path):
+            with patch("stado.targets.REGISTRY_PATH", registry_path):
                 cases = {
                     "canonical name": " MAC-MINI-A. ",
                     "explicit alias": "MAC-MINI-A.LOCAL...",
@@ -225,7 +223,7 @@ class RegistryLookupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             registry_path = Path(directory) / "registry.json"
             registry_path.write_text(json.dumps(document), encoding="utf-8")
-            with patch("wisent_compute.targets.REGISTRY_PATH", registry_path):
+            with patch("stado.targets.REGISTRY_PATH", registry_path):
                 for hostname in ("other-host", " ... "):
                     with self.subTest(hostname):
                         self.assertIsNone(lookup_self(hostname, source="local"))

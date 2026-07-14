@@ -9,7 +9,7 @@ on:
     paths:
       - "pyproject.toml"
       - "deploy/bake_agent_image.sh"
-      - "wisent_compute/templates/startup_gpu_agent.sh"
+      - "stado/templates/startup_gpu_agent.sh"
       - ".github/workflows/bake-agent-image.yml"
   workflow_dispatch:
 
