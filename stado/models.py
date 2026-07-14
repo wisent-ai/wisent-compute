@@ -42,24 +42,19 @@ DEPRECATED_ACTIVATION_ENTRYPOINT = "wisent.scripts.activations." + "extract_and_
 
 
 def deprecated_activation_command_reason(command: str) -> str:
-    command = command or ""
-    if DEPRECATED_ACTIVATION_ENTRYPOINT not in command:
-        return ""
-    if "WISENT_FLEET_STAGING_DIR" in command:
+    if DEPRECATED_ACTIVATION_ENTRYPOINT not in (command or ""):
         return ""
     return (
-        "refusing aggregated activation extraction without "
-        "WISENT_FLEET_STAGING_DIR; staged extraction is required"
+        "refusing deprecated foreground activation uploader; use "
+        "wisent.scripts.activations.raw.extract_and_upload so extraction "
+        "hands upload to the detached worker pool"
     )
 
 
 def activation_extraction_must_share_gpu(command: str) -> bool:
     """Activation extraction jobs are VRAM-sized, not whole-GPU-exclusive."""
     command = command or ""
-    return (
-        "wisent.scripts.activations.raw.extract_and_upload" in command
-        or DEPRECATED_ACTIVATION_ENTRYPOINT in command
-    )
+    return "wisent.scripts.activations.raw.extract_and_upload" in command
 
 
 @dataclass
