@@ -661,9 +661,11 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 admission_reasons[reason] = admission_reasons.get(reason, 0) + 1
                 agent_diag["last_gate_reason"] = reason
                 continue
-            need = max(
-                int(getattr(job, "gpu_mem_gb", 0) or 0),
-                estimate_gpu_memory(cmd),
+            declared_vram_gb = int(getattr(job, "gpu_mem_gb", 0) or 0)
+            need = (
+                declared_vram_gb
+                if declared_vram_gb > 0
+                else estimate_gpu_memory(cmd)
             )
             ram_request_gb, ram_source = effective_job_ram_request(
                 job,
@@ -678,7 +680,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 ram_estimation_source=ram_source,
                 vram_estimation_source=(
                     "job.gpu_mem_gb"
-                    if int(getattr(job, "gpu_mem_gb", 0) or 0) > 0
+                    if declared_vram_gb > 0
                     else "command_estimate"
                 ),
                 exclusive=bool(getattr(job, "exclusive", False)),
