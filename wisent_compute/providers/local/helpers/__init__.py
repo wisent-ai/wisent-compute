@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import urllib.request
 
 from .... import constants as _wc
@@ -238,7 +239,7 @@ def _slot_live_vram_gb(slot: dict) -> int:
 
 
 def _slot_waiting_for_vram(slot: dict) -> bool:
-    """True when a GPU slot is live but CUDA allocation is not visible yet."""
+    """True while a live GPU slot is inside its bounded allocation window."""
     proc = slot.get("proc")
     if not proc or proc.poll() is not None:
         return False
@@ -247,7 +248,15 @@ def _slot_waiting_for_vram(slot: dict) -> bool:
         int(getattr(job, "gpu_mem_gb", 0) or 0),
         estimate_gpu_memory(getattr(job, "command", "") or ""),
     )
-    return declared > 0 and _slot_live_vram_gb(slot) <= 0
+    if declared <= 0 or _slot_live_vram_gb(slot) > 0:
+        return False
+    timeout = float(os.environ.get("WC_VRAM_SETTLING_TIMEOUT_SECONDS", "180") or 180)
+    elapsed = time.monotonic() - float(slot.get("started_mono", 0.0) or 0.0)
+    if elapsed >= timeout:
+        slot["settling_timed_out"] = True
+        slot["settling_timeout_seconds"] = timeout
+        return False
+    return True
 
 
 def _free_ram_gb() -> float:

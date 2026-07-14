@@ -98,12 +98,15 @@ def submit_job(
     repo_extras: str = "train",
     gpu_type: str = "",
     vram_gb: int = 0,
+    ram_gb: float = 0.0,
+    ram_estimation_source: str = "",
     machine_type: str = "",
     pre_command: str = "",
     apt_packages: list | None = None,
     output_uri: str = "",
     verify_command: str = "",
     exclusive: bool = False,
+    service_mode: bool = False,
     run_id: str = "",
     schedule_id: str = "",
     re_submission_of: str = "",
@@ -126,7 +129,10 @@ def submit_job(
     exclusive = exclusive and not activation_extraction_must_share_gpu(command)
     api_key = os.environ.get("COMPUTE_API_KEY", "").strip()
     if api_key:
-        return _submit_via_api(command, api_key, provider)
+        return _submit_via_api(
+            command, api_key, provider, ram_gb, ram_estimation_source,
+            service_mode,
+        )
     return _submit_via_gcs(
         command, provider, batch_id, bucket,
         preemptible=preemptible,
@@ -134,17 +140,27 @@ def submit_job(
         pin_to_provider=pin_to_provider,
         priority=priority,
         repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
-        gpu_type=gpu_type, vram_gb=vram_gb, machine_type=machine_type,
-        pre_command=pre_command, apt_packages=apt_packages or [],
+        gpu_type=gpu_type, vram_gb=vram_gb, ram_gb=ram_gb,
+        ram_estimation_source=ram_estimation_source,
+        machine_type=machine_type, pre_command=pre_command,
+        apt_packages=apt_packages or [],
         output_uri=output_uri, verify_command=verify_command,
         exclusive=exclusive, run_id=run_id, schedule_id=schedule_id,
+        service_mode=service_mode,
         re_submission_of=re_submission_of,
         yieldable=yieldable, yield_command=yield_command,
         yield_grace_seconds=yield_grace_seconds,
     )
 
 
-def _submit_via_api(command: str, api_key: str, provider: str) -> Job:
+def _submit_via_api(
+    command: str,
+    api_key: str,
+    provider: str,
+    ram_gb: float = 0.0,
+    ram_estimation_source: str = "",
+    service_mode: bool = False,
+) -> Job:
     """Submit through compute.wisent.com API."""
     gpu_mem = estimate_gpu_memory(command)
     env_vars = {}
@@ -178,6 +194,11 @@ def _submit_via_api(command: str, api_key: str, provider: str) -> Job:
             job_id=data.get("id", _generate_job_id()),
             command=command,
             gpu_mem_gb=gpu_mem,
+            ram_request_gb=float(ram_gb or 0.0),
+            ram_estimation_source=ram_estimation_source or (
+                "explicit" if ram_gb > 0 else "legacy_dynamic_at_admission"
+            ),
+            service_mode=service_mode,
             provider=provider,
             state="running",
             instance_ref=data.get("id", ""),
@@ -199,12 +220,15 @@ def _submit_via_gcs(
     repo_extras: str = "train",
     gpu_type: str = "",
     vram_gb: int = 0,
+    ram_gb: float = 0.0,
+    ram_estimation_source: str = "",
     machine_type: str = "",
     pre_command: str = "",
     apt_packages: list | None = None,
     output_uri: str = "",
     verify_command: str = "",
     exclusive: bool = False,
+    service_mode: bool = False,
     run_id: str = "",
     schedule_id: str = "",
     re_submission_of: str = "",
@@ -226,8 +250,10 @@ def _submit_via_gcs(
          verbatim. Use this for non-cataloged SKUs.
     """
     from .storage import JobStorage
+    from ..ram_sizing import estimate_ram_request
     from ..models import GPU_SIZING
     bucket = bucket or BUCKET
+    store = JobStorage(bucket)
     job_id = _generate_job_id()
     apt_packages = apt_packages or []
 
@@ -236,6 +262,12 @@ def _submit_via_gcs(
         gpu_mem = vram_gb
     else:
         gpu_mem = estimate_gpu_memory(command)
+    ram_request_gb, resolved_ram_source = estimate_ram_request(
+        command,
+        explicit_ram_gb=ram_gb if ram_estimation_source != "profile" else 0.0,
+        profile_ram_gb=ram_gb if ram_estimation_source == "profile" else 0.0,
+        store=store,
+    )
 
     if not caller_asked_for_gpu and gpu_mem == 0:
         # CPU path — no GPU requirements, no regex hit. Same as pre-0.4.122.
@@ -293,6 +325,8 @@ def _submit_via_gcs(
         job_id=job_id,
         command=command,
         gpu_mem_gb=gpu_mem,
+        ram_request_gb=ram_request_gb,
+        ram_estimation_source=resolved_ram_source,
         gpu_type=accel_type,
         machine_type=machine_type,
         provider=provider,
@@ -314,6 +348,7 @@ def _submit_via_gcs(
         output_uri=output_uri,
         verify_command=verify_command,
         exclusive=exclusive,
+        service_mode=service_mode,
         schedule_id=schedule_id,
         re_submission_of=re_submission_of,
         yieldable=yieldable,
@@ -321,7 +356,6 @@ def _submit_via_gcs(
         yield_grace_seconds=yield_grace_seconds,
     )
 
-    store = JobStorage(bucket)
     store.upload_script(job_id, script)
     store.write_job("queue", job)
     return job

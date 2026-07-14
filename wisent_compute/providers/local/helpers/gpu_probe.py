@@ -51,44 +51,26 @@ def _proc_tree_pids(root_pid: int) -> set[int]:
     return seen
 
 
-def smi_job_used_gb(root_pid: int) -> int:
-    """Peak single-GPU memory (GiB, ceil) used by root_pid's process tree.
-
-    gpu_mem_gb means "VRAM this job needs on the GPU it runs on": the
-    fleet is overwhelmingly single-GPU agents and a job loads onto one
-    card. nvidia-smi --query-compute-apps emits one row per (process,
-    GPU), so a process spread over N GPUs appears N times. Summing those
-    rows yields the CROSS-GPU total, not the per-card footprint: on the
-    multi-GPU lab box a sharded gpt-oss-20b summed to ~89 GiB while the
-    same workload on a single-GPU 80 GB agent measured ~50-74 GiB, and
-    that inflated 89 (propagated by observed_vram_gb's max()) pinned
-    every gpt-oss-20b job above the entire single-GPU fleet.
-
-    So attribute PER GPU: sum the tree's used_memory within each
-    gpu_uuid, then return the MAX over GPUs — the largest footprint the
-    job places on any one card, invariant to how many GPUs the host has.
-    A model that genuinely cannot fit on one card is a separate
-    "requires multi-GPU" concept and must not be conflated into this
-    scalar by accidental summation.
-
-    -1 if nvidia-smi is unreadable; 0 if the tree currently holds no
-    GPU memory (not yet allocated, or a CPU-only job).
-    """
+def smi_pids_used_gb(pids: set[int] | tuple[int, ...]) -> int:
+    """Peak per-GPU GiB attributed to an explicit ownership PID set."""
     try:
-        r = subprocess.run(
-            ["nvidia-smi",
-             "--query-compute-apps=gpu_uuid,pid,used_memory",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True,
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid,pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
         )
-        if r.returncode != 0:
+        if result.returncode != 0:
             return -1
     except Exception:
         return -1
-    pids = _proc_tree_pids(root_pid)
+    owned = set(pids)
     per_gpu_mib: dict[str, int] = {}
-    for line in r.stdout.splitlines():
-        parts = [x.strip() for x in line.split(",")]
+    for line in result.stdout.splitlines():
+        parts = [value.strip() for value in line.split(",")]
         if len(parts) != 3:
             continue
         gpu_uuid = parts[0]
@@ -96,9 +78,13 @@ def smi_job_used_gb(root_pid: int) -> int:
             pid, mib = int(parts[1]), int(parts[2])
         except ValueError:
             continue
-        if pid in pids:
+        if pid in owned:
             per_gpu_mib[gpu_uuid] = per_gpu_mib.get(gpu_uuid, 0) + mib
     if not per_gpu_mib:
         return 0
-    peak_mib = max(per_gpu_mib.values())
-    return -(-peak_mib // 1024)  # ceil to GiB
+    return -(-max(per_gpu_mib.values()) // 1024)
+
+
+def smi_job_used_gb(root_pid: int) -> int:
+    """Legacy process-tree attribution for slots without a cgroup."""
+    return smi_pids_used_gb(_proc_tree_pids(root_pid))

@@ -205,10 +205,13 @@ class JobStorage:
     def write_job(self, prefix: str, job: Job):
         blob_path = f"{prefix}/{job.job_id}.json"
         self._upload_text(blob_path, job.to_json())
+        from ..ram_sizing import command_family
         meta = {
             "gpu_mem_gb": str(int(getattr(job, "gpu_mem_gb", 0) or 0)),
             "priority": str(int(getattr(job, "priority", 0) or 0)),
             "gpu_type": str(getattr(job, "gpu_type", "") or ""),
+            "peak_host_ram_gb": str(float(getattr(job, "peak_host_ram_gb", 0.0) or 0.0)),
+            "ram_family": command_family(getattr(job, "command", "") or ""),
         }
         if self._azure_backend is not None:
             self._azure_backend.set_metadata(blob_path, meta)

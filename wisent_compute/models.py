@@ -61,6 +61,20 @@ class Job:
     job_id: str
     command: str
     gpu_mem_gb: int = 0
+    # Host-RAM admission contract. Zero means a legacy/unestimated request;
+    # the local agent applies its documented conservative fallback.
+    ram_request_gb: float = 0.0
+    ram_estimation_source: str = ""
+    # Measured cgroup-v2 high-water mark, written when a local slot settles.
+    peak_host_ram_gb: float = 0.0
+    peak_host_ram_source: str = ""
+    # cgroup-v2 OOM counters captured with the RAM high-water mark.
+    memory_oom_events: int = 0
+    memory_oom_kill_events: int = 0
+    # Ordinary jobs must leave no descendants. Service-mode jobs explicitly
+    # opt into a long-lived descendant contract and are not auto-completed.
+    service_mode: bool = False
+    resource_scope: str = ""
     gpu_type: str = ""
     machine_type: str = ""
     provider: str = "gcp"

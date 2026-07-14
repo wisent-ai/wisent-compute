@@ -25,7 +25,18 @@ from pathlib import Path
 from ... import constants as _wc
 from ...models import JobState, activation_extraction_must_share_gpu, deprecated_activation_command_reason
 from ...queue.storage import JobStorage
-from .helpers.gpu_probe import smi_job_used_gb
+from .helpers.gpu_probe import smi_job_used_gb, smi_pids_used_gb
+from .resource_scope import (
+    ScopeProcess,
+    active_scopes,
+    cgroup_v2_available,
+    control_group,
+    scope_command,
+    scope_pids,
+    scope_stats,
+    terminate_scope,
+    unit_name,
+)
 
 _HF_WRITE_TOK: dict = {}
 
@@ -275,13 +286,39 @@ def _mirror_to_output_uri(store: JobStorage, job, log_fn) -> None:
         log_fn(f"output_uri mirror ok: {job.job_id} -> {uri}")
 
 
+def _start_scope_sampler(slot: dict) -> None:
+    """Continuously retain cgroup peak/OOM evidence until the scope drains."""
+    import threading
+
+    cgroup = slot.get("cgroup", "")
+    if not cgroup:
+        return
+
+    def _run() -> None:
+        while True:
+            stats = scope_stats(cgroup)
+            slot["peak_host_ram_gb"] = max(
+                float(slot.get("peak_host_ram_gb", 0.0) or 0.0),
+                stats.peak_gb,
+            )
+            slot["memory_current_gb"] = stats.current_gb
+            slot["oom_events"] = max(int(slot.get("oom_events", 0)), stats.oom_events)
+            slot["oom_kill_events"] = max(
+                int(slot.get("oom_kill_events", 0)), stats.oom_kill_events,
+            )
+            slot["scope_pids"] = stats.pids
+            if slot["proc"].poll() is not None and not stats.pids:
+                return
+            time.sleep(0.25)
+
+    threading.Thread(
+        target=_run, name=f"scope-{slot['job'].job_id}", daemon=True,
+    ).start()
+
+
 def start_slot(store: JobStorage, job, hostname: str, log_fn,
                kind: str = "local") -> dict | None:
-    """Spawn a subprocess for `job`, register it in 'running' state, return slot.
-
-    Returns None when apt-install (job.apt_packages) refuses or fails —
-    the caller should leave the job in queue/ for another agent to claim.
-    """
+    """Spawn a subprocess in an owned cgroup and register it as running."""
     cmd = getattr(job, "command", "") or ""
     if activation_extraction_must_share_gpu(cmd):
         job.exclusive = False
@@ -304,47 +341,172 @@ def start_slot(store: JobStorage, job, hostname: str, log_fn,
     if raw_refusal:
         log_fn(f"refuse {job.job_id}: {raw_refusal}")
         return None
+
     work_dir = f"/tmp/wc-{job.job_id}"
     os.makedirs(f"{work_dir}/output", exist_ok=True)
+    full_command = _repo_prelude(job) + _pre_command_prelude(job) + job.command
+    use_scope = cgroup_v2_available()
+    scope_required = (
+        os.environ.get("WC_ADMISSION_POLICY_V2", "legacy").strip().lower()
+        == "enforce"
+    )
+    if scope_required and not use_scope:
+        log_fn(f"refuse {job.job_id}: enforce mode requires cgroup v2 ownership")
+        return None
+    unit = unit_name(job.job_id) if use_scope else ""
+    job.resource_scope = unit
+
+    fleet_staging = (
+        os.environ.get("WISENT_FLEET_STAGING_DIR")
+        or os.path.join(os.environ.get("TMPDIR", "/tmp"), "wisent_fleet_staging")
+    )
+    os.makedirs(fleet_staging, exist_ok=True)
+    job_env = {
+        **os.environ,
+        "WISENT_DTYPE": "auto",
+        "PYTHONUNBUFFERED": "1",
+        "HF_HUB_DISABLE_XET": "1",
+        "WISENT_FLEET_STAGING_DIR": fleet_staging,
+        "WC_JOB_ID": job.job_id,
+    }
+    hf_token = _hf_write_token(store)
+    if hf_token:
+        job_env["HF_TOKEN"] = job_env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+
+    if use_scope:
+        launch, systemd_env, unit = scope_command(job.job_id, full_command)
+        launch_env = {**systemd_env, **job_env}
+    else:
+        launch = full_command
+        launch_env = job_env
+
     _write_status(store, job.job_id, f"RUNNING {datetime.now(timezone.utc).isoformat()}")
     job.state = JobState.RUNNING.value
     job.started_at = datetime.now(timezone.utc).isoformat()
     job.instance_ref = f"local@{hostname}"
     store.move_job(job, "queue", "running")
     log_file = open(f"{work_dir}/output/command_output.log", "w")
-    full_command = _repo_prelude(job) + _pre_command_prelude(job) + job.command
-    # WISENT_FLEET_STAGING_DIR points at a persistent agent-owned staging
-    # dir. wisent's upload_extracted_activations writes shards there and
-    # SKIPS the per-job flush. The agent flushes the whole dir periodically
-    # across ALL jobs as one HF commit — reduces 429 risk drastically.
-    fleet_staging = (
-        os.environ.get("WISENT_FLEET_STAGING_DIR")
-        or os.path.join(os.environ.get("TMPDIR", "/tmp"), "wisent_fleet_staging")
+    try:
+        proc = subprocess.Popen(
+            launch,
+            shell=not use_scope,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            cwd=work_dir,
+            env=launch_env,
+            start_new_session=True,
+        )
+        cgroup = control_group(unit) if use_scope else ""
+    except BaseException as exc:
+        if use_scope:
+            terminate_scope(unit)
+        if use_scope and not scope_required:
+            log_fn(
+                f"scope launch unavailable for {job.job_id}; "
+                f"legacy process-group fallback: {type(exc).__name__}"
+            )
+            job.resource_scope = ""
+            store.write_job("running", job)
+            try:
+                proc = subprocess.Popen(
+                    full_command,
+                    shell=True,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    cwd=work_dir,
+                    env=job_env,
+                    start_new_session=True,
+                )
+            except BaseException as fallback_exc:
+                exc = fallback_exc
+            else:
+                use_scope = False
+                unit = ""
+                cgroup = ""
+        if use_scope:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+            job.state = JobState.QUEUED.value
+            job.started_at = None
+            job.instance_ref = None
+            job.resource_scope = ""
+            store.move_job(job, "running", "queue")
+            log_fn(
+                f"refuse {job.job_id}: resource scope launch failed: "
+                f"{type(exc).__name__}"
+            )
+            return None
+
+    slot = {
+        "proc": proc,
+        "job": job,
+        "log_file": log_file,
+        "last_hb": time.time(),
+        "paused": False,
+        "peak_vram_gb": 0,
+        "peak_host_ram_gb": 0.0,
+        "memory_current_gb": 0.0,
+        "oom_events": 0,
+        "oom_kill_events": 0,
+        "started_mono": time.monotonic(),
+        "scope_unit": unit,
+        "cgroup": cgroup,
+        "scope_pids": (),
+    }
+    log_fn(
+        f"Started job {job.job_id} in "
+        f"{unit or 'legacy-process-group'}: {job.command[:60]}"
     )
-    os.makedirs(fleet_staging, exist_ok=True)
-    job_env = {**os.environ, "WISENT_DTYPE": "auto", "PYTHONUNBUFFERED": "1", "HF_HUB_DISABLE_XET": "1",
-               "WISENT_FLEET_STAGING_DIR": fleet_staging, "WC_JOB_ID": job.job_id}
-    _hf = _hf_write_token(store)
-    if _hf:
-        job_env["HF_TOKEN"] = job_env["HUGGING_FACE_HUB_TOKEN"] = _hf
-    proc = subprocess.Popen(
-        full_command, shell=True, stdout=log_file, stderr=subprocess.STDOUT,
-        cwd=work_dir, env=job_env,
-        # Own session/process group so a cooperative yield (request_yield)
-        # can signal the WHOLE job tree via the group, and SIGKILL it
-        # cleanly if the grace is blown — without that, killing only the
-        # shell pid would orphan the GPU process and never free its VRAM.
-        # The existing Vast SIGSTOP/SIGCONT still target proc.pid directly,
-        # so their behavior is unchanged.
-        start_new_session=True,
-    )
-    log_fn(f"Started job {job.job_id}: {job.command[:60]}")
     _write_heartbeat(store, job.job_id)
     _start_heartbeat_thread(store, job.job_id, proc)
-    last_hb = time.time()
-    return {"proc": proc, "job": job, "log_file": log_file,
-            "last_hb": last_hb, "paused": False, "peak_vram_gb": 0,
-            "started_mono": time.monotonic()}
+    _start_scope_sampler(slot)
+    return slot
+def reconstruct_slots(store: JobStorage, log_fn) -> list[dict]:
+    """Recover active scope ownership after an agent process restart."""
+    scopes = active_scopes()
+    if not scopes:
+        return []
+    recovered: list[dict] = []
+    for job in store.list_jobs("running"):
+        unit = str(getattr(job, "resource_scope", "") or "")
+        cgroup = scopes.get(unit)
+        if not cgroup:
+            continue
+        work_dir = f"/tmp/wc-{job.job_id}"
+        os.makedirs(f"{work_dir}/output", exist_ok=True)
+        log_file = open(f"{work_dir}/output/command_output.log", "a")
+        proc = ScopeProcess(unit, cgroup)
+        stats = scope_stats(cgroup)
+        slot = {
+            "proc": proc,
+            "job": job,
+            "log_file": log_file,
+            "last_hb": time.time(),
+            "paused": False,
+            "peak_vram_gb": 0,
+            "peak_host_ram_gb": stats.peak_gb,
+            "memory_current_gb": stats.current_gb,
+            "oom_events": stats.oom_events,
+            "oom_kill_events": stats.oom_kill_events,
+            "started_mono": time.monotonic(),
+            "scope_unit": unit,
+            "cgroup": cgroup,
+            "scope_pids": stats.pids,
+            "reconstructed": True,
+        }
+        _write_heartbeat(store, job.job_id)
+        _start_heartbeat_thread(store, job.job_id, proc)
+        _start_scope_sampler(slot)
+        recovered.append(slot)
+        log_fn(f"reconstructed job {job.job_id} from {unit}")
+    known = {slot["scope_unit"] for slot in recovered}
+    for orphan in sorted(set(scopes) - known):
+        log_fn(f"orphaned Stado scope left untouched for audit: {orphan}")
+    return recovered
+
+
 
 
 def request_yield(slot: dict, store: JobStorage, log_fn) -> bool:
@@ -395,11 +557,8 @@ def request_yield(slot: dict, store: JobStorage, log_fn) -> bool:
     while proc.poll() is None and time.time() < deadline:
         time.sleep(1)
     if proc.poll() is None:
-        log_fn(f"yield: {job.job_id} still alive after grace — SIGKILL group {pgid}")
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        log_fn(f"yield: {job.job_id} still alive after grace — terminating owned scope")
+        _terminate_owned_descendants(slot)
         try:
             proc.wait(timeout=10)
         except Exception:
@@ -429,6 +588,56 @@ def request_yield(slot: dict, store: JobStorage, log_fn) -> bool:
     return True
 
 
+def _refresh_scope_stats(slot: dict) -> tuple[int, ...]:
+    cgroup = slot.get("cgroup", "")
+    if not cgroup:
+        return ()
+    stats = scope_stats(cgroup)
+    slot["peak_host_ram_gb"] = max(
+        float(slot.get("peak_host_ram_gb", 0.0) or 0.0), stats.peak_gb,
+    )
+    slot["memory_current_gb"] = stats.current_gb
+    slot["oom_events"] = max(int(slot.get("oom_events", 0)), stats.oom_events)
+    slot["oom_kill_events"] = max(
+        int(slot.get("oom_kill_events", 0)), stats.oom_kill_events,
+    )
+    slot["scope_pids"] = stats.pids
+    return stats.pids
+
+
+def _terminate_owned_descendants(slot: dict) -> None:
+    unit = slot.get("scope_unit", "")
+    if unit:
+        terminate_scope(unit)
+        slot["scope_pids"] = ()
+        return
+    proc = slot.get("proc")
+    if proc is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _signal_owned(slot: dict, sig: signal.Signals) -> None:
+    pids = _refresh_scope_stats(slot)
+    if pids:
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                continue
+        return
+    proc = slot.get("proc")
+    if proc is None or not proc.pid:
+        return
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
 def _tail_log(path: str, max_bytes: int = 4096) -> str:
     """Last max_bytes of the per-job log; '' if missing."""
     if not Path(path).exists():
@@ -447,10 +656,7 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
     job = slot["job"]
     for terminal_prefix in ("uploaded", "completed"):
         if store.read_job(terminal_prefix, job.job_id):
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+            _terminate_owned_descendants(slot)
             try:
                 slot["log_file"].flush(); slot["log_file"].close()
             except Exception:
@@ -463,15 +669,35 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
             return False
     if not slot["paused"] and vast_active:
         log_fn(f"Renter detected, pausing job {job.job_id}")
-        os.kill(proc.pid, signal.SIGSTOP)
+        _signal_owned(slot, signal.SIGSTOP)
         slot["paused"] = True
     elif slot["paused"] and not vast_active:
         log_fn(f"Renter gone, resuming job {job.job_id}")
-        os.kill(proc.pid, signal.SIGCONT)
+        _signal_owned(slot, signal.SIGCONT)
         slot["paused"] = False
     ret = proc.poll()
+    owned_pids = _refresh_scope_stats(slot)
+    if owned_pids:
+        owned_vram = smi_pids_used_gb(owned_pids)
+        if owned_vram > slot.get("peak_vram_gb", 0):
+            slot["peak_vram_gb"] = owned_vram
     if ret is not None:
-        verify_err = ""
+        descendant_err = ""
+        if bool(getattr(job, "service_mode", False)) and owned_pids:
+            now = time.time()
+            if now - slot["last_hb"] > HEARTBEAT_INTERVAL:
+                _write_heartbeat(store, job.job_id)
+                slot["last_hb"] = now
+            return True
+        if owned_pids:
+            descendant_err = (
+                f"ordinary job left {len(owned_pids)} owned descendants "
+                "after its parent exited"
+            )
+            log_fn(f"{descendant_err}; terminating scope before state transition")
+            ret = 2001
+        _terminate_owned_descendants(slot)
+        verify_err = descendant_err
         if ret == 0 and (getattr(job, "verify_command", "") or "").strip():
             # Verification hook — see Job.verify_command docstring. Runs in
             # the same workdir as the original command. Non-zero exit
@@ -525,6 +751,15 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
         # trusts only flagged peaks, so legacy summed records can no
         # longer poison the model max().
         job.peak_vram_per_gpu = True
+        job.peak_host_ram_gb = max(
+            float(getattr(job, "peak_host_ram_gb", 0.0) or 0.0),
+            float(slot.get("peak_host_ram_gb", 0.0) or 0.0),
+        )
+        job.peak_host_ram_source = (
+            "cgroup_v2_memory_peak" if slot.get("cgroup") else "unavailable"
+        )
+        job.memory_oom_events = int(slot.get("oom_events", 0) or 0)
+        job.memory_oom_kill_events = int(slot.get("oom_kill_events", 0) or 0)
         if state == JobState.FAILED:
             from ...sizing import escalate_on_oom
             if escalate_on_oom(store, job, job.error or ""):
@@ -548,7 +783,11 @@ def advance_slot(slot: dict, store: JobStorage, vast_active: bool, log_fn) -> bo
             log_fn(f"Job {job.job_id} {state.value}")
         return False
     now = time.time()
-    _used = smi_job_used_gb(proc.pid)
+    _used = (
+        smi_pids_used_gb(owned_pids)
+        if slot.get("cgroup")
+        else smi_job_used_gb(proc.pid)
+    )
     if _used > slot.get("peak_vram_gb", 0):
         slot["peak_vram_gb"] = _used
     if not slot["paused"] and now - slot["last_hb"] > HEARTBEAT_INTERVAL:

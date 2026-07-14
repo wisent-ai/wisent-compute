@@ -20,6 +20,16 @@ from ..config import BUCKET, estimate_gpu_memory
 from ..models import activation_extraction_must_share_gpu
 from ..queue.capacity import publish_capacity
 from ..queue.storage import JobStorage
+from ..ram_sizing import effective_job_ram_request
+from .local.admission import (
+    AdmissionPolicy,
+    AdmissionReason,
+    JobRequest,
+    ProjectedClaims,
+    evaluate_admission,
+)
+from .local.telemetry import collect_host_snapshot
+from .local.external import occupancy_diagnostics
 from .local.helpers import (
     _build_capacity_dict,
     _detect_gpu_type,
@@ -299,7 +309,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     No global error handler wraps the loop body: unexpected exceptions
     crash the agent visibly so the operator can diagnose.
     """
-    from .local.slots import advance_slot, start_slot
+    from .local.slots import advance_slot, reconstruct_slots, start_slot
     from ..targets import lookup_self
     if not gpu_type: gpu_type = _detect_gpu_type()
     total_vram_gb = max(1, _detect_local_vram_gb())
@@ -317,7 +327,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     store = JobStorage(BUCKET)
     _log("init: JobStorage done")
     consumer_id = f"{kind}-{hostname}"
-    slots: list[dict] = []
+    slots: list[dict] = reconstruct_slots(store, _log)
     agent_diag: dict = {}
     fleet_staging = os.environ.get("WISENT_FLEET_STAGING_DIR", "/tmp/wisent_fleet_staging")
     last_fleet_flush = time.time()
@@ -425,6 +435,10 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if t.vram_gb and int(t.vram_gb) != total_vram_gb:
                 _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
                 total_vram_gb = int(t.vram_gb)
+        agent_diag["occupancy"] = occupancy_diagnostics(
+            slots,
+            policies=(t.external_workloads if t and t.kind == "local" else ()),
+        )
         # Cleanup already ran before upgrade checks. This gate is now strictly
         # admission/diagnostics-only and has no destructive side effects.
         from .local.disk import gate_and_maybe_evict as _disk_gate_pre
@@ -456,7 +470,37 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             time.sleep(10)
             continue
         vram_buffer_gb = _vram_safety_buffer_gb(total_vram_gb)
+        admission_mode = os.environ.get("WC_ADMISSION_POLICY_V2", "legacy").strip().lower()
+        if admission_mode not in {"legacy", "shadow", "enforce"}:
+            admission_mode = "legacy"
+        snapshot = collect_host_snapshot(
+            gpu_total_gb=total_vram_gb,
+            gpu_free_gb=free_vram_gb if smi_free >= 0 else -1.0,
+        )
+        admission_policy = AdmissionPolicy(
+            ram_safety_headroom_gb=_ram_safety_buffer_gb(),
+            vram_safety_headroom_gb=vram_buffer_gb,
+        )
+        agent_diag["admission_v2_mode"] = admission_mode
+        agent_diag["host"] = {
+            "mem_total_gb": round(snapshot.mem_total_gb, 2),
+            "mem_available_gb": round(snapshot.mem_available_gb, 2),
+            "swap_free_gb": round(snapshot.swap_free_gb, 2),
+            "gpu_total_gb": round(snapshot.gpu_total_gb, 2),
+            "gpu_free_gb": round(snapshot.gpu_free_gb, 2),
+            "timestamp": snapshot.timestamp,
+            "telemetry_quality": snapshot.telemetry_quality,
+        }
+        agent_diag["policy"] = {
+            "ram_safety_headroom_gb": round(admission_policy.ram_safety_headroom_gb, 2),
+            "vram_safety_headroom_gb": round(admission_policy.vram_safety_headroom_gb, 2),
+        }
         settling_slots = [s for s in slots if _slot_waiting_for_vram(s)]
+        agent_diag["settling_timed_out_slot_ids"] = [
+            getattr(slot.get("job"), "job_id", "")
+            for slot in slots
+            if slot.get("settling_timed_out")
+        ]
         if settling_slots:
             agent_diag["settling_slot_ids"] = [
                 getattr(s.get("job"), "job_id", "") for s in settling_slots
@@ -516,17 +560,33 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         )
         slot_cap_reached = hard_slot_cap > 0 and len(slots) >= hard_slot_cap
         if free_vram_gb <= 0 or (slot_cap_reached and not all_active_share_gpu):
+            agent_diag["last_gate_reason"] = (
+                AdmissionReason.HARD_SLOT_CAP.value
+                if slot_cap_reached
+                else AdmissionReason.EXCLUSIVE_CONFLICT.value
+                if any(_slot_is_exclusive(slot) for slot in slots)
+                else AdmissionReason.INSUFFICIENT_VRAM.value
+            )
             time.sleep(10)
             continue
-        # RAM gate: refuse new slots when MemAvailable drops below the
-        # measured non-wisent baseline (ComfyUI, system daemons) plus a
-        # dynamic safety buffer. This replaces the previous 30%-of-total
-        # guess with a live reserve computed from /proc/*/status.
-        _fr = _free_ram_gb()
-        _ram_reserve = _static_ram_reserve_gb() + _ram_safety_buffer_gb()
-        if 0 <= _fr < _ram_reserve:
-            _log(f"RAM gate: {int(_fr)} GB free < {int(_ram_reserve)} GB reserve; skipping claims")
-            time.sleep(10); continue
+        # Legacy is retained only for rollback and shadow comparison. Enforce
+        # mode exclusively uses the per-job projected equation below.
+        legacy_ram_blocked = False
+        if admission_mode != "enforce":
+            _fr = _free_ram_gb()
+            _ram_reserve = _static_ram_reserve_gb() + _ram_safety_buffer_gb()
+            legacy_ram_blocked = 0 <= _fr < _ram_reserve
+            if legacy_ram_blocked:
+                agent_diag["legacy_ram_blocked"] = True
+                agent_diag["legacy_ram_free_gb"] = round(_fr, 2)
+                agent_diag["legacy_ram_reserve_gb"] = round(_ram_reserve, 2)
+                if admission_mode == "legacy":
+                    _log(
+                        f"RAM gate: {int(_fr)} GB free < "
+                        f"{int(_ram_reserve)} GB reserve; skipping claims"
+                    )
+                    time.sleep(10)
+                    continue
 
         # Centralized assignment writes job.assigned_to on the queue blob;
         # _job_eligible(consumer_id=...) below filters to ONLY the jobs this
@@ -538,6 +598,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         diag_vram_rejected = 0
         diag_eligibility_rejected = 0
         diag_eligible = 0
+        projected_claims = ProjectedClaims()
+        admission_reasons: dict[str, int] = {}
         max_claims = int(os.environ.get("WC_LOCAL_MAX_CLAIMS_PER_TICK", "0") or 0)
         raw_reserve = float(os.environ.get("WISENT_RAW_CLAIM_RESERVE_GB", "180") or 180)
         raw_min_free = float(os.environ.get(
@@ -559,6 +621,9 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             is_raw_share = activation_extraction_must_share_gpu(cmd)
             if is_raw_share and raw_free >= 0 and raw_free - raw_reserved - raw_reserve < raw_min_free:
                 diag_raw_disk_rejected += 1
+                admission_reasons[AdmissionReason.DISK_GATE.value] = (
+                    admission_reasons.get(AdmissionReason.DISK_GATE.value, 0) + 1
+                )
                 agent_diag["raw_claim_free_gb"] = round(raw_free, 1)
                 agent_diag["raw_claim_reserved_gb"] = round(raw_reserved, 1)
                 continue
@@ -572,17 +637,80 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if slot_cap_reached and not (
                 all_active_share_gpu and activation_extraction_must_share_gpu(cmd)
             ):
+                admission_reasons[AdmissionReason.HARD_SLOT_CAP.value] = (
+                    admission_reasons.get(AdmissionReason.HARD_SLOT_CAP.value, 0) + 1
+                )
+                continue
+            if not _job_eligible(
+                job,
+                gpu_type,
+                total_vram_gb,
+                kind=kind,
+                consumer_id=consumer_id,
+                active_slot_count=len(slots),
+            ):
+                diag_eligibility_rejected += 1
+                assigned = getattr(job, "assigned_to", "") or ""
+                reason = (
+                    AdmissionReason.ASSIGNED_TO_OTHER_AGENT.value
+                    if assigned and assigned != consumer_id
+                    else AdmissionReason.EXCLUSIVE_CONFLICT.value
+                    if bool(getattr(job, "exclusive", False)) and slots
+                    else "INELIGIBLE_TARGET"
+                )
+                admission_reasons[reason] = admission_reasons.get(reason, 0) + 1
+                agent_diag["last_gate_reason"] = reason
                 continue
             need = max(
                 int(getattr(job, "gpu_mem_gb", 0) or 0),
                 estimate_gpu_memory(cmd),
             )
+            ram_request_gb, ram_source = effective_job_ram_request(
+                job,
+                store=store,
+                mem_total_gb=snapshot.mem_total_gb,
+                mem_available_gb=snapshot.mem_available_gb,
+                ram_safety_headroom_gb=admission_policy.ram_safety_headroom_gb,
+            )
+            request = JobRequest(
+                ram_request_gb=ram_request_gb,
+                vram_request_gb=float(need),
+                ram_estimation_source=ram_source,
+                vram_estimation_source=(
+                    "job.gpu_mem_gb"
+                    if int(getattr(job, "gpu_mem_gb", 0) or 0) > 0
+                    else "command_estimate"
+                ),
+                exclusive=bool(getattr(job, "exclusive", False)),
+                priority=int(getattr(job, "priority", 0) or 0),
+            )
+            if admission_mode != "legacy":
+                decision = evaluate_admission(
+                    snapshot, request, projected_claims, admission_policy,
+                )
+                reason = decision.reason_code.value
+                admission_reasons[reason] = admission_reasons.get(reason, 0) + 1
+                agent_diag["last_admission_v2"] = {
+                    "job_id": job.job_id,
+                    **decision.as_dict(),
+                    "ram_estimation_source": ram_source,
+                }
+                if admission_mode == "shadow":
+                    agent_diag["last_admission_v2"]["legacy_ram_blocked"] = legacy_ram_blocked
+                    if decision.accepted:
+                        projected_claims.reserve(request)
+                    if legacy_ram_blocked:
+                        continue
+                elif not decision.accepted:
+                    if decision.reason_code is AdmissionReason.INSUFFICIENT_VRAM:
+                        diag_vram_rejected += 1
+                    continue
             # Hard VRAM safety buffer: refuse if declared use after admission
             # would leave less than the dynamic VRAM safety buffer. Use live
             # free VRAM, not only slot-declared usage, so external users such
             # as ComfyUI are included in the post-claim margin.
             claimable_vram_gb = max(0, free_vram_gb - _vram_safety_buffer_gb(total_vram_gb))
-            if need > claimable_vram_gb:
+            if admission_mode != "enforce" and need > claimable_vram_gb:
                 diag_vram_rejected += 1
                 agent_diag["last_buffer_reject_job_id"] = job.job_id
                 agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()
@@ -593,15 +721,13 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             # cases where nvidia-smi temporarily under-reports a starting
             # child process.
             projected_used = sum(_slot_vram(s) for s in slots) + need
-            if projected_used > total_vram_gb - _vram_safety_buffer_gb(total_vram_gb):
+            if (
+                admission_mode != "enforce"
+                and projected_used > total_vram_gb - _vram_safety_buffer_gb(total_vram_gb)
+            ):
                 diag_vram_rejected += 1
                 agent_diag["last_buffer_reject_job_id"] = job.job_id
                 agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()
-                continue
-            if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind,
-                                  consumer_id=consumer_id,
-                                  active_slot_count=len(slots)):
-                diag_eligibility_rejected += 1
                 continue
             diag_eligible += 1
             try:
@@ -624,6 +750,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 continue
             new_slot["disk_cleanup_lock"] = workload_lock
             slots.append(new_slot)
+            if admission_mode == "enforce":
+                projected_claims.reserve(request)
             free_vram_gb -= need
             if is_raw_share:
                 raw_reserved += raw_reserve
@@ -634,7 +762,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 break
             if max_claims > 0 and started >= max_claims:
                 break
-            if free_vram_gb <= VRAM_SAFETY_BUFFER_GB:
+            if free_vram_gb <= vram_buffer_gb:
                 break
         agent_diag["queue_scanned"] = len(queued)
         agent_diag["vram_rejected"] = diag_vram_rejected
@@ -642,6 +770,11 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
         agent_diag["eligibility_rejected"] = diag_eligibility_rejected
         agent_diag["eligible_count"] = diag_eligible
         agent_diag["claimed_this_loop"] = started
+        agent_diag["admission_v2_reasons"] = dict(sorted(admission_reasons.items()))
+        agent_diag["projected_claims"] = {
+            "ram_gb": round(projected_claims.ram_gb, 2),
+            "vram_gb": round(projected_claims.vram_gb, 2),
+        }
         agent_diag["last_claim_attempt_at"] = datetime.now(timezone.utc).isoformat()
 
         if started > 0:

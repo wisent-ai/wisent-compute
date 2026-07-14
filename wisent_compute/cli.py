@@ -94,6 +94,9 @@ def install_disk_cleanup():
 @click.option("--vram-gb", type=int, default=0,
               help="Caller-declared VRAM (GB). Picks the smallest SKU whose tier >= this value. "
                    "Skips the --model regex inference.")
+@click.option("--ram-gb", type=float, default=0.0,
+              help="Caller-declared peak host RAM (GiB). Overrides profile, measured history, "
+                   "model catalog, and the conservative legacy fallback.")
 @click.option("--machine-type", default="",
               help="Pin the GCE/Azure machine type verbatim (e.g. 'g2-standard-8'). "
                    "Use for SKUs not in the wisent-compute catalog.")
@@ -115,6 +118,9 @@ def install_disk_cleanup():
                    "empty slot and refuses to admit any other job while it runs. "
                    "Use for diffusion training / full-finetunes whose peak VRAM "
                    "can't be safely co-tenanted.")
+@click.option("--service-mode", is_flag=True, default=False,
+              help="Explicitly allow owned descendants to outlive the command parent. "
+                   "The job remains running until its cgroup drains.")
 @click.option("--yieldable", is_flag=True, default=False,
               help="Background job: the local agent may EVICT this slot for a "
                    "strictly-higher-priority queued job that doesn't otherwise "
@@ -135,9 +141,9 @@ def install_disk_cleanup():
                    "Run `wcomp profiles` to list available profiles.")
 def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider, priority,
            repo, repo_workdir, repo_extras,
-           gpu_type, vram_gb, machine_type,
+           gpu_type, vram_gb, ram_gb, machine_type,
            pre_command, apt_packages, output_uri, verify_command,
-           exclusive,
+           exclusive, service_mode,
            yieldable, yield_command, yield_grace_seconds,
            profile_name):
     """Submit a job (or batch) to the queue."""
@@ -148,6 +154,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
             "kill-and-restart path."
         )
     apt_list = [p.strip() for p in apt_packages.split(",") if p.strip()]
+    ram_was_explicit = ram_gb > 0
 
     # Profile merge — CLI args win on conflict. The submit_job kwargs
     # dict is built from the Click values (which all have known defaults),
@@ -160,11 +167,12 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         except FileNotFoundError as e:
             raise click.ClickException(str(e))
         cli_kwargs = {
-            "gpu_type": gpu_type, "vram_gb": vram_gb, "machine_type": machine_type,
-            "apt_packages": apt_list, "pre_command": pre_command,
+            "gpu_type": gpu_type, "vram_gb": vram_gb, "ram_gb": ram_gb,
+            "machine_type": machine_type, "apt_packages": apt_list,
             "repo": repo, "repo_workdir": repo_workdir, "repo_extras": repo_extras,
             "output_uri": output_uri, "verify_command": verify_command,
             "exclusive": exclusive,
+            "service_mode": service_mode,
             "priority": priority, "preemptible": spot,
             "max_cost_per_hour_usd": max_cost_per_hour,
             "provider": provider, "pin_to_provider": not any_provider,
@@ -172,6 +180,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         merged = merge_into_kwargs(prof, cli_kwargs)
         gpu_type = merged["gpu_type"]
         vram_gb = merged["vram_gb"]
+        ram_gb = merged["ram_gb"]
         machine_type = merged["machine_type"]
         apt_list = merged["apt_packages"]
         pre_command = merged["pre_command"]
@@ -181,6 +190,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         output_uri = merged["output_uri"]
         verify_command = merged["verify_command"]
         exclusive = merged["exclusive"]
+        service_mode = merged["service_mode"]
         priority = merged["priority"]
         spot = merged["preemptible"]
         max_cost_per_hour = merged["max_cost_per_hour_usd"]
@@ -200,10 +210,12 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         preemptible=spot, max_cost_per_hour_usd=max_cost_per_hour,
         pin_to_provider=not any_provider, priority=priority,
         repo=repo, repo_workdir=repo_workdir, repo_extras=repo_extras,
-        gpu_type=gpu_type, vram_gb=vram_gb, machine_type=machine_type,
+        gpu_type=gpu_type, vram_gb=vram_gb, ram_gb=ram_gb,
+        ram_estimation_source=("explicit" if ram_was_explicit else "profile" if ram_gb > 0 else ""),
+        machine_type=machine_type,
         pre_command=pre_command, apt_packages=apt_list,
         output_uri=output_uri, verify_command=verify_command,
-        exclusive=exclusive,
+        exclusive=exclusive, service_mode=service_mode,
         yieldable=yieldable, yield_command=yield_command,
         yield_grace_seconds=yield_grace_seconds,
     )
@@ -216,6 +228,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
     if priority: flags.append(f"priority={priority}")
     if gpu_type: flags.append(f"gpu={gpu_type}")
     if vram_gb: flags.append(f"vram={vram_gb}G")
+    if ram_gb: flags.append(f"ram={ram_gb:g}G")
     if machine_type: flags.append(f"mt={machine_type}")
     if apt_list: flags.append(f"apt={','.join(apt_list)}")
     if pre_command: flags.append("pre_cmd")

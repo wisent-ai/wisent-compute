@@ -98,9 +98,25 @@ def render_html(state: dict[str, Any], cleanup: dict[str, Any], refresh: int) ->
     agents = state.get("live_agents") if isinstance(state.get("live_agents"), list) else []
     for agent in agents:
         slots = ", ".join(f"{key}:{value}" for key, value in agent.get("free_slots", {}).items())
-        values = (agent.get("consumer_id"), agent.get("kind"), slots,
-                  f"{agent.get('free_vram_gb', '?')}/{agent.get('total_vram_gb', '?')}",
-                  f"{_format_age(agent.get('age_seconds'))} ago")
+        diag = agent.get("diag") if isinstance(agent.get("diag"), dict) else {}
+        host = diag.get("host") if isinstance(diag.get("host"), dict) else {}
+        decision = (
+            diag.get("last_admission_v2")
+            if isinstance(diag.get("last_admission_v2"), dict)
+            else {}
+        )
+        occupancy = diag.get("occupancy") if isinstance(diag.get("occupancy"), dict) else {}
+        values = (
+            agent.get("consumer_id"),
+            agent.get("kind"),
+            diag.get("admission_v2_mode", "legacy"),
+            slots,
+            f"{agent.get('free_vram_gb', '?')}/{agent.get('total_vram_gb', '?')}",
+            f"{host.get('mem_available_gb', '?')}/{host.get('mem_total_gb', '?')}",
+            decision.get("reason_code", "—"),
+            occupancy.get("external_vram_gb", "—"),
+            f"{_format_age(agent.get('age_seconds'))} ago",
+        )
         agent_rows.append("<tr>" + "".join(f"<td>{_e(value)}</td>" for value in values) + "</tr>")
 
     failed_rows = []
@@ -131,7 +147,7 @@ th,td{{border:1px solid #ddd;padding:4px 8px;text-align:left;vertical-align:top}
 <h2>queue</h2><div class="big">queued <strong>{_e(counts.get('queue', 0))}</strong> &nbsp; running <strong>{_e(counts.get('running', 0))}</strong> &nbsp; completed <strong>{_e(counts.get('completed', 0))}</strong> &nbsp; failed <strong>{_e(counts.get('failed', 0))}</strong></div>
 <h2>throughput &amp; ETA</h2><div>avg wall per completed job: <strong>{_e(_format_age(throughput.get('avg_wall_seconds_per_completed_job')))}</strong> ({_e(throughput.get('samples', 0))} samples)</div><div>live free slots across all agents: <strong>{_e(throughput.get('live_total_free_slots', 0))}</strong></div><div>projected drain of current queue: <strong>{_e(_format_age(throughput.get('projected_remaining_seconds')))}</strong></div>
 <h2>per model</h2><table><tr><th>model</th><th>queued</th><th>running</th><th>completed</th><th>failed</th></tr>{''.join(model_rows) or '<tr><td colspan="5" class="muted">no jobs</td></tr>'}</table>
-<h2>live agents</h2><table><tr><th>consumer_id</th><th>kind</th><th>free_slots</th><th>free/total vram (GB)</th><th>last heartbeat</th></tr>{''.join(agent_rows) or '<tr><td colspan="5" class="warn">no live agents</td></tr>'}</table><div class="muted">stale agents (heartbeat older than threshold): {_e(len(state.get('stale_agents', [])))}</div>
+<h2>live agents</h2><table><tr><th>consumer_id</th><th>kind</th><th>policy</th><th>free_slots</th><th>free/total vram (GB)</th><th>available/total RAM (GiB)</th><th>last admission</th><th>external VRAM (GiB)</th><th>last heartbeat</th></tr>{''.join(agent_rows) or '<tr><td colspan="9" class="warn">no live agents</td></tr>'}</table><div class="muted">stale agents (heartbeat older than threshold): {_e(len(state.get('stale_agents', [])))}</div>
 <h2>recent failed</h2><table><tr><th>job_id</th><th>model</th><th>task</th><th>error</th></tr>{''.join(failed_rows) or '<tr><td colspan="4" class="muted">none recent</td></tr>'}</table>
 <h2>recent completed</h2><table><tr><th>job_id</th><th>model</th><th>task</th><th>wall</th><th>completed_at</th></tr>{''.join(completed_rows) or '<tr><td colspan="5" class="muted">none recent</td></tr>'}</table>
 <script>

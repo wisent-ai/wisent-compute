@@ -65,6 +65,9 @@ class ComputeTarget:
     hostnames: list[str] = field(default_factory=list)
     weles: Optional[WelesPolicy] = None
     disk_cleanup: Optional[DiskCleanupPolicy] = None
+    # External tenants are protected by default. Any cooperative reclaim hook
+    # must be explicitly declared per target.
+    external_workloads: list[dict] = field(default_factory=list)
     # env_overrides and agent_args propagate via the GCS registry to running
     # agents — the agent compares them every poll and exits-for-restart when
     # they change, so systemd brings it back up with the new env / CLI flags.
@@ -81,7 +84,7 @@ def _from_dict(d: dict) -> ComputeTarget:
     known = {
         "name", "kind", "gpu_type", "slots", "ssh", "region",
         "spot", "max_concurrent", "team_id", "notes", "hostnames", "weles",
-        "disk_cleanup", "env_overrides", "agent_args", "vram_gb",
+        "disk_cleanup", "external_workloads", "env_overrides", "agent_args", "vram_gb",
     }
     extra = {k: v for k, v in d.items() if k not in known}
     weles_data = d.get("weles")
@@ -125,6 +128,7 @@ def _from_dict(d: dict) -> ComputeTarget:
         hostnames=list(d.get("hostnames") or []),
         weles=weles,
         disk_cleanup=disk_cleanup,
+        external_workloads=list(d.get("external_workloads") or []),
         env_overrides=dict(d.get("env_overrides") or {}),
         agent_args=list(d.get("agent_args") or []),
         vram_gb=d.get("vram_gb"),

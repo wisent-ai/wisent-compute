@@ -97,6 +97,41 @@ def _validate_disk_cleanup(value: Any, location: str) -> None:
         _require_int(cleaner["min_age_seconds"], f"{cleaner_location}.min_age_seconds", minimum)
 
 
+def _validate_external_workloads(value: Any, location: str) -> None:
+    if not isinstance(value, list):
+        _fail(location, "must be an array")
+    allowed = {
+        "name", "systemd_unit", "cgroup", "pid", "protected",
+        "cooperative_reclaim", "reclaim_command",
+    }
+    for index, workload in enumerate(value):
+        item = f"{location}[{index}]"
+        if not isinstance(workload, dict):
+            _fail(item, "must be an object")
+        unknown = set(workload) - allowed
+        if unknown:
+            _fail(item, f"unknown fields {sorted(unknown)!r}")
+        if not isinstance(workload.get("name"), str) or not workload["name"].strip():
+            _fail(f"{item}.name", "must be a non-empty string")
+        matchers = [
+            key for key in ("systemd_unit", "cgroup", "pid")
+            if workload.get(key) not in (None, "")
+        ]
+        if len(matchers) != 1:
+            _fail(item, "must declare exactly one systemd_unit, cgroup, or pid matcher")
+        if "pid" in matchers:
+            _require_int(workload["pid"], f"{item}.pid", 1)
+        for key in ("protected", "cooperative_reclaim"):
+            if key in workload and not isinstance(workload[key], bool):
+                _fail(f"{item}.{key}", "must be a boolean")
+        reclaim = bool(workload.get("cooperative_reclaim", False))
+        command = workload.get("reclaim_command", "")
+        if reclaim and (not isinstance(command, str) or not command.strip()):
+            _fail(f"{item}.reclaim_command", "is required for cooperative reclaim")
+        if reclaim and workload.get("protected", True):
+            _fail(item, "cooperative reclaim requires protected=false")
+
+
 def _target_identities(target: dict[str, Any], location: str) -> list[tuple[str, str]]:
     identities: list[tuple[str, str]] = []
     name = target["name"]
@@ -174,6 +209,13 @@ def validate_registry(data: Any) -> dict[str, Any]:
             if kind != "local":
                 _fail(f"{location}.disk_cleanup", "is allowed only for kind='local'")
             _validate_disk_cleanup(target["disk_cleanup"], f"{location}.disk_cleanup")
+
+        if "external_workloads" in target:
+            if kind != "local":
+                _fail(f"{location}.external_workloads", "is allowed only for kind='local'")
+            _validate_external_workloads(
+                target["external_workloads"], f"{location}.external_workloads",
+            )
 
         for identity, identity_location in _target_identities(target, location):
             previous = identities.get(identity)
