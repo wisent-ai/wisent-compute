@@ -25,21 +25,18 @@ cp "$ROOT/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
 cp "$EXECUTABLE" "$BUNDLE/Contents/MacOS/Stado"
 chmod +x "$BUNDLE/Contents/MacOS/Stado"
 
-IDENTITY="${STADO_SIGN_IDENTITY:-}"
+IDENTITY="${STADO_SIGN_IDENTITY:-${WISENT_CODESIGN_IDENTITY:-}}"
 if [[ -z "$IDENTITY" ]]; then
     IDENTITY=$(security find-identity -v -p codesigning \
         | awk -F '"' '/Developer ID Application/{print $2; exit}')
 fi
-if [[ -z "$IDENTITY" && "${STADO_ALLOW_DEVELOPMENT_SIGNING:-}" == "1" ]]; then
-    IDENTITY=$(security find-identity -v -p codesigning \
-        | awk -F '"' '/Apple Development/{print $2; exit}')
-fi
-if [[ -z "$IDENTITY" && "${STADO_ALLOW_ADHOC_SIGNING:-}" == "1" ]]; then
-    IDENTITY="-"
-fi
 if [[ -z "$IDENTITY" ]]; then
-    print -u2 "No Developer ID Application signing identity found."
-    print -u2 "Set STADO_SIGN_IDENTITY, STADO_ALLOW_DEVELOPMENT_SIGNING=1, or explicitly set STADO_ALLOW_ADHOC_SIGNING=1 for same-Mac use."
+    IDENTITY=$(security find-identity -v -p codesigning \
+        | awk -F '"' '/Apple Development:/{print $2; exit}')
+fi
+if [[ -z "$IDENTITY" || "$IDENTITY" == "-" ]]; then
+    print -u2 "A stable Developer ID Application or Apple Development signing identity is required."
+    print -u2 "Set STADO_SIGN_IDENTITY or WISENT_CODESIGN_IDENTITY; refusing ad-hoc signing."
     exit 1
 fi
 
