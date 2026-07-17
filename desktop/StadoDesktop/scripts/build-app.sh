@@ -15,8 +15,16 @@ mkdir -p "$MACOS"
 install -m 0644 "$DESKTOP_ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 install -m 0755 "$SWIFT_BIN_DIR/Stado" "$MACOS/Stado"
 
-if command -v codesign >/dev/null 2>&1; then
-    codesign --force --deep --sign - "$APP_BUNDLE"
+CODESIGN_IDENTITY=${WISENT_CODESIGN_IDENTITY:-}
+if [ -z "$CODESIGN_IDENTITY" ]; then
+    CODESIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk -F '"' '/Apple Development:/ { print $2; exit }')
 fi
+if [ -z "$CODESIGN_IDENTITY" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
+    printf '%s\n' "Stable Apple Development signing identity is required; refusing ad-hoc signing." >&2
+    exit 1
+fi
+codesign --force --deep --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
+codesign --verify --strict --deep "$APP_BUNDLE"
 
 printf 'Built %s\n' "$APP_BUNDLE"
