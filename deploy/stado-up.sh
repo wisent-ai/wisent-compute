@@ -12,6 +12,7 @@ LOG_DIR="${HOME}/.stado/logs"
 
 if [ "${2:-}" = "uninstall" ]; then
     launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+    launchctl bootout "user/$(id -u)/${LABEL}" 2>/dev/null || true
     rm -f "$PLIST"
     echo "removed ${LABEL}"
     exit 0
@@ -56,5 +57,14 @@ cat > "$PLIST" <<EOF
 EOF
 
 launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "installed ${LABEL} (logs: ${LOG_DIR})"
+launchctl bootout "user/$(id -u)/${LABEL}" 2>/dev/null || true
+if launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    echo "installed ${LABEL} into gui domain (logs: ${LOG_DIR})"
+else
+    # Headless box reached over SSH: no Aqua domain for this user, so
+    # bootstrap into the per-user domain (persists while any session lives;
+    # ~/Library/LaunchAgents reloads into the gui domain at console login).
+    launchctl bootstrap "user/$(id -u)" "$PLIST"
+    echo "installed ${LABEL} into user domain (headless; logs: ${LOG_DIR})"
+fi
