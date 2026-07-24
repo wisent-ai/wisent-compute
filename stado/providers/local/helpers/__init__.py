@@ -145,15 +145,18 @@ def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
     time; only the named consumer may ever claim it. pinned_only=True
     (registry target flag) reverses the default: this agent then claims
     ONLY jobs explicitly routed to it (pinned_host or assigned_to), so a
-    shared workstation never picks up stray queue backlog.
+    shared workstation never picks up stray queue backlog. Pin matching
+    is case-insensitive: registry hostnames are stored normalized while
+    consumer_id carries the machine's verbatim gethostname() casing.
     """
-    pinned_host = getattr(job, "pinned_host", "") or ""
-    if pinned_host and pinned_host != consumer_id:
+    pinned_host = (getattr(job, "pinned_host", "") or "").lower()
+    cid = consumer_id.lower()
+    if pinned_host and pinned_host != cid:
         return False
     assigned = getattr(job, "assigned_to", "") or ""
     if assigned and consumer_id and assigned != consumer_id:
         return False
-    if pinned_only and pinned_host != consumer_id and assigned != consumer_id:
+    if pinned_only and pinned_host != cid and assigned != consumer_id:
         return False
     if bool(getattr(job, "exclusive", False)) and active_slot_count > 0:
         return False

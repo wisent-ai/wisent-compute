@@ -12,6 +12,12 @@ def _job(**kw):
     return Job(**kw)
 
 
+def test_pinned_host_match_is_case_insensitive():
+    j = _job(pinned_host="local-charless-mac-mini.local")
+    assert _job_eligible(j, "apple-mps", 1,
+                         consumer_id="local-Charless-Mac-mini.local")
+
+
 def test_pinned_host_other_consumer_refused():
     j = _job(pinned_host="local-mac-mini")
     assert not _job_eligible(j, "apple-mps", 1, consumer_id="local-macbook")
