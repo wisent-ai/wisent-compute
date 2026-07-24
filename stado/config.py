@@ -6,10 +6,12 @@ import json
 import re
 import time
 
-PROJECT = os.environ.get("GCP_PROJECT", "wisent-480400")
-BUCKET = os.environ.get("WC_BUCKET", "stado")
-REGION = os.environ.get("GCP_REGION", "us-central1")
-ALERTS_TOPIC = os.environ.get("WC_ALERTS_TOPIC", f"projects/{PROJECT}/topics/stado-alerts")
+from .config_file import resolve as _cfg, resolve_list as _cfg_list
+
+PROJECT = _cfg("GCP_PROJECT", "project", "wisent-480400")
+BUCKET = _cfg("WC_BUCKET", "storage.gcs.bucket", "stado")
+REGION = _cfg("GCP_REGION", "region", "us-central1")
+ALERTS_TOPIC = os.environ.get("WC_ALERTS_TOPIC") or _cfg("", "alerts.topic", f"projects/{PROJECT}/topics/stado-alerts")
 
 # Multi-region dispatch. Every region listed here is queried for live quota
 # AND iterated by the GCP provider when creating instances. Each region
@@ -18,10 +20,10 @@ ALERTS_TOPIC = os.environ.get("WC_ALERTS_TOPIC", f"projects/{PROJECT}/topics/sta
 # 5 regions lifts total parallel-VM ceiling from ~28 to ~140 without any
 # quota-increase request. Override with GCP_REGIONS=us-central1,europe-west4
 # (comma-separated) to narrow the dispatch surface for testing.
-REGIONS = [r.strip() for r in os.environ.get(
-    "GCP_REGIONS",
-    "us-central1,europe-west4,us-east1,us-east4,us-east5",
-).split(",") if r.strip()]
+REGIONS = _cfg_list(
+    "GCP_REGIONS", "regions",
+    ["us-central1", "europe-west4", "us-east1", "us-east4", "us-east5"],
+)
 
 # Zones, ordered by preference. Primary region's zones first (lowest egress
 # from existing infra in us-central1), then alternates. Provider iterates
@@ -123,11 +125,11 @@ COVERAGE_HTTP_RETRY_CAP = 8
 # Dashboard HTTP server bind address + port. Bind to all interfaces so a
 # tailscale serve front-end can reach it; the host is firewalled to the
 # tailnet anyway.
-DASHBOARD_BIND = os.environ.get("WC_DASHBOARD_BIND", "127.0.0.1")
-DASHBOARD_PORT = int(os.environ.get("WC_DASHBOARD_PORT", "8765"))
-DASHBOARD_REFRESH_SECONDS = int(os.environ.get("WC_DASHBOARD_REFRESH_SECONDS", "10"))
+DASHBOARD_BIND = _cfg("WC_DASHBOARD_BIND", "dashboard.bind", "127.0.0.1")
+DASHBOARD_PORT = int(_cfg("WC_DASHBOARD_PORT", "dashboard.port", "8765"))
+DASHBOARD_REFRESH_SECONDS = int(_cfg("WC_DASHBOARD_REFRESH_SECONDS", "dashboard.refresh_seconds", "10"))
 # Capacity blob is "live" if its published_at is within this many seconds.
-DASHBOARD_AGENT_FRESH_SECONDS = int(os.environ.get("WC_DASHBOARD_AGENT_FRESH_SECONDS", "180"))
+DASHBOARD_AGENT_FRESH_SECONDS = int(_cfg("WC_DASHBOARD_AGENT_FRESH_SECONDS", "dashboard.agent_fresh_seconds", "180"))
 
 DEFAULT_IMAGE = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
 DEFAULT_IMAGE_PROJECT = "deeplearning-platform-release"
@@ -139,41 +141,46 @@ DEFAULT_BOOT_DISK_GB = 200
 # wisent-compute install can target multiple subscriptions/resource groups
 # without code changes. The provider does NOT create the vnet/subnet/NSG —
 # it expects pre-provisioned infra named below.
-AZURE_SUBSCRIPTION_ID = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
-AZURE_RESOURCE_GROUP = os.environ.get("AZURE_RESOURCE_GROUP", "wisent-compute")
-AZURE_LOCATIONS = [r.strip() for r in os.environ.get(
-    "AZURE_LOCATIONS",
-    "eastus,westus3,westus2,northeurope",
-).split(",") if r.strip()]
-AZURE_VNET = os.environ.get("AZURE_VNET", "wisent-compute-vnet")
-AZURE_SUBNET = os.environ.get("AZURE_SUBNET", "wisent-compute-subnet")
-AZURE_NSG = os.environ.get("AZURE_NSG", "wisent-compute-nsg")
+AZURE_SUBSCRIPTION_ID = _cfg("AZURE_SUBSCRIPTION_ID", "azure.subscription_id", "")
+AZURE_RESOURCE_GROUP = _cfg("AZURE_RESOURCE_GROUP", "azure.resource_group", "wisent-compute")
+AZURE_LOCATIONS = _cfg_list(
+    "AZURE_LOCATIONS", "azure.locations",
+    ["eastus", "westus3", "westus2", "northeurope"],
+)
+AZURE_VNET = _cfg("AZURE_VNET", "azure.vnet", "wisent-compute-vnet")
+AZURE_SUBNET = _cfg("AZURE_SUBNET", "azure.subnet", "wisent-compute-subnet")
+AZURE_NSG = _cfg("AZURE_NSG", "azure.nsg", "wisent-compute-nsg")
 # microsoft-dsvm:ubuntu-hpc:2204:latest ships with NVIDIA driver + CUDA preinstalled,
 # matching deeplearning-platform-release on GCP. Override via AZURE_IMAGE_URN
 # (publisher:offer:sku:version) for a different base image.
-AZURE_IMAGE_URN = os.environ.get(
-    "AZURE_IMAGE_URN",
+AZURE_IMAGE_URN = _cfg(
+    "AZURE_IMAGE_URN", "azure.image_urn",
     "microsoft-dsvm:ubuntu-hpc:2204:latest",
 )
-AZURE_VM_USERNAME = os.environ.get("AZURE_VM_USERNAME", "wisent")
+AZURE_VM_USERNAME = _cfg("AZURE_VM_USERNAME", "azure.vm_username", "wisent")
 # SSH public key for the cloud-init admin user. Required by Azure VM create
 # even when SSH is locked down via NSG; cloud-init will only accept the VM
 # create call if either ssh keys or password auth is configured.
-AZURE_SSH_PUBLIC_KEY = os.environ.get("AZURE_SSH_PUBLIC_KEY", "")
+AZURE_SSH_PUBLIC_KEY = _cfg("AZURE_SSH_PUBLIC_KEY", "azure.ssh_public_key", "")
 
 # Multi-provider dispatch. Coordinator and Cloud Function tick iterate this
 # list, calling check_running_jobs / reap_dead_agents / schedule_queued_jobs
 # per provider. A provider whose constructor throws (creds missing) is
 # logged and skipped. Default keeps single-cloud GCP behavior.
-WC_PROVIDERS = [p.strip() for p in os.environ.get("WC_PROVIDERS", "gcp").split(",") if p.strip()]
+WC_PROVIDERS = _cfg_list("WC_PROVIDERS", "providers", ["gcp"])
 
-# Storage backend for the queue. "gcs" (default) keeps the existing
-# gs://wisent-compute path; "azure" routes JobStorage at an Azure Blob
-# container. The two are mutually exclusive — a single JobStorage instance
-# binds to exactly one backend, decided at construction time.
-WC_STORAGE_BACKEND = os.environ.get("WC_STORAGE_BACKEND", "gcs")
-WC_AZURE_STORAGE_ACCOUNT = os.environ.get("WC_AZURE_STORAGE_ACCOUNT", "")
-WC_AZURE_CONTAINER = os.environ.get("WC_AZURE_CONTAINER", "wisent-compute")
+# Queue storage backend. "gcs", "azure", and "s3" support shared workers;
+# "local" is a device-local deployment rooted at WC_LOCAL_STORAGE_PATH.
+WC_STORAGE_BACKEND = _cfg("WC_STORAGE_BACKEND", "storage.backend", "gcs")
+WC_AZURE_STORAGE_ACCOUNT = _cfg("WC_AZURE_STORAGE_ACCOUNT", "storage.azure.account", "")
+WC_AZURE_CONTAINER = _cfg("WC_AZURE_CONTAINER", "storage.azure.container", "wisent-compute")
+WC_S3_BUCKET = _cfg("WC_S3_BUCKET", "storage.s3.bucket", "")
+WC_S3_REGION = _cfg("WC_S3_REGION", "storage.s3.region", os.environ.get("AWS_REGION", "us-east-1"))
+WC_LOCAL_STORAGE_PATH = _cfg(
+    "WC_LOCAL_STORAGE_PATH",
+    "storage.local.path",
+    os.path.expanduser("~/.stado/local-storage"),
+)
 
 # Billing-credits collector. Each tick the Cloud Function reads the GCP
 # BigQuery billing export (gross / credits-applied / net + per-credit

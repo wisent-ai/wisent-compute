@@ -41,6 +41,13 @@ def main():
     """Wisent Compute — GPU job queue management."""
 
 
+@main.command("package-root", hidden=True)
+def package_root():
+    """Print the installed package source root for desktop provisioning."""
+    from pathlib import Path
+    click.echo(Path(__file__).resolve().parent.parent)
+
+
 @main.command("disk-cleanup")
 @click.option("--once", is_flag=True, default=False, help="Run one interval-gated cleanup check (default).")
 @click.option("--watch", is_flag=True, default=False, help="Continuously check at the canonical policy interval.")
@@ -518,6 +525,25 @@ def dashboard(bind, port):
     """
     from .dashboard import serve as serve_dashboard
     serve_dashboard(host=bind, port=port)
+
+@main.command("local-control-plane", hidden=True)
+@click.option("--bind", default="127.0.0.1")
+@click.option("--port", type=int, default=8765)
+@click.option("--interval", type=int, default=15)
+def local_control_plane(bind, port, interval):
+    """Run a device-local dashboard, scheduler, and worker."""
+    from .deploy.local_control_plane import run
+    run(host=bind, port=port, interval=interval)
+
+@main.command("cloud-control-plane", hidden=True)
+@click.option("--bind", default="0.0.0.0")
+@click.option("--port", type=int, default=8080)
+@click.option("--interval", type=int, default=30)
+def cloud_control_plane(bind, port, interval):
+    """Run a cloud-hosted coordinator and dashboard."""
+    from .deploy.cloud_control_plane import run
+    run(host=bind, port=port, interval=interval)
+
 
 
 
@@ -998,6 +1024,47 @@ def profiles(name):
             click.echo(f"{n:<24} {desc}")
         except Exception as e:
             click.echo(f"{n:<24} (load error: {e})")
+
+
+@main.command("config")
+@click.argument("sub", default="show")
+def config_cmd(sub):
+    """Inspect stado configuration: show | validate | init."""
+    from pathlib import Path
+    from . import config as cfg_mod
+    from . import config_file
+    if sub == "init":
+        path = Path("~/.stado/config.json").expanduser()
+        if path.exists():
+            raise click.ClickException(f"config file already exists: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config_file.template(), indent=2) + "\n")
+        click.echo(str(path))
+        return
+    if sub == "validate":
+        try:
+            problems = config_file.validate(config_file.load_config_file())
+        except ValueError as e:
+            raise click.ClickException(str(e))
+        if problems:
+            for problem in problems:
+                click.echo(f"ERROR {problem}")
+            raise SystemExit(1)
+        where = config_file.config_path()
+        click.echo("config ok" + (f" ({where})" if where else " (defaults; no config file)"))
+        return
+    if sub == "show":
+        keys = [
+            "PROJECT", "BUCKET", "REGION", "REGIONS", "WC_PROVIDERS",
+            "WC_STORAGE_BACKEND", "WC_LOCAL_STORAGE_PATH",
+            "AZURE_SUBSCRIPTION_ID", "AZURE_RESOURCE_GROUP", "AZURE_LOCATIONS",
+            "DASHBOARD_BIND", "DASHBOARD_PORT",
+        ]
+        resolved = {key.lower(): getattr(cfg_mod, key) for key in keys}
+        where = config_file.config_path()
+        click.echo(json.dumps({"file": str(where) if where else None, "resolved": resolved}, indent=2))
+        return
+    raise click.ClickException(f"unknown config subcommand: {sub} (show|validate|init)")
 
 
 def _artifact_call(function):
@@ -1491,7 +1558,8 @@ def registry_validate(path):
 @click.argument("path", type=click.Path(exists=True, dir_okay=False), required=False)
 def registry_push(path):
     """Upload local registry.json to gs://wisent-compute/registry.json."""
-    import shutil, subprocess
+    from pathlib import Path as _Path
+    from google.cloud import storage as _storage
     from .targets import REGISTRY_PATH, GCS_REGISTRY_URI
     src = path or str(REGISTRY_PATH)
     from .targets.validation import RegistryValidationError, validate_registry_file
@@ -1499,11 +1567,29 @@ def registry_push(path):
         validate_registry_file(src)
     except RegistryValidationError as exc:
         raise click.ClickException(str(exc)) from exc
-    gsutil = shutil.which("gsutil") or "gsutil"
-    r = subprocess.run([gsutil, "cp", src, GCS_REGISTRY_URI], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise click.ClickException(r.stderr or r.stdout or "gsutil cp failed")
-    click.echo(f"pushed {src} -> {GCS_REGISTRY_URI}")
+    _, remainder = GCS_REGISTRY_URI.split("//", 1)
+    bucket_name, blob_name = remainder.split("/", 1)
+    blob = _storage.Client().bucket(bucket_name).blob(blob_name)
+    blob.reload()
+    previous_generation = int(blob.generation) if blob.generation is not None else 0
+    payload = _Path(src).read_bytes()
+    try:
+        blob.upload_from_string(
+            payload,
+            content_type="application/json",
+            if_generation_match=previous_generation,
+        )
+        blob.reload()
+        generation = int(blob.generation)
+        confirmed = blob.download_as_bytes(if_generation_match=generation)
+    except Exception as exc:
+        raise click.ClickException(f"registry upload failed: {exc}") from exc
+    if confirmed != payload:
+        raise click.ClickException("registry upload verification returned different bytes")
+    click.echo(
+        f"pushed {src} -> {GCS_REGISTRY_URI} generation={generation} "
+        f"replaced={previous_generation}"
+    )
 
 
 @registry.command("pull")
@@ -1515,6 +1601,115 @@ def registry_pull():
         raise click.ClickException("could not fetch registry from GCS")
     import json as _json
     click.echo(_json.dumps(data, indent=2))
+
+
+
+@main.group()
+def host():
+    """Manage operating-system resources on registry hosts."""
+
+@host.command("health")
+@click.argument("target")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit the beacon and object metadata as JSON.")
+def host_health(target, as_json):
+    """Show the latest Stado health beacon and log tail for TARGET."""
+    from .monitor.host_health import format_host_health, load_host_health
+    try:
+        report = load_host_health(target)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        import json as _json
+        click.echo(_json.dumps(report, indent=2))
+    else:
+        click.echo(format_host_health(report))
+
+
+@host.command("recover")
+@click.argument("target")
+def host_recover(target):
+    """Recover a registry-managed macOS host through its approved channel."""
+    from .deploy.host_recovery import recover_host
+    try:
+        report = recover_host(target)
+    except (LookupError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(report, indent=2, sort_keys=True))
+    if report.get("status") != "ok":
+        raise click.exceptions.Exit(1)
+
+
+
+@host.group("user")
+def host_user():
+    """Manage local macOS and Linux user accounts."""
+
+
+@host_user.command("create")
+@click.argument("username")
+@click.option("--target", "target_names", multiple=True,
+              help="Registry target name. Repeat to provision several hosts.")
+@click.option("--all", "all_targets", is_flag=True,
+              help="Provision every kind=local registry target with SSH configured.")
+@click.option("--full-name", default=None, help="Account display name.")
+@click.option("--shell", default="", help="Absolute login shell; host OS default if omitted.")
+@click.option("--admin", is_flag=True, help="Create an administrator account instead of a standard user.")
+@click.option("--require-password-change", is_flag=True,
+              help="Require the new user to change the initial password on first login.")
+@click.option("--dry-run", is_flag=True, help="Validate and list targets without connecting.")
+@click.option("--registry-source", type=click.Choice(["gcs", "local", "auto"]),
+              default="gcs", show_default=True)
+def host_user_create(
+    username,
+    target_names,
+    all_targets,
+    full_name,
+    shell,
+    admin,
+    require_password_change,
+    dry_run,
+    registry_source,
+):
+    """Create USERNAME on selected registry-managed hosts over SSH."""
+    from .deploy.host_users import provision_users
+
+    password = None
+    if not dry_run:
+        password = click.prompt(
+            "Initial password",
+            hide_input=True,
+            confirmation_prompt=True,
+        )
+    try:
+        results = provision_users(
+            username=username,
+            password=password,
+            target_names=target_names,
+            all_targets=all_targets,
+            full_name=full_name,
+            shell=shell,
+            admin=admin,
+            require_password_change=require_password_change,
+            dry_run=dry_run,
+            source=registry_source,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    for result in results:
+        if result.status == "failed":
+            click.echo(f"[failed] {result.target} ({result.ssh}): {result.detail}", err=True)
+        elif result.status == "planned":
+            click.echo(f"[plan]   {result.target}: create {username} via {result.ssh}")
+        else:
+            click.echo(
+                f"[{result.status}] {result.target}: {username} "
+                f"on {result.os_name} via {result.ssh}"
+            )
+    failures = [result for result in results if not result.ok]
+    if failures:
+        raise click.exceptions.Exit(1)
 
 
 @main.command()
