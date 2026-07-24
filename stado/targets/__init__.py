@@ -73,6 +73,10 @@ class ComputeTarget:
     # GCP gpu_type whose required VRAM ≤ this value (compatibility-list
     # broadcast). Without it, the agent only advertises gpu_type as-is.
     vram_gb: Optional[int] = None
+    # pinned_only=True: this host's agent claims ONLY jobs explicitly routed
+    # to it (Job.pinned_host or coordinator assigned_to). Keeps shared
+    # workstations from picking up stray queue backlog.
+    pinned_only: bool = False
     extra: dict = field(default_factory=dict)
 
 
@@ -81,6 +85,7 @@ def _from_dict(d: dict) -> ComputeTarget:
         "name", "kind", "gpu_type", "slots", "ssh", "region",
         "spot", "max_concurrent", "team_id", "notes", "hostnames", "weles",
         "disk_cleanup", "env_overrides", "agent_args", "vram_gb",
+        "pinned_only",
     }
     extra = {k: v for k, v in d.items() if k not in known}
     weles_data = d.get("weles")
@@ -127,6 +132,7 @@ def _from_dict(d: dict) -> ComputeTarget:
         env_overrides=dict(d.get("env_overrides") or {}),
         agent_args=list(d.get("agent_args") or []),
         vram_gb=d.get("vram_gb"),
+        pinned_only=bool(d.get("pinned_only", False)),
         extra=extra,
     )
 

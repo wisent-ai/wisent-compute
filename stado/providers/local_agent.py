@@ -324,6 +324,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
     FLEET_FLUSH_INTERVAL = _wc.FLEET_FLUSH_INTERVAL_S
 
     _last_cap = None
+    pinned_only = False  # registry ComputeTarget.pinned_only, refreshed per poll
     disk_low_bytes = _persisted_disk_low_bytes()
     if disk_low_bytes is not None:
         _log("init: loaded validated disk low watermark from janitor state")
@@ -425,6 +426,9 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             if t.vram_gb and int(t.vram_gb) != total_vram_gb:
                 _log(f"Registry vram_gb override {total_vram_gb} -> {t.vram_gb}")
                 total_vram_gb = int(t.vram_gb)
+            pinned_only = bool(t.pinned_only)
+            if pinned_only:
+                agent_diag["pinned_only"] = True
         # Cleanup already ran before upgrade checks. This gate is now strictly
         # admission/diagnostics-only and has no destructive side effects.
         from .local.disk import gate_and_maybe_evict as _disk_gate_pre
@@ -600,7 +604,8 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 continue
             if not _job_eligible(job, gpu_type, total_vram_gb, kind=kind,
                                   consumer_id=consumer_id,
-                                  active_slot_count=len(slots)):
+                                  active_slot_count=len(slots),
+                                  pinned_only=pinned_only):
                 diag_eligibility_rejected += 1
                 continue
             diag_eligible += 1

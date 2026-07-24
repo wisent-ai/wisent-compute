@@ -211,6 +211,10 @@ def assign_jobs(store: JobStorage, log_fn: Optional[Callable[[str], None]] = Non
     skip_by_key: dict[tuple[str, str], int] = {}
     to_write: list[object] = []
     for j in store.list_jobs("queue"):
+        # Operator-pinned jobs (pinned_host set at submit) route outside the
+        # makespan model: never assign them elsewhere, never clear the pin.
+        if getattr(j, "pinned_host", ""):
+            continue
         rt = _estimate_runtime(j, history)
         if rt is None:
             mt = _extract_model_task(getattr(j, "command", "") or "")

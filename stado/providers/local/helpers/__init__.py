@@ -127,7 +127,8 @@ def _compat_accel_types(local_vram_gb: int) -> list[str]:
 
 
 def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
-                   consumer_id: str = "", active_slot_count: int = 0) -> bool:
+                   consumer_id: str = "", active_slot_count: int = 0,
+                   pinned_only: bool = False) -> bool:
     """Local-agent claim rules.
 
     NEW (0.4.100): if job.assigned_to was set by the centralized
@@ -139,9 +140,20 @@ def _job_eligible(job, gpu_type: str, vram_gb: int = 0, kind: str = "local",
     with zero active slots. Caller passes its current slot count via
     active_slot_count so this filter runs at the agent-side claim loop
     without needing the slot dict here.
+
+    NEW (0.4.379): job.pinned_host is an operator hard-pin from submit
+    time; only the named consumer may ever claim it. pinned_only=True
+    (registry target flag) reverses the default: this agent then claims
+    ONLY jobs explicitly routed to it (pinned_host or assigned_to), so a
+    shared workstation never picks up stray queue backlog.
     """
+    pinned_host = getattr(job, "pinned_host", "") or ""
+    if pinned_host and pinned_host != consumer_id:
+        return False
     assigned = getattr(job, "assigned_to", "") or ""
     if assigned and consumer_id and assigned != consumer_id:
+        return False
+    if pinned_only and pinned_host != consumer_id and assigned != consumer_id:
         return False
     if bool(getattr(job, "exclusive", False)) and active_slot_count > 0:
         return False

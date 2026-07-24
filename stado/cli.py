@@ -182,13 +182,18 @@ def _resolve_input_artifacts(values):
               help="Apply a named profile from stado/profiles/ (or "
                    "$WC_PROFILES_DIR). CLI flags override profile fields. "
                    "Run `wcomp profiles` to list available profiles.")
+@click.option("--pinned-host", "pinned_host", default="",
+              help="Hard-pin this job to one consumer: a registry target "
+                   "name (resolved to kind-hostname) or a raw consumer_id. "
+                   "Only that consumer may claim the job; the makespan "
+                   "matcher never reassigns it.")
 def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider, priority,
            repo, repo_workdir, repo_extras,
            gpu_type, vram_gb, machine_type,
            pre_command, apt_packages, output_uri, verify_command,
            exclusive,
            yieldable, yield_command, yield_grace_seconds,
-           input_artifacts, profile_name):
+           input_artifacts, profile_name, pinned_host):
     """Submit a job (or batch) to the queue."""
     if yieldable and not yield_command.strip():
         raise click.ClickException(
@@ -237,6 +242,17 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         provider = merged["provider"]
         any_provider = not merged["pin_to_provider"]
         click.echo(f"Profile '{profile_name}' applied: {prof.get('description', '')[:80]}")
+    if pinned_host:
+        from .targets import lookup as _lookup_target
+        _t = _lookup_target(pinned_host)
+        if _t is not None:
+            if not _t.hostnames:
+                raise click.ClickException(
+                    f"--pinned-host target '{pinned_host}' has no hostnames[] "
+                    "in the registry; cannot derive its consumer_id."
+                )
+            pinned_host = f"{_t.kind}-{_t.hostnames[0]}"
+        click.echo(f"Job pinned to consumer: {pinned_host}")
     commands = []
     if batch_file:
         with open(batch_file) as f:
@@ -256,6 +272,7 @@ def submit(command, provider, batch_file, spot, max_cost_per_hour, any_provider,
         exclusive=exclusive,
         yieldable=yieldable, yield_command=yield_command,
         yield_grace_seconds=yield_grace_seconds,
+        pinned_host=pinned_host,
         input_artifacts=requested_artifacts,
         resolved_input_artifacts=resolved_artifacts,
     )

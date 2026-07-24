@@ -128,6 +128,11 @@ class Job:
     # _assign_jobs_to_agents fills this on every tick. Empty string means
     # unassigned and any-eligible-agent may claim (pre-0.4.100 behavior).
     assigned_to: str = ""
+    # Operator hard-pin to one consumer_id (e.g. "local-mac-mini"). Unlike
+    # assigned_to (coordinator hint, rewritten every tick), pinned_host is
+    # set at submit time and the makespan matcher never touches it: agents
+    # whose consumer_id differs refuse the job, so it waits for its host.
+    pinned_host: str = ""
     # Optional runtime hint (seconds). When > 0 the makespan scheduler
     # uses this directly; otherwise it falls back to historical mean
     # runtime grouped by (model, task), then by model, then global. This

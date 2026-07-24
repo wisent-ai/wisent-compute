@@ -111,6 +111,7 @@ def submit_job(
     yieldable: bool = False,
     yield_command: str = "",
     yield_grace_seconds: int = 120,
+    pinned_host: str = "",
     input_artifacts: dict | None = None,
     resolved_input_artifacts: dict | None = None,
 ) -> Job:
@@ -152,6 +153,7 @@ def submit_job(
         re_submission_of=re_submission_of,
         yieldable=yieldable, yield_command=yield_command,
         yield_grace_seconds=yield_grace_seconds,
+        pinned_host=pinned_host,
         input_artifacts=input_artifacts,
         resolved_input_artifacts=resolved_input_artifacts,
     )
@@ -238,6 +240,7 @@ def _submit_via_gcs(
     yieldable: bool = False,
     yield_command: str = "",
     yield_grace_seconds: int = 120,
+    pinned_host: str = "",
     input_artifacts: dict | None = None,
     resolved_input_artifacts: dict | None = None,
 ) -> Job:
@@ -357,6 +360,7 @@ def _submit_via_gcs(
         yieldable=yieldable,
         yield_command=yield_command,
         yield_grace_seconds=yield_grace_seconds,
+        pinned_host=pinned_host,
         input_artifacts=input_artifacts,
         resolved_input_artifacts=resolved_input_artifacts,
     )
