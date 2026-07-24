@@ -41,6 +41,8 @@ cat > "$PLIST" <<EOF
     <dict>
         <key>GCP_PROJECT</key>
         <string>wisent-480400</string>
+        <key>GOOGLE_CLOUD_PROJECT</key>
+        <string>wisent-480400</string>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
     </dict>

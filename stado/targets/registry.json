@@ -1,0 +1,103 @@
+{
+  "coordinators": [
+    {
+      "active": true,
+      "host": null,
+      "interval_seconds": 180,
+      "name": "gcp-cloud-function",
+      "notes": "Sole coordinator. wisent-compute-tick Cloud Function in us-central1, fired by Cloud Scheduler every 3 minutes. Deployed via deploy/redeploy_function.sh from CI.",
+      "runtime": "gcp_cloud_function",
+      "state_uri": "gs://wisent-compute"
+    }
+  ],
+  "schema_version": 2,
+  "targets": [
+    {
+      "disk_cleanup": {
+        "check_interval_seconds": 300,
+        "cleaners": {
+          "huggingface_cache": {
+            "min_age_seconds": 2592000
+          },
+          "weles_recordings": {
+            "min_age_seconds": 604800
+          }
+        },
+        "low_free_gb": 30,
+        "max_bytes_per_pass": 21474836480,
+        "max_items_per_pass": 5,
+        "max_scan_items": 10000,
+        "mode": "enforce",
+        "target_free_gb": 60
+      },
+      "hostnames": [
+        "charless-mac-mini.local"
+      ],
+      "kind": "local",
+      "name": "charless-mac-mini",
+      "notes": "Primary Weles browser worker; placement is controlled by this policy.",
+      "ssh": "charles@100.120.25.24",
+      "weles": {
+        "actions": [
+          "*"
+        ],
+        "enabled": true
+      },
+      "pinned_only": true
+    },
+    {
+      "disk_cleanup": {
+        "check_interval_seconds": 300,
+        "cleaners": {
+          "huggingface_cache": {
+            "min_age_seconds": 2592000
+          }
+        },
+        "low_free_gb": 8,
+        "max_bytes_per_pass": 21474836480,
+        "max_items_per_pass": 5,
+        "max_scan_items": 10000,
+        "mode": "enforce",
+        "target_free_gb": 12
+      },
+      "gpu_type": "nvidia-rtx-pro-6000",
+      "hostnames": [
+        "ubuntu-server"
+      ],
+      "kind": "local",
+      "name": "ubuntu-server-rtx-pro-6000",
+      "notes": "Operator RTX PRO 6000 workstation. External workloads, including ComfyUI, remain protected by default; local jobs use admission v2 accounting.",
+      "slots": 2,
+      "vram_gb": 95
+    },
+    {
+      "gpu_type": "nvidia-tesla-t4",
+      "kind": "gcp",
+      "max_concurrent": 20,
+      "name": "gcp-spot-t4",
+      "notes": "GCP T4 Spot dispatcher. Drives instance creation via wisent-compute cloud function.",
+      "region": "us-central1",
+      "spot": true
+    },
+    {
+      "name": "lukasz-macbook",
+      "kind": "local",
+      "hostnames": [
+        "lukaszs-macbook-pro-5485.local"
+      ],
+      "gpu_type": "",
+      "slots": 2,
+      "notes": "local MacBook agent for cpu/tui jobs (probierz remote runs)",
+      "disk_cleanup": {
+        "mode": "off",
+        "check_interval_seconds": 300,
+        "low_free_gb": 30,
+        "target_free_gb": 60,
+        "max_bytes_per_pass": 53687091200,
+        "max_items_per_pass": 50,
+        "max_scan_items": 10000,
+        "cleaners": {}
+      }
+    }
+  ]
+}
