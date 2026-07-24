@@ -1879,3 +1879,7 @@ def vast_auto_list(idle_window_s, poll_interval_s, price_gpu, max_duration_s, dr
         )
     except VastConfigError as e:
         raise click.ClickException(str(e))
+
+
+if __name__ == "__main__":
+    main()

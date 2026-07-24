@@ -29,8 +29,8 @@ cat > "$PLIST" <<EOF
     <key>ProgramArguments</key>
     <array>
         <string>${PYTHON}</string>
-        <string>-c</string>
-        <string>from stado.cli import main; main()</string>
+        <string>-m</string>
+        <string>stado.cli</string>
         <string>agent</string>
         <string>--target</string>
         <string>${TARGET}</string>

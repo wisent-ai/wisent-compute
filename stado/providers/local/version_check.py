@@ -218,5 +218,13 @@ def pip_upgrade_and_exec(log_fn) -> None:
            f"stderr_tail={(res.stderr or '')[-300:]}")
     if res.returncode != 0:
         raise RuntimeError(f"pip upgrade failed: rc={res.returncode}")
-    log_fn(f"pip_upgrade_and_exec: pip install ok; re-execing {sys.argv}")
-    os.execv(sys.executable, [sys.executable, *sys.argv])
+    argv = sys.argv
+    if argv and (argv[0] == "-c" or argv[0].endswith(".py")):
+        # `-c` launches can't be re-exec'd verbatim: the code string is not
+        # in sys.argv (argv[0] is literally "-c"), so the interpreter would
+        # run the first agent arg as code. `-m`/script launches put the
+        # module file in argv[0], which breaks package-relative imports when
+        # executed as a script. Normalize both to the `-m stado.cli` form.
+        argv = ["-m", "stado.cli", *argv[1:]]
+    log_fn(f"pip_upgrade_and_exec: pip install ok; re-execing {argv}")
+    os.execv(sys.executable, [sys.executable, *argv])
