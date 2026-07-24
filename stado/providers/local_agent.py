@@ -598,9 +598,11 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
                 continue
             # Also retain the slot-declared projection as a backstop for
             # cases where nvidia-smi temporarily under-reports a starting
-            # child process.
+            # child process. Only meaningful when the job actually needs
+            # VRAM: on sub-buffer hosts total-buffer goes negative, which
+            # would otherwise reject even need==0 (CPU-only) jobs.
             projected_used = sum(_slot_vram(s) for s in slots) + need
-            if projected_used > total_vram_gb - _vram_safety_buffer_gb(total_vram_gb):
+            if need > 0 and projected_used > total_vram_gb - _vram_safety_buffer_gb(total_vram_gb):
                 diag_vram_rejected += 1
                 agent_diag["last_buffer_reject_job_id"] = job.job_id
                 agent_diag["last_buffer_reject_at"] = datetime.now(timezone.utc).isoformat()
