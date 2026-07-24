@@ -25,6 +25,7 @@ stado profiles [name]          # list submit profiles, or print one profile's JS
 stado schedule list            # list recurring (cron) schedules
 stado schedule show <id>       # one schedule's full JSON
 stado registry pull            # print the GCS compute-target registry
+stado host health <target>     # latest host beacon, unit states, disk, log tail, object metadata
 stado vast status              # Vast.ai's view of our machine
 ```
 
@@ -67,6 +68,7 @@ Exposed tools — the complete read-only allow-list:
 - `stado_schedule_list` — all cron schedules.
 - `stado_schedule_show` — one schedule's JSON; requires `schedule_id`.
 - `stado_registry_pull` — the hosted compute-target registry.
+- `stado_host_health` — latest registry-host beacon, unit states, disk, log tail, and immutable object metadata; requires `target`.
 - `stado_vast_status` — Vast.ai's view of our machine.
 
 ### Why the MCP surface is read-only

@@ -154,9 +154,12 @@ def _load_from_gcs() -> dict | None:
         bucket_name, blob_name = rest.split("/", 1)
         client = _gcs.Client()
         blob = client.bucket(bucket_name).blob(blob_name)
-        if not blob.exists():
+        blob.reload()
+        if blob.generation is None:
             return None
-        data = json.loads(blob.download_as_text())
+        data = json.loads(
+            blob.download_as_text(if_generation_match=int(blob.generation))
+        )
         _GCS_CACHE["ts"] = now
         _GCS_CACHE["data"] = data
         return data

@@ -138,6 +138,13 @@ Run the scheduling tick locally instead of as the Cloud Function.
 Useful for development and for redundancy if the Cloud Function is
 unavailable.
 
+## `stado host`
+
+| Subcommand | Behavior |
+|---|---|
+| `stado host health <target>` | Print the latest registry-managed host beacon, disk state, service states, log tail, and backing-object timestamp/generation. |
+| `stado host health <target> --json` | Emit the same read-only report as JSON for automation and MCP. |
+
 ## `wc registry`
 
 | Subcommand | Behavior |

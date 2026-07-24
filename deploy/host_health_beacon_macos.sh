@@ -60,7 +60,7 @@ disk_pct="${disk_pct_str%%%}"
 disk_avail_gb=$(( ${disk_avail_kb:-0} / 1024 / 1024 ))
 
 # LaunchAgent labels we expect on the mac mini.
-LABELS="${WC_HEALTH_UNITS:-com.wisent.compute.coordinator com.wisent.compute.auto-deployer com.wisent.compute.dashboard com.wisent.hf-refresh}"
+LABELS="${WC_HEALTH_UNITS:-com.wisent.compute.auto-deployer com.wisent.compute.dashboard com.wisent.hf-refresh com.wisent.weles-auto-deploy com.wisent.weles-worker com.wisent.weles-keyword-planner-api}"
 GUI_DOMAIN="gui/$(/usr/bin/id -u)"
 
 units_json=""

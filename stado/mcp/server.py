@@ -70,6 +70,10 @@ _REGISTRY = [
     {"name": "stado_registry_pull", "cli": ["registry", "pull"],
      "desc": "Print the GCS-hosted compute-target registry as JSON (read-only).",
      "arg": None},
+    {"name": "stado_host_health", "cli": ["host", "health", "--json"],
+     "desc": "Return a registry-managed host's latest health beacon, log tail, and immutable object metadata as JSON (read-only).",
+     "arg": {"name": "target", "required": True,
+             "desc": "Registry target name or declared hostname."}},
     {"name": "stado_artifact_list", "cli": ["artifact", "list", "--json"],
      "desc": "List immutable artifact versions and metadata as JSON (read-only).",
      "arg": {"name": "type", "required": False,
@@ -121,10 +125,9 @@ def _stado_argv() -> list:
     """Resolve how to invoke the stado CLI, most-portable first.
 
     Order: the `stado` console script on PATH; then a `stado` next to the
-    running interpreter; then the module invocation `python -m stado.cli`. The
-    console script is exactly `stado.cli:main` (the read-only-safe single source
-    of truth) and is preferred because the module form would need a `__main__`
-    guard that stado.cli intentionally does not carry.
+    running interpreter; then the package launcher `python -m stado`. Every
+    path resolves to `stado.cli:main`, the read-only-safe single source of
+    truth.
     """
     on_path = shutil.which("stado")
     if on_path:
@@ -132,7 +135,7 @@ def _stado_argv() -> list:
     sibling = os.path.join(os.path.dirname(sys.executable), "stado")
     if os.path.exists(sibling):
         return [sibling]
-    return [sys.executable, "-m", "stado.cli"]
+    return [sys.executable, "-m", "stado"]
 
 
 def _run(cli_tokens: list, extra: list) -> str:
