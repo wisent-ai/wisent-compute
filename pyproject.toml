@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stado"
-version = "0.4.385"
+version = "0.4.386"
 description = "Job queue and compute management for Wisent GPU workloads"
 requires-python = ">=3.10"
 dependencies = [
@@ -49,6 +49,7 @@ dev = ["functions-framework>=3.0.0"]
 
 [project.scripts]
 stado = "stado.cli:main"
+wc = "stado.cli:main"
 stado-coverage = "stado.coverage.cli:main"
 stado-fix = "stado.failure_fixer.cli:main"
 stado-watchdog = "stado.deploy.watchdog.cli:main"
