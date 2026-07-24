@@ -23,7 +23,7 @@
             "min_age_seconds": 604800
           }
         },
-        "low_free_gb": 30,
+        "low_free_gb": 2,
         "max_bytes_per_pass": 21474836480,
         "max_items_per_pass": 5,
         "max_scan_items": 10000,
