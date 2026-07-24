@@ -474,6 +474,11 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             time.sleep(POLL_INTERVAL)
             continue
         if free_vram_gb < vram_buffer_gb:
+            # VRAM-tight host (apple-mps reports ~1GB): broadcast zero VRAM
+            # capacity so the coordinator routes no VRAM work here, but keep
+            # scanning the queue — jobs with need==0 (CPU-only: probierz
+            # runs, smoke checks) stay claimable. The per-job VRAM checks
+            # below still reject anything needing VRAM we don't have.
             agent_diag["vram_buffer_gb"] = vram_buffer_gb
             agent_diag["vram_buffer_free_gb"] = free_vram_gb
             publish_capacity(store, consumer_id, kind, {},
@@ -482,9 +487,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             _last_cap = {"free_slots": {}, "free_vram_gb": 0,
                          "total_vram_gb": total_vram_gb,
                          "diag": dict(agent_diag)}
-            time.sleep(POLL_INTERVAL)
-            continue
-        if free_vram_gb > 0 and not slots:
+        if free_vram_gb > 0 and not slots and gpu_type.startswith("nvidia"):
             cuda_ok, cuda_detail = _cuda_child_available()
             agent_diag["cuda_child_ok"] = cuda_ok
             agent_diag["cuda_child_detail"] = cuda_detail
@@ -519,7 +522,7 @@ def run_agent(gpu_type: str = "", idle_shutdown: bool = False, kind: str = "loca
             for s in slots
         )
         slot_cap_reached = hard_slot_cap > 0 and len(slots) >= hard_slot_cap
-        if free_vram_gb <= 0 or (slot_cap_reached and not all_active_share_gpu):
+        if slot_cap_reached and not all_active_share_gpu:
             time.sleep(10)
             continue
         # RAM gate: refuse new slots when MemAvailable drops below the
